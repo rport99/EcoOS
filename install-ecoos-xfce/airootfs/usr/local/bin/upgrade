@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+#set -e
+echo "##########################################"
+echo "       System Settings Update Tool.       "
+echo "##########################################"
+sleep 5
+read -r -p "New System Settings Update Detected, Update Now ? [y/N] " response
+response=${response,,}
+if [[ "$response" =~ ^(yes|y)$ ]]; then
+    echo "Applying Updated Configs"
+    sudo pacman -R --noconfirm plasma-workspace-wallpapers
+    sudo pacman -Syyu --noconfirm --needed mkinitcpio-firmware kde-wallpapers kalendar kcalc pamac-tray-icon-plasma
+    rm $HOME/.local/share/kservices5/ServiceMenus/sysconfig.desktop
+    cp -Rf /etc/skel/.config/yay $HOME/.config/
+    sed -i "s/pamac-tray/pamac-tray-plasma/g" ~/.config/autostart/Update-Tray.desktop
+    sudo rm /usr/local/bin/upgrade
+    sudo mv /usr/local/bin/noupgrade /usr/local/bin/upgrade
+    echo "All Done ! Enjoy ;)"
+    sleep 5
+    #reboot
+else
+    echo "OK, then. Skipping System upgrade."
+    exit
+fi

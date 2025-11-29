@@ -1,0 +1,1383 @@
+#!/usr/bin/env python3
+# eco_terminal.py - Modern Terminal Emulator with Tokyo Night Theme
+import gi
+import os
+import json
+import sys
+import subprocess
+import re
+import signal
+import threading
+import time
+gi.require_version('Gtk', '3.0')
+gi.require_version('Vte', '2.91')
+from gi.repository import Gtk, Gdk, Vte, GLib, Pango, Gio
+
+# --- Configuration ---
+CONFIG_DIR = os.path.expanduser("~/.config/eco_terminal")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+
+# Default settings loaded if no config file exists
+DEFAULT_SETTINGS = {
+    'font_family': 'JetBrains Mono Nerd Font',
+    'font_size': 12,
+    'theme': 'Tokyo Night',
+    'opacity': 0.95,
+    'shell': os.environ.get('SHELL', '/bin/bash'),
+    'cursor_shape': 'block',
+    'cursor_blink': True,
+    'scrollback_lines': 10000,
+    'copy_on_select': False,
+    'window_width': 1200,
+    'window_height': 700,
+    'show_header_bar': True,
+    'bold_is_bright': True,
+    'enable_hyperlink': True
+}
+
+# --- Color Themes ---
+THEMES = {
+    'Tokyo Night': {
+        'bg': '#1a1b26',
+        'fg': '#c0caf5',
+        'palette': [
+            '#15161E', '#f7768e', '#9ece6a', '#e0af68',
+            '#7aa2f7', '#bb9af7', '#7dcfff', '#a9b1d6',
+            '#414868', '#f7768e', '#9ece6a', '#e0af68',
+            '#7aa2f7', '#bb9af7', '#7dcfff', '#c0caf5'
+        ]
+    },
+    'Dark': {
+        'bg': '#1e1e2e',
+        'fg': '#cdd6f4',
+        'palette': [
+            '#45475a', '#f38ba8', '#a6e3a1', '#f9e2af',
+            '#89b4fa', '#f5c2e7', '#94e2d5', '#bac2de',
+            '#585b70', '#eba0ac', '#94e2d5', '#f2cdcd',
+            '#89b4fa', '#cba6f7', '#89dceb', '#a6adc8'
+        ]
+    },
+    'Light': {
+        'bg': '#eff1f5',
+        'fg': '#4c4f69',
+        'palette': [
+            '#5c5f77', '#d20f39', '#40a02b', '#df8e1d',
+            '#1e66f5', '#ea76cb', '#179299', '#6c6f85',
+            '#8c8fa1', '#e64553', '#40a02b', '#df8e1d',
+            '#1e66f5', '#ea76cb', '#179299', '#7c7f93'
+        ]
+    },
+    'Nord': {
+        'bg': '#2e3440',
+        'fg': '#d8dee9',
+        'palette': [
+            '#3b4252', '#bf616a', '#a3be8c', '#ebcb8b',
+            '#5e81ac', '#b48ead', '#88c0d0', '#e5e9f0',
+            '#4c566a', '#bf616a', '#a3be8c', '#ebcb8b',
+            '#5e81ac', '#b48ead', '#8fbcbb', '#d8dee9'
+        ]
+    },
+    'Gruvbox': {
+        'bg': '#282828',
+        'fg': '#ebdbb2',
+        'palette': [
+            '#665c54', '#cc241d', '#98971a', '#d79921',
+            '#458588', '#b16286', '#689d6a', '#a89984',
+            '#928374', '#fb4934', '#b8bb26', '#fabd2f',
+            '#83a598', '#d3869b', '#8ec07c', '#ebdbb2'
+        ]
+    },
+    'Cyberpunk': {
+        'bg': '#0a0a0f',
+        'fg': '#00ff9f',
+        'palette': [
+            '#000000', '#ff0040', '#00ff40', '#ffff00',
+            '#0080ff', '#ff00ff', '#00ffff', '#ffffff',
+            '#404040', '#ff4080', '#40ff80', '#ffff80',
+            '#80c0ff', '#ff80ff', '#80ffff', '#ffffff'
+        ]
+    },
+    'Synthwave': {
+        'bg': '#2b213a',
+        'fg': '#f4eee4',
+        'palette': [
+            '#1c1427', '#ff4e8b', '#3bf4d1', '#f9a875',
+            '#72f1b8', '#ff7edb', '#6ce2ff', '#f4eee4',
+            '#554971', '#ff4e8b', '#3bf4d1', '#f9a875',
+            '#72f1b8', '#ff7edb', '#6ce2ff', '#f4eee4'
+        ]
+    },
+    'Matrix': {
+        'bg': '#001100',
+        'fg': '#00ff00',
+        'palette': [
+            '#002200', '#ff0000', '#00ff00', '#ffff00',
+            '#0000ff', '#ff00ff', '#00ffff', '#ffffff',
+            '#004400', '#ff4444', '#44ff44', '#ffff44',
+            '#4444ff', '#ff44ff', '#44ffff', '#ffffff'
+        ]
+    }
+}
+
+# --- Signal Handler ---
+class SignalHandler:
+    def __init__(self):
+        self.original_sigint = signal.getsignal(signal.SIGINT)
+        self.shutting_down = False
+        
+    def setup_signals(self):
+        """Set up signal handlers for graceful shutdown"""
+        signal.signal(signal.SIGINT, self.signal_handler)
+        signal.signal(signal.SIGTERM, self.signal_handler)
+        
+    def signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully"""
+        if self.shutting_down:
+            return
+            
+        self.shutting_down = True
+        print(f"\nReceived signal {signum}, shutting down gracefully...")
+        
+        # Use GLib to safely shutdown from main thread
+        GLib.idle_add(self.cleanup_and_exit)
+        
+    def cleanup_and_exit(self):
+        """Clean up and exit the application"""
+        Gtk.main_quit()
+        sys.exit(0)
+
+# --- Settings Manager ---
+class SettingsManager:
+    def __init__(self):
+        self.settings = DEFAULT_SETTINGS.copy()
+        self.load_settings()
+
+    def load_settings(self):
+        """Loads settings from the config file, updating defaults if necessary."""
+        try:
+            if os.path.exists(CONFIG_FILE):
+                with open(CONFIG_FILE, 'r') as f:
+                    saved = json.load(f)
+                    # Only update existing keys to preserve new defaults
+                    for key, value in saved.items():
+                        if key in self.settings:
+                            self.settings[key] = value
+        except Exception as e:
+            print(f"Error loading settings: {e}")
+
+    def save_settings(self):
+        """Saves current settings to the config file."""
+        try:
+            os.makedirs(CONFIG_DIR, exist_ok=True)
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(self.settings, f, indent=2)
+        except Exception as e:
+            print(f"Error saving settings: {e}")
+
+    def get(self, key, default=None):
+        """Gets a setting value."""
+        return self.settings.get(key, default)
+
+    def set(self, key, value):
+        """Sets a setting value."""
+        self.settings[key] = value
+
+# --- CSS Provider ---
+class CSSProvider:
+    @staticmethod
+    def setup_css():
+        """Applies the custom CSS styling to the application."""
+        css = """
+        window {
+            background: #1a1b26;
+            border-radius: 12px;
+        }
+        /* HEADER BAR */
+        headerbar {
+            background: rgba(26, 27, 38, 0.98);
+            border: none;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+            min-height: 28px;
+            padding: 2px 8px;
+            border-radius: 12px 12px 0 0;
+            margin: 0;
+            border-bottom: 1px solid #7aa2f7;
+        }
+        headerbar .title {
+            font-weight: 700;
+            font-size: 12px;
+            padding: 0 4px;
+            color: #c0caf5;
+        }
+        /* Compact buttons */
+        headerbar button {
+            min-height: 22px;
+            min-width: 22px;
+            padding: 2px 4px;
+            margin: 0 1px;
+            background: transparent;
+            border: none;
+            border-radius: 4px;
+            box-shadow: none;
+            color: #c0caf5;
+        }
+        headerbar button:hover {
+            background: rgba(122, 162, 247, 0.15);
+        }
+        headerbar button:active {
+            background: rgba(122, 162, 247, 0.25);
+        }
+        .terminal-container {
+            background: #1a1b26;
+            border-radius: 0 0 12px 12px;
+            padding: 0;
+            margin: 0;
+        }
+        .terminal-container.focused {
+            box-shadow: inset 0 0 0 2px rgba(122, 162, 247, 0.5);
+        }
+        button {
+            background: rgba(122, 162, 247, 0.2);
+            border: 1px solid rgba(122, 162, 247, 0.4);
+            border-radius: 8px;
+            color: #c0caf5;
+            padding: 8px 16px;
+            transition: all 200ms ease;
+            font-weight: 600;
+        }
+        button:hover {
+            background: rgba(122, 162, 247, 0.3);
+            border-color: rgba(122, 162, 247, 0.6);
+            box-shadow: 0 4px 12px rgba(122, 162, 247, 0.3);
+        }
+        button:active {
+            background: rgba(122, 162, 247, 0.4);
+        }
+        menu {
+            background: rgba(26, 27, 38, 0.98);
+            border: 1px solid rgba(122, 162, 247, 0.3);
+            border-radius: 12px;
+            padding: 8px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+        }
+        menuitem {
+            padding: 8px 16px;
+            border-radius: 6px;
+            color: #c0caf5;
+            transition: all 150ms ease;
+        }
+        menuitem:hover {
+            background: rgba(122, 162, 247, 0.2);
+        }
+        .settings-dialog {
+            background: #1a1b26;
+            border-radius: 16px;
+            padding: 20px;
+            border: 1px solid #7aa2f7;
+        }
+        .settings-group {
+            background: rgba(65, 72, 104, 0.4);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+            border: 1px solid rgba(122, 162, 247, 0.2);
+        }
+        .settings-group label {
+            color: #c0caf5;
+            font-weight: 700;
+            margin-bottom: 12px;
+            font-size: 14px;
+        }
+        entry, spinbutton, combobox {
+            background: rgba(65, 72, 104, 0.6);
+            border: 2px solid rgba(122, 162, 247, 0.3);
+            border-radius: 8px;
+            color: #c0caf5;
+            padding: 8px 12px;
+            font-size: 13px;
+        }
+        entry:focus, spinbutton:focus, combobox:focus {
+            border-color: #7aa2f7;
+            box-shadow: 0 0 0 3px rgba(122, 162, 247, 0.2);
+            background: rgba(65, 72, 104, 0.8);
+        }
+        checkbutton {
+            color: #c0caf5;
+            font-weight: 600;
+        }
+        checkbutton check {
+            background: rgba(65, 72, 104, 0.6);
+            border: 2px solid rgba(122, 162, 247, 0.4);
+            border-radius: 6px;
+            min-width: 20px;
+            min-height: 20px;
+        }
+        checkbutton:checked check {
+            background: #7aa2f7;
+            border-color: #7aa2f7;
+        }
+        scale {
+            margin: 12px 0;
+        }
+        scale trough {
+            background: rgba(65, 72, 104, 0.6);
+            border-radius: 6px;
+            min-height: 8px;
+        }
+        scale trough highlight {
+            background: #7aa2f7;
+            border-radius: 6px;
+        }
+        scale slider {
+            background: #7aa2f7;
+            border: 3px solid #1a1b26;
+            border-radius: 50%;
+            min-width: 20px;
+            min-height: 20px;
+            margin: -8px;
+            box-shadow: 0 2px 8px rgba(122, 162, 247, 0.4);
+        }
+        notebook {
+            background: transparent;
+        }
+        notebook header {
+            background: transparent;
+            border: none;
+        }
+        notebook tab {
+            background: rgba(65, 72, 104, 0.4);
+            border: 1px solid rgba(122, 162, 247, 0.2);
+            border-radius: 8px 8px 0 0;
+            padding: 8px 16px;
+            margin: 0 2px;
+            color: #c0caf5;
+            font-weight: 600;
+        }
+        notebook tab:checked {
+            background: rgba(122, 162, 247, 0.3);
+            border-color: rgba(122, 162, 247, 0.5);
+        }
+        .dim-label {
+            opacity: 0.7;
+            color: #a9b1d6;
+        }
+        label {
+            color: #c0caf5;
+        }
+        """
+        provider = Gtk.CssProvider()
+        provider.load_from_data(css.encode())
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(),
+            provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+# --- Main Terminal Widget ---
+class Terminal(Gtk.Box):
+    def __init__(self, settings_manager, window, working_dir=None):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL)
+        self.settings = settings_manager
+        self.window = window
+        self.font_size = settings_manager.get('font_size')
+        self.child_pid = None
+        self.is_alive = True
+
+        # Determine working directory - FIXED: Use provided directory
+        if working_dir and os.path.isdir(working_dir):
+            self.working_dir = working_dir
+        else:
+            self.working_dir = os.getcwd()
+            if not os.path.exists(self.working_dir):
+                self.working_dir = os.environ.get('HOME', '/')
+
+        print(f"Terminal starting in: {self.working_dir}")  # Debug
+
+        # Create VTE terminal widget
+        self.terminal = Vte.Terminal()
+        self.terminal.set_scrollback_lines(settings_manager.get('scrollback_lines'))
+        self.terminal.set_mouse_autohide(True)
+        self.terminal.set_allow_bold(True)
+        self.terminal.set_allow_hyperlink(True)
+        self.terminal.set_scroll_on_keystroke(True)
+        self.terminal.set_scroll_on_output(False)
+        self.terminal.set_rewrap_on_resize(True)
+        self.terminal.set_word_char_exceptions("-./?%&_=+@~")
+
+        # Apply initial settings
+        self.apply_settings()
+
+        # Connect signals
+        self.terminal.connect("child-exited", self._on_child_exited)
+        self.terminal.connect("button-press-event", self._on_button_press)
+        self.terminal.connect("key-press-event", self._on_key_press)
+        self.terminal.connect("focus-in-event", self._on_focus_in)
+        self.terminal.connect("focus-out-event", self._on_focus_out)
+        self.terminal.connect("selection-changed", self._on_selection_changed)
+
+        # Add terminal to this box
+        self.pack_start(self.terminal, True, True, 0)
+        self.get_style_context().add_class("terminal-container")
+
+        # Spawn the shell process
+        self.spawn_shell()
+
+        # Focus the terminal after the GUI is built
+        GLib.idle_add(self.terminal.grab_focus)
+
+    def spawn_shell(self):
+        """Spawns the shell process inside the terminal."""
+        shell = self.settings.get('shell')
+        try:
+            # Prepare environment variables
+            env = os.environ.copy()
+            env['PWD'] = self.working_dir
+            env['TERM'] = 'xterm-256color'
+            env['COLORTERM'] = 'truecolor'
+            env_list = [f"{k}={v}" for k, v in env.items()]
+
+            # Use proper shell invocation for better signal handling
+            if shell.endswith('bash'):
+                shell_args = [shell, '--login', '-i']
+            elif shell.endswith('zsh'):
+                shell_args = [shell, '-i']
+            else:
+                shell_args = [shell]
+
+            print(f"Spawning shell in: {self.working_dir}")  # Debug
+            pid = self.terminal.spawn_sync(
+                Vte.PtyFlags.DEFAULT,
+                self.working_dir,  # This is the key - use the working directory
+                shell_args,
+                env_list,
+                GLib.SpawnFlags.SEARCH_PATH | GLib.SpawnFlags.DO_NOT_REAP_CHILD,
+                None,
+                None
+            )
+            self.child_pid = pid
+            self.is_alive = True
+        except Exception as e:
+            print(f"Failed to spawn shell {shell}: {e}")
+            # Fallback to basic shell
+            try:
+                pid = self.terminal.spawn_sync(
+                    Vte.PtyFlags.DEFAULT,
+                    self.working_dir,
+                    ['/bin/bash', '-i'],
+                    None,
+                    GLib.SpawnFlags.SEARCH_PATH | GLib.SpawnFlags.DO_NOT_REAP_CHILD,
+                    None,
+                    None
+                )
+                self.child_pid = pid
+                self.is_alive = True
+            except Exception as e2:
+                print(f"Failed to spawn fallback shell: {e2}")
+                self.is_alive = False
+
+    def send_signal(self, sig):
+        """Send signal to the child process."""
+        if self.child_pid and self.is_alive:
+            try:
+                os.kill(self.child_pid, sig)
+                return True
+            except ProcessLookupError:
+                self.is_alive = False
+            except Exception as e:
+                print(f"Error sending signal {sig}: {e}")
+        return False
+
+    def apply_settings(self):
+        """Applies all current settings to the terminal widget."""
+        self.apply_font()
+        self.apply_theme()
+        cursor_shape = self.settings.get('cursor_shape')
+        if cursor_shape == 'block':
+            self.terminal.set_cursor_shape(Vte.CursorShape.BLOCK)
+        elif cursor_shape == 'ibeam':
+            self.terminal.set_cursor_shape(Vte.CursorShape.IBEAM)
+        elif cursor_shape == 'underline':
+            self.terminal.set_cursor_shape(Vte.CursorShape.UNDERLINE)
+        self.terminal.set_cursor_blink_mode(
+            Vte.CursorBlinkMode.ON if self.settings.get('cursor_blink') else Vte.CursorBlinkMode.OFF
+        )
+        self.terminal.set_scrollback_lines(self.settings.get('scrollback_lines'))
+        self.terminal.set_bold_is_bright(self.settings.get('bold_is_bright', True))
+        self.terminal.set_allow_hyperlink(self.settings.get('enable_hyperlink', True))
+
+    def apply_font(self):
+        """Applies the configured font family and size."""
+        font_family = self.settings.get('font_family')
+        font_size = self.font_size
+        if not font_family or font_family.strip() in ['', 'none', 'None', 'null']:
+            font_family = 'JetBrains Mono Nerd Font'
+        font_family = font_family.split(',')[0].strip()
+        try:
+            font_desc = Pango.FontDescription()
+            font_desc.set_family(font_family)
+            font_desc.set_size(font_size * Pango.SCALE)
+            self.terminal.set_font_full(font_desc, False)
+        except Exception as e:
+            print(f"Failed to apply font: {e}")
+            try:
+                fallback = Pango.FontDescription()
+                fallback.set_family("JetBrains Mono Nerd Font")
+                fallback.set_size(font_size * Pango.SCALE)
+                self.terminal.set_font(fallback)
+            except Exception as e2:
+                print(f"Failed to apply fallback font: {e2}")
+
+    def apply_theme(self):
+        """Applies the configured color theme."""
+        theme_name = self.settings.get('theme')
+        theme = THEMES.get(theme_name, THEMES['Tokyo Night'])
+        bg = Gdk.RGBA()
+        bg.parse(theme['bg'])
+        fg = Gdk.RGBA()
+        fg.parse(theme['fg'])
+        palette = []
+        for color in theme['palette']:
+            rgba = Gdk.RGBA()
+            rgba.parse(color)
+            palette.append(rgba)
+        self.terminal.set_colors(fg, bg, palette)
+
+    def increase_font_size(self):
+        """Increases the font size of this terminal instance."""
+        if self.font_size < 30:
+            self.font_size += 1
+            self.apply_font()
+
+    def decrease_font_size(self):
+        """Decreases the font size of this terminal instance."""
+        if self.font_size > 6:
+            self.font_size -= 1
+            self.apply_font()
+
+    def reset_font_size(self):
+        """Resets the font size of this terminal instance to the saved default."""
+        self.font_size = self.settings.get('font_size')
+        self.apply_font()
+
+    def _on_child_exited(self, terminal, status):
+        """Handles the event when the child shell process exits."""
+        self.is_alive = False
+        # Only restart if the window is still alive
+        if self.window and hasattr(self.window, 'terminals') and self in self.window.terminals:
+            GLib.timeout_add(100, self.spawn_shell)
+
+    def _on_button_press(self, terminal, event):
+        """Handles mouse button presses on the terminal."""
+        if event.button == 3: # Right-click
+            self.show_context_menu(event)
+            return True
+        return False
+
+    def _on_key_press(self, widget, event):
+        """Handles key press events for the terminal."""
+        modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
+
+        # Enhanced keyboard shortcuts for copy/paste/cut
+        if modifiers == Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK:
+            if event.keyval == Gdk.KEY_C:
+                if self.terminal.get_has_selection():
+                    self.terminal.copy_clipboard()
+                return True
+            elif event.keyval == Gdk.KEY_V:
+                self.terminal.paste_clipboard()
+                return True
+            elif event.keyval == Gdk.KEY_X:
+                if self.terminal.get_has_selection():
+                    self.terminal.copy_clipboard()
+                    # Clear selection (simulate cut)
+                    self.terminal.copy_primary()
+                return True
+            elif event.keyval == Gdk.KEY_A:
+                self.terminal.select_all()
+                return True
+        elif modifiers == Gdk.ModifierType.CONTROL_MASK:
+            if event.keyval in [Gdk.KEY_plus, Gdk.KEY_equal, Gdk.KEY_KP_Add]:
+                self.increase_font_size()
+                return True
+            elif event.keyval in [Gdk.KEY_minus, Gdk.KEY_KP_Subtract]:
+                self.decrease_font_size()
+                return True
+            elif event.keyval == Gdk.KEY_0:
+                self.reset_font_size()
+                return True
+            elif event.keyval == Gdk.KEY_c:
+                # IMPORTANT: This is the fix for Ctrl+C
+                # Only send SIGINT if there's no selection, otherwise copy
+                if self.terminal.get_has_selection():
+                    self.terminal.copy_clipboard()
+                else:
+                    self.send_signal(signal.SIGINT)
+                return True
+            elif event.keyval == Gdk.KEY_v:
+                self.terminal.paste_clipboard()
+                return True
+            elif event.keyval == Gdk.KEY_a:
+                # Select all
+                self.terminal.select_all()
+                return True
+            elif event.keyval == Gdk.KEY_d:
+                # Ctrl+D for EOF
+                self.send_signal(signal.SIGQUIT)
+                return True
+            elif event.keyval == Gdk.KEY_z:
+                # Ctrl+Z for suspend
+                self.send_signal(signal.SIGTSTP)
+                return True
+        return False
+
+    def _on_focus_in(self, widget, event):
+        """Adds a visual class when the terminal gains focus."""
+        self.get_style_context().add_class("focused")
+        return False
+
+    def _on_focus_out(self, widget, event):
+        """Removes the visual class when the terminal loses focus."""
+        self.get_style_context().remove_class("focused")
+        return False
+
+    def _on_selection_changed(self, terminal):
+        """Copies selected text to clipboard if copy_on_select is enabled."""
+        if self.settings.get('copy_on_select', False):
+            if terminal.get_has_selection():
+                terminal.copy_clipboard()
+
+    def show_context_menu(self, event):
+        """Displays the right-click context menu."""
+        menu = Gtk.Menu()
+
+        # Basic actions
+        copy_item = Gtk.MenuItem(label="Copy")
+        copy_item.connect("activate", lambda _: self.terminal.copy_clipboard())
+        menu.append(copy_item)
+        paste_item = Gtk.MenuItem(label="Paste")
+        paste_item.connect("activate", lambda _: self.terminal.paste_clipboard())
+        menu.append(paste_item)
+        cut_item = Gtk.MenuItem(label="Cut")
+        cut_item.connect("activate", self._on_cut)
+        menu.append(cut_item)
+        select_all_item = Gtk.MenuItem(label="Select All")
+        select_all_item.connect("activate", lambda _: self.terminal.select_all())
+        menu.append(select_all_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # Signal actions
+        signal_section = Gtk.MenuItem(label="Send Signal")
+        signal_menu = Gtk.Menu()
+        signal_section.set_submenu(signal_menu)
+        
+        sigint_item = Gtk.MenuItem(label="SIGINT (Ctrl+C)")
+        sigint_item.connect("activate", lambda _: self.send_signal(signal.SIGINT))
+        signal_menu.append(sigint_item)
+        
+        sigterm_item = Gtk.MenuItem(label="SIGTERM")
+        sigterm_item.connect("activate", lambda _: self.send_signal(signal.SIGTERM))
+        signal_menu.append(sigterm_item)
+        
+        sighup_item = Gtk.MenuItem(label="SIGHUP")
+        sighup_item.connect("activate", lambda _: self.send_signal(signal.SIGHUP))
+        signal_menu.append(sighup_item)
+        
+        menu.append(signal_section)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # New Window
+        new_window_item = Gtk.MenuItem(label="New Window")
+        new_window_item.connect("activate", lambda _: self.window.new_window())
+        menu.append(new_window_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # Zoom actions
+        zoom_in_item = Gtk.MenuItem(label="Zoom In")
+        zoom_in_item.connect("activate", lambda _: self.increase_font_size())
+        menu.append(zoom_in_item)
+        zoom_out_item = Gtk.MenuItem(label="Zoom Out")
+        zoom_out_item.connect("activate", lambda _: self.decrease_font_size())
+        menu.append(zoom_out_item)
+        reset_zoom_item = Gtk.MenuItem(label="Reset Zoom")
+        reset_zoom_item.connect("activate", lambda _: self.reset_font_size())
+        menu.append(reset_zoom_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # Split section
+        split_section = Gtk.MenuItem(label="Split")
+        split_menu = Gtk.Menu()
+        split_section.set_submenu(split_menu)
+
+        split_intelligent_item = Gtk.MenuItem(label="Split Intelligent")
+        split_h_item = Gtk.MenuItem(label="Split Horizontal")
+        split_v_item = Gtk.MenuItem(label="Split Vertical")
+        close_split_item = Gtk.MenuItem(label="Close Split")
+
+        split_intelligent_item.connect("activate", lambda _: self.split_intelligently())
+        split_h_item.connect("activate", lambda _: self.split_horizontal())
+        split_v_item.connect("activate", lambda _: self.split_vertical())
+        close_split_item.connect("activate", lambda _: self.close_split())
+
+        split_menu.append(split_intelligent_item)
+        split_menu.append(split_h_item)
+        split_menu.append(split_v_item)
+        split_menu.append(close_split_item)
+        menu.append(split_section)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # Theme section
+        theme_section = Gtk.MenuItem(label="Color Themes")
+        theme_menu = Gtk.Menu()
+        theme_section.set_submenu(theme_menu)
+        for theme_name in THEMES.keys():
+            theme_option = Gtk.MenuItem(label=theme_name)
+            theme_option.connect("activate", lambda _, name=theme_name: self.change_theme(name))
+            theme_menu.append(theme_option)
+        menu.append(theme_section)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # Clear
+        clear_item = Gtk.MenuItem(label="Clear")
+        clear_item.connect("activate", lambda _: self.terminal.reset(True, True))
+        menu.append(clear_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # Settings
+        settings_item = Gtk.MenuItem(label="Settings")
+        settings_item.connect("activate", lambda _: self.window.show_settings())
+        menu.append(settings_item)
+
+        menu.show_all()
+        menu.popup_at_pointer(event)
+
+    def _on_cut(self, menu_item):
+        """Handles the 'Cut' menu action."""
+        if self.terminal.get_has_selection():
+            self.terminal.copy_clipboard()
+            # Note: We can't actually "cut" from terminal content, but we copy and clear selection
+            self.terminal.copy_primary()
+
+    def split_intelligently(self):
+        """Splits the terminal intelligently (horizontal or vertical based on current size)."""
+        self.window.split_intelligently(self)
+
+    def split_horizontal(self):
+        """Splits the terminal horizontally."""
+        self.window.split_horizontal(self)
+
+    def split_vertical(self):
+        """Splits the terminal vertically."""
+        self.window.split_vertical(self)
+
+    def close_split(self):
+        """Closes this specific terminal instance."""
+        self.window.close_terminal(self)
+
+    def change_theme(self, theme_name):
+        """Changes the theme for this terminal and updates all terminals."""
+        self.settings.set('theme', theme_name)
+        self.apply_theme()
+        self.window.update_all_themes()
+
+    def cleanup(self):
+        """Clean up terminal resources."""
+        if self.child_pid and self.is_alive:
+            try:
+                os.kill(self.child_pid, signal.SIGTERM)
+            except:
+                pass
+            self.is_alive = False
+
+# --- Main Application Window ---
+class TerminalWindow(Gtk.ApplicationWindow):
+    def __init__(self, application, working_dir=None):
+        super().__init__(application=application, title="Eco Terminal")
+        self.settings = SettingsManager()
+        self.set_default_size(
+            self.settings.get('window_width'),
+            self.settings.get('window_height')
+        )
+        self.set_border_width(0)
+        self.set_icon_name("utilities-terminal")
+
+        # FIXED: Change to the specified directory BEFORE creating UI
+        if working_dir and os.path.isdir(working_dir):
+            try:
+                os.chdir(working_dir)
+                print(f"Changed working directory to: {working_dir}")
+            except Exception as e:
+                print(f"Warning: Could not change to {working_dir}: {e}")
+
+        # Connect window events
+        self.connect("realize", self._on_window_realize)
+        self.connect("delete-event", self._on_close)
+        self.connect("configure-event", self._on_configure)
+        self.connect("key-press-event", self._on_key_press)
+        self.connect("window-state-event", self._on_window_state)
+
+        self._save_timeout = None
+
+        # Main layout
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.add(main_box)
+
+        # Create Header Bar (if enabled)
+        if self.settings.get('show_header_bar'):
+            self.header_bar = Gtk.HeaderBar()
+            self.header_bar.set_show_close_button(True)
+            self.header_bar.set_title("Eco Terminal")
+            self.set_titlebar(self.header_bar)
+
+            # Header bar buttons
+            new_btn = Gtk.Button()
+            new_btn.set_image(Gtk.Image.new_from_icon_name("window-new-symbolic", Gtk.IconSize.SMALL_TOOLBAR))
+            new_btn.connect("clicked", lambda _: self.new_window())
+            new_btn.set_tooltip_text("New Window")
+            self.header_bar.pack_start(new_btn)
+
+            split_btn = Gtk.Button()
+            split_btn.set_image(Gtk.Image.new_from_icon_name("view-split-symbolic", Gtk.IconSize.SMALL_TOOLBAR))
+            split_btn.connect("clicked", lambda _: self.split_intelligently())
+            split_btn.set_tooltip_text("Split Terminal")
+            self.header_bar.pack_start(split_btn)
+
+            menu_button = Gtk.Button()
+            menu_button.set_image(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.SMALL_TOOLBAR))
+            menu_button.connect("clicked", self._on_menu_clicked)
+            menu_button.set_tooltip_text("Menu")
+            self.header_bar.pack_end(menu_button)
+
+        # Container for terminals
+        self.root_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        main_box.pack_start(self.root_container, True, True, 0)
+
+        # List to keep track of terminal instances
+        self.terminals = []
+        self.add_terminal(self.root_container, working_dir)
+
+    def add_terminal(self, container, working_dir=None):
+        """Adds a new terminal instance to the specified container."""
+        terminal = Terminal(self.settings, self, working_dir)
+        container.pack_start(terminal, True, True, 0)
+        self.terminals.append(terminal)
+        terminal.show_all()
+        GLib.idle_add(terminal.terminal.grab_focus)
+        return terminal
+
+    def split_terminal(self, existing_terminal, new_terminal, orientation, working_dir=None):
+        """Handles the logic for splitting the terminal UI."""
+        parent = existing_terminal.get_parent()
+        if isinstance(parent, Gtk.Paned):
+            if parent.get_orientation() == orientation:
+                if not parent.get_child2():
+                    parent.pack2(new_terminal, True, True)
+                else:
+                    new_paned = Gtk.Paned(orientation=orientation)
+                    child2 = parent.get_child2()
+                    parent.remove(child2)
+                    new_paned.pack1(child2, True, True)
+                    new_paned.pack2(new_terminal, True, True)
+                    parent.pack2(new_paned, True, True)
+                    new_paned.show_all()
+            else:
+                new_paned = Gtk.Paned(orientation=orientation)
+                alloc = existing_terminal.get_allocation()
+                pos = alloc.width // 2 if orientation == Gtk.Orientation.HORIZONTAL else alloc.height // 2
+                new_paned.set_position(pos)
+                parent.remove(existing_terminal)
+                new_paned.pack1(existing_terminal, True, True)
+                new_paned.pack2(new_terminal, True, True)
+                grandparent = parent.get_parent()
+                grandparent.remove(parent)
+                grandparent.pack_start(new_paned, True, True, 0)
+                new_paned.show_all()
+        else:
+            paned = Gtk.Paned(orientation=orientation)
+            alloc = parent.get_allocation()
+            pos = alloc.width // 2 if orientation == Gtk.Orientation.HORIZONTAL else alloc.height // 2
+            paned.set_position(pos)
+            parent.remove(existing_terminal)
+            paned.pack1(existing_terminal, True, True)
+            paned.pack2(new_terminal, True, True)
+            parent.pack_start(paned, True, True, 0)
+            paned.show_all()
+
+    def split_intelligently(self, terminal=None):
+        """Splits the specified terminal intelligently."""
+        if not terminal:
+            terminal = self.terminals[0] if self.terminals else None
+        if not terminal:
+            return
+        alloc = terminal.get_allocation()
+        ratio = alloc.width / alloc.height if alloc.height > 0 else 1.0
+        orientation = Gtk.Orientation.HORIZONTAL if ratio > 1.0 else Gtk.Orientation.VERTICAL
+        new_terminal = Terminal(self.settings, self, terminal.working_dir)
+        self.split_terminal(terminal, new_terminal, orientation)
+        self.terminals.append(new_terminal)
+        GLib.idle_add(new_terminal.terminal.grab_focus)
+
+    def split_horizontal(self, terminal=None):
+        """Splits the specified terminal horizontally."""
+        if not terminal:
+            terminal = self.terminals[0] if self.terminals else None
+        if not terminal:
+            return
+        new_terminal = Terminal(self.settings, self, terminal.working_dir)
+        self.split_terminal(terminal, new_terminal, Gtk.Orientation.VERTICAL)
+        self.terminals.append(new_terminal)
+        GLib.idle_add(new_terminal.terminal.grab_focus)
+
+    def split_vertical(self, terminal=None):
+        """Splits the specified terminal vertically."""
+        if not terminal:
+            terminal = self.terminals[0] if self.terminals else None
+        if not terminal:
+            return
+        new_terminal = Terminal(self.settings, self, terminal.working_dir)
+        self.split_terminal(terminal, new_terminal, Gtk.Orientation.HORIZONTAL)
+        self.terminals.append(new_terminal)
+        GLib.idle_add(new_terminal.terminal.grab_focus)
+
+    def close_terminal(self, terminal):
+        """Closes a specific terminal instance and manages the UI layout."""
+        if terminal in self.terminals:
+            self.terminals.remove(terminal)
+            terminal.cleanup()
+            parent = terminal.get_parent()
+            parent.remove(terminal)
+            terminal.destroy()
+            if isinstance(parent, Gtk.Paned):
+                remaining = parent.get_child1() or parent.get_child2()
+                if remaining:
+                    parent.remove(remaining)
+                    grandparent = parent.get_parent()
+                    grandparent.remove(parent)
+                    grandparent.pack_start(remaining, True, True, 0)
+                    remaining.show()
+            if not self.terminals:
+                self.close()
+
+    def update_all_themes(self):
+        """Updates the theme for all open terminals."""
+        for terminal in self.terminals:
+            terminal.apply_theme()
+
+    def new_window(self, working_dir=None):
+        """Creates and shows a new terminal window."""
+        app = self.get_application()
+        if app:
+            new_win = TerminalWindow(app, working_dir)
+            new_win.show_all()
+
+    def show_settings(self):
+        """Displays the settings dialog."""
+        dialog = SettingsDialog(self, self.settings)
+        response = dialog.run()
+        if response == Gtk.ResponseType.OK:
+            # Apply settings to all open terminals
+            for terminal in self.terminals:
+                terminal.apply_settings()
+            self.update_all_themes()
+        dialog.destroy()
+
+    def _on_menu_clicked(self, button):
+        """Displays the main menu from the header bar button."""
+        menu = Gtk.Menu()
+
+        new_win_item = Gtk.MenuItem(label="New Window")
+        new_win_item.connect("activate", lambda _: self.new_window())
+        menu.append(new_win_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        settings_item = Gtk.MenuItem(label="Settings")
+        settings_item.connect("activate", lambda _: self.show_settings())
+        menu.append(settings_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        about_item = Gtk.MenuItem(label="About")
+        about_item.connect("activate", lambda _: self.show_about())
+        menu.append(about_item)
+
+        menu.show_all()
+        menu.popup_at_widget(button, Gdk.Gravity.SOUTH_WEST, Gdk.Gravity.NORTH_WEST, None)
+
+    def show_about(self):
+        """Displays the about dialog."""
+        dialog = Gtk.AboutDialog()
+        dialog.set_program_name("Eco Terminal")
+        dialog.set_version("2.0.0")
+        dialog.set_comments("A modern terminal emulator with Tokyo Night theme")
+        dialog.set_authors(["Eco Team"])
+        dialog.set_license("GPL-3.0")
+        dialog.set_logo_icon_name("utilities-terminal")
+        dialog.run()
+        dialog.destroy()
+
+    def _on_window_realize(self, widget):
+        """Sets the window opacity after it's realized."""
+        if self.get_window():
+            self.get_window().set_opacity(self.settings.get('opacity'))
+
+    def _on_close(self, widget, event):
+        """Saves window size and settings before closing."""
+        width, height = self.get_size()
+        self.settings.set('window_width', width)
+        self.settings.set('window_height', height)
+        self.settings.save_settings()
+        
+        # Clean up all terminals
+        for terminal in self.terminals[:]:
+            terminal.cleanup()
+        self.terminals.clear()
+        
+        return False
+
+    def _on_configure(self, widget, event):
+        """Handles window resize/move events and schedules settings save."""
+        if self._save_timeout is not None:
+            GLib.source_remove(self._save_timeout)
+        self._save_timeout = GLib.timeout_add(500, self._save_window_size)
+        return False
+
+    def _save_window_size(self):
+        """Saves the window size after a delay."""
+        width, height = self.get_size()
+        self.settings.set('window_width', width)
+        self.settings.set('window_height', height)
+        self.settings.save_settings()
+        self._save_timeout = None
+        return False
+
+    def _on_key_press(self, widget, event):
+        """Handles global key press events for the window."""
+        modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
+        if modifiers == Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK:
+            if event.keyval == Gdk.KEY_n:
+                self.new_window()
+                return True
+            elif event.keyval == Gdk.KEY_Return:
+                self.split_intelligently()
+                return True
+            elif event.keyval == Gdk.KEY_h:
+                self.split_horizontal()
+                return True
+            elif event.keyval == Gdk.KEY_v:
+                self.split_vertical()
+                return True
+            elif event.keyval == Gdk.KEY_c:
+                if self.terminals and self.terminals[0].terminal.get_has_selection():
+                    self.terminals[0].terminal.copy_clipboard()
+                return True
+            elif event.keyval == Gdk.KEY_v:
+                if self.terminals:
+                    self.terminals[0].terminal.paste_clipboard()
+                return True
+            elif event.keyval == Gdk.KEY_x:
+                if self.terminals and self.terminals[0].terminal.get_has_selection():
+                    self.terminals[0].terminal.copy_clipboard()
+                return True
+            elif event.keyval == Gdk.KEY_a:
+                if self.terminals:
+                    self.terminals[0].terminal.select_all()
+                return True
+        elif modifiers == Gdk.ModifierType.CONTROL_MASK:
+            if event.keyval in [Gdk.KEY_plus, Gdk.KEY_equal, Gdk.KEY_KP_Add]:
+                if self.terminals:
+                    self.terminals[0].increase_font_size()
+                return True
+            elif event.keyval in [Gdk.KEY_minus, Gdk.KEY_KP_Subtract]:
+                if self.terminals:
+                    self.terminals[0].decrease_font_size()
+                return True
+            elif event.keyval == Gdk.KEY_0:
+                if self.terminals:
+                    self.terminals[0].reset_font_size()
+                return True
+            elif event.keyval == Gdk.KEY_F11:
+                if self.get_window().get_state() & Gdk.WindowState.FULLSCREEN:
+                    self.unfullscreen()
+                else:
+                    self.fullscreen()
+                return True
+        return False
+
+    def _on_window_state(self, widget, event):
+        """Handles window state changes (minimize, maximize, fullscreen)."""
+        return False
+
+# --- Settings Dialog ---
+class SettingsDialog(Gtk.Dialog):
+    def __init__(self, parent, settings_manager):
+        super().__init__(
+            title="Eco Terminal Settings",
+            transient_for=parent,
+            flags=0
+        )
+        self.settings = settings_manager
+        self.parent = parent
+        self.set_default_size(450, 500)
+        self.set_border_width(8)
+        self.set_resizable(True)
+        self.set_size_request(400, 400)
+
+        # Create the main content area
+        content_area = self.get_content_area()
+        content_area.set_spacing(8)
+
+        # Create notebook for tabs
+        notebook = Gtk.Notebook()
+        content_area.pack_start(notebook, True, True, 0)
+
+        # Add tabs
+        self._add_general_tab(notebook)
+        self._add_appearance_tab(notebook)
+        self._add_shortcuts_tab(notebook)
+
+        # Add buttons
+        self.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        self.add_button("Apply", Gtk.ResponseType.APPLY)
+        self.add_button("OK", Gtk.ResponseType.OK)
+
+        self.show_all()
+
+    def _add_general_tab(self, notebook):
+        """Adds the 'General' tab to the settings notebook."""
+        tab = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        tab.set_border_width(12)
+        notebook.append_page(tab, Gtk.Label(label="General"))
+
+        # Shell setting
+        shell_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        shell_label = Gtk.Label(label="Shell:")
+        shell_label.set_halign(Gtk.Align.START)
+        shell_box.pack_start(shell_label, False, False, 0)
+        self.shell_entry = Gtk.Entry()
+        self.shell_entry.set_text(self.settings.get('shell'))
+        shell_box.pack_start(self.shell_entry, True, True, 0)
+        tab.pack_start(shell_box, False, False, 0)
+
+        # Scrollback lines
+        scrollback_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        scrollback_label = Gtk.Label(label="Scrollback Lines:")
+        scrollback_label.set_halign(Gtk.Align.START)
+        scrollback_box.pack_start(scrollback_label, False, False, 0)
+        self.scrollback_spin = Gtk.SpinButton()
+        self.scrollback_spin.set_range(100, 100000)
+        self.scrollback_spin.set_increments(100, 1000)
+        self.scrollback_spin.set_value(self.settings.get('scrollback_lines'))
+        scrollback_box.pack_start(self.scrollback_spin, False, False, 0)
+        tab.pack_start(scrollback_box, False, False, 0)
+
+        # Copy on select
+        self.copy_check = Gtk.CheckButton(label="Copy on selection")
+        self.copy_check.set_active(self.settings.get('copy_on_select'))
+        tab.pack_start(self.copy_check, False, False, 0)
+
+    def _add_appearance_tab(self, notebook):
+        """Adds the 'Appearance' tab to the settings notebook."""
+        tab = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        tab.set_border_width(12)
+        notebook.append_page(tab, Gtk.Label(label="Appearance"))
+
+        # Font settings
+        font_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        font_label = Gtk.Label(label="Font:")
+        font_label.set_halign(Gtk.Align.START)
+        font_box.pack_start(font_label, False, False, 0)
+        self.font_entry = Gtk.Entry()
+        self.font_entry.set_text(self.settings.get('font_family'))
+        font_box.pack_start(self.font_entry, True, True, 0)
+        self.font_button = Gtk.Button(label="Choose...")
+        self.font_button.connect("clicked", self._on_font_clicked)
+        font_box.pack_start(self.font_button, False, False, 0)
+        tab.pack_start(font_box, False, False, 0)
+
+        # Font size
+        size_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        size_label = Gtk.Label(label="Font Size:")
+        size_label.set_halign(Gtk.Align.START)
+        size_box.pack_start(size_label, False, False, 0)
+        self.font_size_spin = Gtk.SpinButton()
+        self.font_size_spin.set_range(6, 30)
+        self.font_size_spin.set_value(self.settings.get('font_size'))
+        size_box.pack_start(self.font_size_spin, False, False, 0)
+        tab.pack_start(size_box, False, False, 0)
+
+        # Theme
+        theme_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        theme_label = Gtk.Label(label="Color Theme:")
+        theme_label.set_halign(Gtk.Align.START)
+        theme_box.pack_start(theme_label, False, False, 0)
+        self.theme_combo = Gtk.ComboBoxText()
+        for theme_name in THEMES.keys():
+            self.theme_combo.append_text(theme_name)
+        self.theme_combo.set_active(list(THEMES.keys()).index(self.settings.get('theme')))
+        theme_box.pack_start(self.theme_combo, False, False, 0)
+        tab.pack_start(theme_box, False, False, 0)
+
+        # Opacity
+        opacity_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        opacity_label = Gtk.Label(label="Window Opacity:")
+        opacity_label.set_halign(Gtk.Align.START)
+        opacity_box.pack_start(opacity_label, False, False, 0)
+        self.opacity_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.5, 1.0, 0.05)
+        self.opacity_scale.set_value(self.settings.get('opacity'))
+        self.opacity_scale.set_digits(2)
+        opacity_box.pack_start(self.opacity_scale, False, False, 0)
+        tab.pack_start(opacity_box, False, False, 0)
+
+        # Cursor settings
+        cursor_frame = Gtk.Frame(label="Cursor")
+        cursor_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        cursor_frame.add(cursor_box)
+        tab.pack_start(cursor_frame, False, False, 0)
+
+        cursor_shape_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        cursor_shape_label = Gtk.Label(label="Shape:")
+        cursor_shape_box.pack_start(cursor_shape_label, False, False, 0)
+        self.cursor_combo = Gtk.ComboBoxText()
+        self.cursor_combo.append_text("Block")
+        self.cursor_combo.append_text("I-Beam")
+        self.cursor_combo.append_text("Underline")
+        cursor_shape_map = {'block': 0, 'ibeam': 1, 'underline': 2}
+        self.cursor_combo.set_active(cursor_shape_map.get(self.settings.get('cursor_shape'), 0))
+        cursor_shape_box.pack_start(self.cursor_combo, False, False, 0)
+        cursor_box.pack_start(cursor_shape_box, False, False, 0)
+
+        self.blink_check = Gtk.CheckButton(label="Blinking cursor")
+        self.blink_check.set_active(self.settings.get('cursor_blink'))
+        cursor_box.pack_start(self.blink_check, False, False, 0)
+
+        # Additional settings
+        self.bold_check = Gtk.CheckButton(label="Show bold text in bright colors")
+        self.bold_check.set_active(self.settings.get('bold_is_bright', True))
+        tab.pack_start(self.bold_check, False, False, 0)
+
+        self.hyperlink_check = Gtk.CheckButton(label="Enable hyperlink support")
+        self.hyperlink_check.set_active(self.settings.get('enable_hyperlink', True))
+        tab.pack_start(self.hyperlink_check, False, False, 0)
+
+    def _add_shortcuts_tab(self, notebook):
+        """Adds the 'Shortcuts' tab to the settings notebook."""
+        tab = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        tab.set_border_width(12)
+        notebook.append_page(tab, Gtk.Label(label="Shortcuts"))
+
+        shortcuts = [
+            ("Ctrl+Shift+N", "New Window"),
+            ("Ctrl+Shift+Enter", "Split Intelligent"),
+            ("Ctrl+Shift+H", "Split Horizontal"),
+            ("Ctrl+Shift+V", "Split Vertical"),
+            ("Ctrl++", "Zoom In"),
+            ("Ctrl+-", "Zoom Out"),
+            ("Ctrl+0", "Reset Zoom"),
+            ("F11", "Toggle Fullscreen"),
+            ("Ctrl+Shift+C", "Copy"),
+            ("Ctrl+Shift+V", "Paste"),
+            ("Ctrl+Shift+X", "Cut"),
+            ("Ctrl+Shift+A", "Select All"),
+            ("Ctrl+C", "Send SIGINT / Copy if selected"),
+            ("Ctrl+V", "Paste"),
+            ("Ctrl+A", "Select All"),
+            ("Ctrl+D", "Send EOF (SIGQUIT)"),
+            ("Ctrl+Z", "Suspend (SIGTSTP)"),
+            ("Right Click", "Context Menu"),
+        ]
+
+        grid = Gtk.Grid()
+        grid.set_column_spacing(16)
+        grid.set_row_spacing(6)
+        for i, (shortcut, action) in enumerate(shortcuts):
+            shortcut_label = Gtk.Label(label=shortcut)
+            shortcut_label.set_halign(Gtk.Align.START)
+            grid.attach(shortcut_label, 0, i, 1, 1)
+            action_label = Gtk.Label(label=action)
+            action_label.set_halign(Gtk.Align.START)
+            grid.attach(action_label, 1, i, 1, 1)
+        tab.pack_start(grid, False, False, 0)
+
+    def _on_font_clicked(self, button):
+        """Opens the font chooser dialog."""
+        dialog = Gtk.FontChooserDialog(title="Choose Font", parent=self)
+        current_font = self.font_entry.get_text()
+        if current_font:
+            dialog.set_font(current_font)
+        response = dialog.run()
+        if response == Gtk.ResponseType.OK:
+            font = dialog.get_font()
+            self.font_entry.set_text(font)
+        dialog.destroy()
+
+    def run(self):
+        """Runs the dialog and handles saving settings."""
+        response = super().run()
+        if response in [Gtk.ResponseType.APPLY, Gtk.ResponseType.OK]:
+            # Save settings from the dialog
+            self.settings.set('shell', self.shell_entry.get_text())
+            self.settings.set('scrollback_lines', self.scrollback_spin.get_value_as_int())
+            self.settings.set('copy_on_select', self.copy_check.get_active())
+            self.settings.set('font_family', self.font_entry.get_text())
+            self.settings.set('font_size', self.font_size_spin.get_value_as_int())
+            # Get theme from combo
+            theme_index = self.theme_combo.get_active()
+            theme_names = list(THEMES.keys())
+            if 0 <= theme_index < len(theme_names):
+                self.settings.set('theme', theme_names[theme_index])
+            self.settings.set('opacity', self.opacity_scale.get_value())
+            # Get cursor shape from combo
+            cursor_shape_map = {0: 'block', 1: 'ibeam', 2: 'underline'}
+            self.settings.set('cursor_shape', cursor_shape_map.get(self.cursor_combo.get_active(), 'block'))
+            self.settings.set('cursor_blink', self.blink_check.get_active())
+            self.settings.set('bold_is_bright', self.bold_check.get_active())
+            self.settings.set('enable_hyperlink', self.hyperlink_check.get_active())
+            self.settings.save_settings()
+        return response
+
+# --- Application Class ---
+class TerminalApplication(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id='com.eco.terminal',
+                        flags=Gio.ApplicationFlags.FLAGS_NONE)
+        self.signal_handler = SignalHandler()
+
+    def do_startup(self):
+        """Initialize the application."""
+        Gtk.Application.do_startup(self)
+        self.signal_handler.setup_signals()
+
+    def do_activate(self):
+        """Activates the application, creating the main window."""
+        CSSProvider.setup_css()
+        
+        # Get working directory from command line arguments
+        working_dir = None
+        if len(sys.argv) > 1:
+            arg_dir = sys.argv[1]
+            if os.path.isdir(arg_dir):
+                working_dir = os.path.abspath(arg_dir)
+                print(f"Starting term5 in directory: {working_dir}")
+            else:
+                print(f"Warning: Provided path '{arg_dir}' is not a directory, using current directory")
+                working_dir = os.getcwd()
+        else:
+            working_dir = os.getcwd()
+
+        window = TerminalWindow(self, working_dir)
+        window.show_all()
+
+def main():
+    """Main entry point."""
+    app = TerminalApplication()
+    return app.run(sys.argv)
+
+if __name__ == "__main__":
+    sys.exit(main())

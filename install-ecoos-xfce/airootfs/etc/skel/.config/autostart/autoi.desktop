@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Exec=python /usr/local/bin/autoi
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+Name=Trust Desktop Launchers
+Icon=
+Comment=
+Path=
+Terminal=false
+StartupNotify=false

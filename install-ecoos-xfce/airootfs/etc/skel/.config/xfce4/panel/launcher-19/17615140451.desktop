@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=terminal
+Comment=terminal
+Exec=term5
+Icon=terminal
+Path=
+Terminal=false
+StartupNotify=true

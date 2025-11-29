@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=menu
+Comment=menu
+Exec=/usr/local/bin/launcher
+Icon=storm os
+Path=
+Terminal=false
+StartupNotify=false
