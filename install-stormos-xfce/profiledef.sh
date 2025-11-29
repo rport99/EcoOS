@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034
 
-iso_name="Seekers-Adv_StormOS"
-iso_label="StormOS_Eco_Release"
+iso_name="EcoOS"
+iso_label="Eco_Release"
 iso_publisher="StormOS"
 iso_application="StormOS Install Media"
 iso_version="v1"
