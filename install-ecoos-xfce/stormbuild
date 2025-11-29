@@ -1,4 +1,0 @@
-#!/bin/bash
-#Enhanced By Seeker
-
-./clean.sh; sudo ./build.sh -v
