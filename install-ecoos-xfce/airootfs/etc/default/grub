@@ -43,8 +43,8 @@ GRUB_COLOR_NORMAL="light-blue/black"
 GRUB_COLOR_HIGHLIGHT="light-cyan/blue"
 
 # Uncomment one of them for the gfx desired, a image background or a gfxtheme
-#GRUB_BACKGROUND="/boot/grub/STORM.png"
-GRUB_THEME="/usr/share/grub/themes/stormos/theme.txt"
+GRUB_BACKGROUND="/boot/grub/ecoos.png"
+#GRUB_THEME="/usr/share/grub/themes/stormos/theme.txt"
 
 # Uncomment to get a beep at GRUB start
 #GRUB_INIT_TUNE="480 440 1"
