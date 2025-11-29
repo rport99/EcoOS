@@ -24,7 +24,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
                             QDialog, QSlider, QCheckBox, QComboBox, QGroupBox,
                             QFormLayout, QSpinBox, QColorDialog, QTabWidget,
                             QSystemTrayIcon, QSizePolicy, QListWidget, QListWidgetItem,
-                            QLineEdit, QMessageBox, QInputDialog, QGridLayout)  # Added QGridLayout here
+                            QLineEdit, QMessageBox, QInputDialog, QGridLayout, QFileDialog)  # Added QFileDialog here
 from PyQt5.QtCore import Qt, QTimer, QPoint, QSize, pyqtSignal, QThread, QSettings, QEvent, QPropertyAnimation, QEasingCurve, QObject, QRect
 from PyQt5.QtGui import (QIcon, QFont, QPalette, QColor, QPainter, QLinearGradient, 
                         QFontDatabase, QPixmap, QPen, QWheelEvent, QBrush, QRadialGradient, QKeySequence, QCursor)
@@ -4155,50 +4155,40 @@ class NetworkManagerWidget(QWidget):
         menu.exec_(self.network_button.mapToGlobal(position))
 
     def launch_network_manager(self):
-        """Launch network manager when button is clicked"""
+        """Launch network manager when button is clicked - XFCE4 compatible"""
         try:
-            # Try nm-connection-editor first (GUI version)
-            result = subprocess.run(
-                "which nm-connection-editor",
-                shell=True, capture_output=True, text=True
-            )
-            if result.returncode == 0:
-                # Check if nm-connection-editor is already running
-                result = subprocess.run(
-                    "pgrep -f nm-connection-editor",
-                    shell=True, capture_output=True, text=True
-                )
+            # Try multiple methods for XFCE4
+            methods = [
+                "nm-connection-editor",  # Direct NetworkManager GUI
+                "xfce4-settings-manager -c network",  # XFCE settings
+                "nm-applet --no-agent",  # NetworkManager applet
+            ]
+            
+            for method in methods:
+                cmd = method.split()[0]
+                # Check if command exists
+                result = subprocess.run(f"which {cmd}", shell=True, capture_output=True)
                 if result.returncode == 0:
-                    # If running, focus it
-                    subprocess.run(
-                        "wmctrl -a 'Network Connections'",
-                        shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                    )
-                else:
-                    # Launch nm-connection-editor
+                    print(f"🔄 Launching network manager with: {method}")
                     subprocess.Popen(
-                        ["nm-connection-editor"],
+                        method.split(),
                         stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True
                     )
-            else:
-                # Fallback to nm-applet
-                subprocess.Popen(
-                    ["nm-applet"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
+                    return
+            
+            # Fallback: try to open XFCE network settings
+            print("🔧 Using fallback network method")
+            subprocess.Popen([
+                "xfce4-settings-manager", "-c", "network"
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
         except Exception as e:
-            print(f"Failed to launch network manager: {e}")
-            # Try alternative command
-            try:
-                subprocess.Popen(
-                    ["nm-applet"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
-            except Exception as e2:
-                print(f"Failed to launch nm-applet: {e2}")
+            print(f"❌ Failed to launch network manager: {e}")
+            # Show error message to user
+            QMessageBox.warning(self, "Network Manager", 
+                               "Could not open network manager.\n\nTry running 'nm-connection-editor' in terminal.")
 
 class BluetoothManagerWidget(QWidget):
     """Widget for Bluetooth Manager control that launches blueman-manager"""
@@ -4236,51 +4226,39 @@ class BluetoothManagerWidget(QWidget):
         layout.addWidget(self.bluetooth_button)
 
     def launch_bluetooth_manager(self):
-        """Launch bluetooth manager when button is clicked"""
+        """Launch bluetooth manager - XFCE4 compatible"""
         try:
-            # Check if blueman-manager is available
-            result = subprocess.run(
-                "which blueman-manager",
-                shell=True, capture_output=True, text=True
-            )
-            if result.returncode == 0:
-                # Check if blueman-manager is already running
-                result = subprocess.run(
-                    "pgrep -f blueman-manager",
-                    shell=True, capture_output=True, text=True
-                )
+            # Try multiple bluetooth managers
+            methods = [
+                "blueman-manager",  # Blueman
+                "xfce4-settings-manager -c bluetooth",  # XFCE bluetooth settings
+                "blueberry",  # Alternative bluetooth manager
+            ]
+            
+            for method in methods:
+                cmd = method.split()[0]
+                # Check if command exists
+                result = subprocess.run(f"which {cmd}", shell=True, capture_output=True)
                 if result.returncode == 0:
-                    # If running, focus it
-                    subprocess.run(
-                        "wmctrl -a 'Bluetooth Manager'",
-                        shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                    )
-                else:
-                    # Launch blueman-manager
+                    print(f"🔵 Launching bluetooth manager with: {method}")
                     subprocess.Popen(
-                        ["blueman-manager"],
+                        method.split(),
                         stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True
                     )
-            else:
-                print("Blueman-manager not found. Please install it with: sudo apt install blueman")
-                # Try alternative bluetooth managers
-                try:
-                    # Try blueberry (alternative)
-                    subprocess.Popen(
-                        ["blueberry"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
-                    )
-                except:
-                    # Try gnome-bluetooth
-                    subprocess.Popen(
-                        ["gnome-bluetooth"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
-                    )
+                    return
+            
+            # Fallback: check if bluetooth service is running
+            print("🔧 Using fallback bluetooth method")
+            subprocess.Popen([
+                "xfce4-settings-manager", "-c", "connections"
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
         except Exception as e:
-            print(f"Failed to launch bluetooth manager: {e}")
+            print(f"❌ Failed to launch bluetooth manager: {e}")
+            QMessageBox.warning(self, "Bluetooth Manager", 
+                               "Could not open bluetooth manager.\n\nYou may need to install 'blueman' package.")
 
 class VolumeControlWidget(QWidget):
     """Widget for volume control with interactive slider, scroll wheel support, and global key bindings"""
@@ -4557,15 +4535,39 @@ class VolumeControlWidget(QWidget):
             print(f"Failed to launch pavucontrol: {e}")
 
     def update_volume_display(self, volume, muted):
-        """Update the volume label display"""
-        self.current_volume = volume
-        self.is_muted = muted
-        icon = "󰖁" if muted else "󰕾"  # Muted vs volume icon
-        color = TokyoNight.RED if muted else TokyoNight.CYAN
-        # Update icon
-        self.volume_icon.setText(f"<font color='{color}'>{icon}</font>")
-        # Update label
-        self.volume_label.setText(f"<font color='{color}'>{volume}%</font>")
+        """Update the volume label display with safety checks"""
+        try:
+            # Safety check: ensure widgets still exist
+            if not self.volume_icon or not self.volume_label:
+                print("⚠️ Volume widgets no longer exist, skipping update")
+                return
+                
+            # Check if C++ objects are still valid
+            if not hasattr(self.volume_icon, 'setText') or not hasattr(self.volume_label, 'setText'):
+                print("⚠️ Volume widget methods no longer available")
+                return
+                
+            self.current_volume = volume
+            self.is_muted = muted
+            icon = "󰖁" if muted else "󰕾"  # Muted vs volume icon
+            color = TokyoNight.RED if muted else TokyoNight.CYAN
+            
+            # Update icon with safety
+            try:
+                self.volume_icon.setText(f"<font color='{color}'>{icon}</font>")
+            except RuntimeError as e:
+                print(f"⚠️ Volume icon update failed: {e}")
+                return
+                
+            # Update label with safety
+            try:
+                self.volume_label.setText(f"<font color='{color}'>{volume}%</font>")
+            except RuntimeError as e:
+                print(f"⚠️ Volume label update failed: {e}")
+                return
+                
+        except Exception as e:
+            print(f"⚠️ Volume display update error: {e}")
 
     def detect_audio_backend(self):
         """Detect which audio backend is available"""
@@ -5003,40 +5005,621 @@ class SystemMonitorThread(QThread):
             time.sleep(2)
 
 class SystemTrayWidget(QWidget):
-    """Widget to host system tray icons"""
+    """Enhanced widget to host system tray icons with real embedding support"""
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.layout = QHBoxLayout(self)
-        self.layout.setContentsMargins(0, 0, 0, 0)
-        self.layout.setSpacing(2)
+        self.layout.setContentsMargins(4, 2, 4, 2)  # Increased from 0,0,0,0
+        self.layout.setSpacing(6)  # Increased from 2
         self.layout.setAlignment(Qt.AlignRight)
-        # Set up system tray integration
-        self.tray_icons = []
+        
+        self.tray_icons = {}
         self.setup_system_tray()
+        
+        # Enhanced monitoring for tray icons
+        self.monitor_timer = QTimer()
+        self.monitor_timer.timeout.connect(self.scan_for_tray_icons)
+        self.monitor_timer.start(3000)  # Check every 3 seconds
+        
+        # Initial scan
+        QTimer.singleShot(1000, self.scan_for_tray_icons)
 
     def setup_system_tray(self):
-        """Setup system tray integration using XEmbed"""
+        """Setup proper system tray integration"""
         try:
-            # Try to find existing system tray
             if HAS_X11 and QX11Info.isPlatformX11():
-                # Get the system tray selection atom
-                import os
-                os.environ['XDG_CURRENT_DESKTOP'] = 'XFCE'
-                # Start sni-qt or similar if available
-                subprocess.Popen(["which", "snid"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # Set up as a proper system tray
+                self.setWindowTitle("SystemTray")
+                self.setAttribute(Qt.WA_X11NetWmWindowTypeDock, True)
+                
+                # Set the _NET_SYSTEM_TRAY_S0 selection
+                self.setup_x11_tray()
+                
         except Exception as e:
             print(f"System tray setup error: {e}")
 
-    def add_tray_icon(self, icon_widget):
-        """Add a tray icon widget to the tray area"""
-        self.layout.addWidget(icon_widget)
-        self.tray_icons.append(icon_widget)
+    def setup_x11_tray(self):
+        """Setup X11 system tray selection"""
+        try:
+            # Get X11 display
+            display = QX11Info.display()
+            
+            # Set up as system tray using xprop
+            window_id = int(self.winId())
+            
+            # Set the _NET_SYSTEM_TRAY_S0 atom
+            subprocess.run([
+                "xprop", "-id", str(window_id), "-f", "_NET_SYSTEM_TRAY_S0", "32c",
+                "-set", "_NET_SYSTEM_TRAY_S0", str(QX11Info.appScreen())
+            ], check=False)
+            
+            print("✅ X11 system tray initialized")
+            
+        except Exception as e:
+            print(f"X11 tray setup error: {e}")
+
+    def scan_for_tray_icons(self):
+        """Scan for actual tray icons using multiple methods"""
+        try:
+            # Method 1: Check for StatusNotifierItems via DBus
+            self.scan_dbus_tray_icons()
+            
+            # Method 2: Check for X11 tray icons
+            self.scan_x11_tray_icons()
+            
+            # Method 3: Check for common tray applications
+            self.scan_running_tray_apps()
+            
+        except Exception as e:
+            print(f"Tray icon scan error: {e}")
+
+    def scan_dbus_tray_icons(self):
+        """Scan for DBus StatusNotifierItems (modern tray protocol)"""
+        try:
+            result = subprocess.run([
+                "dbus-send", "--session", "--dest=org.kde.StatusNotifierWatcher",
+                "/StatusNotifierWatcher", "org.freedesktop.DBus.Properties.Get",
+                "string:org.kde.StatusNotifierWatcher", "string:RegisteredStatusNotifierItems"
+            ], capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0:
+                # Parse DBus output for tray items
+                lines = result.stdout.split('\n')
+                for line in lines:
+                    if 'string' in line.lower() and 'discord' in line.lower():
+                        self.add_tray_placeholder("Discord", "󰙯", "discord")
+                    elif 'string' in line.lower() and 'steam' in line.lower():
+                        self.add_tray_placeholder("Steam", "󰓓", "steam")
+                    elif 'string' in line.lower() and 'spotify' in line.lower():
+                        self.add_tray_placeholder("Spotify", "󰓇", "spotify")
+                        
+        except Exception as e:
+            # DBus might not be available, that's ok
+            pass
+
+    def scan_x11_tray_icons(self):
+        """Scan for X11 tray icons using xwininfo"""
+        try:
+            # Look for windows with tray properties
+            result = subprocess.run(
+                "xwininfo -root -tree | grep -i 'tray\\|status\\|system' | head -10",
+                shell=True, capture_output=True, text=True
+            )
+            
+            if result.returncode == 0:
+                lines = result.stdout.split('\n')
+                for line in lines:
+                    if 'Discord' in line:
+                        self.add_tray_placeholder("Discord", "󰙯", "discord")
+                    elif 'Steam' in line:
+                        self.add_tray_placeholder("Steam", "󰓓", "steam")
+                    elif 'Spotify' in line:
+                        self.add_tray_placeholder("Spotify", "󰓇", "spotify")
+                    elif 'nm-applet' in line:
+                        self.add_tray_placeholder("Network", "󰤨", "nm-applet")
+                    elif 'blueman' in line:
+                        self.add_tray_placeholder("Bluetooth", "󰂯", "blueman-applet")
+                        
+        except Exception as e:
+            print(f"X11 tray scan error: {e}")
+
+    def scan_running_tray_apps(self):
+        """Scan for running applications that typically have tray icons"""
+        tray_apps = [
+            ("discord", "Discord", "󰙯"),
+            ("Discord", "Discord", "󰙯"),  # Capital D version
+            ("steam", "Steam", "󰓓"),
+            ("spotify", "Spotify", "󰓇"),
+            ("slack", "Slack", "󰒱"),
+            ("telegram", "Telegram", "󰚠"),
+            ("dropbox", "Dropbox", "󰇧"),
+            ("nm-applet", "Network", "󰤨"),
+            ("blueman-applet", "Bluetooth", "󰂯"),
+            ("pulseaudio", "Volume", "󰕾"),
+        ]
+        
+        for process_name, display_name, icon in tray_apps:
+            if self.is_process_running(process_name):
+                # Special handling for Discord
+                if "discord" in process_name.lower():
+                    # Ensure Discord icon gets proper width
+                    self.add_discord_tray_placeholder(display_name, icon, process_name)
+                else:
+                    self.add_tray_placeholder(display_name, icon, process_name)
+
+
+
+
+    def add_discord_tray_placeholder(self, name, icon, process_name):
+        """Special method for Discord to ensure proper icon display"""
+        if name in self.tray_icons:
+            return
+            
+        try:
+            # Create wider container specifically for Discord
+            container = QWidget()
+            container_layout = QHBoxLayout(container)
+            container_layout.setContentsMargins(6, 2, 6, 2)  # Extra width for Discord
+            container_layout.setSpacing(4)
+            
+            # Create wider button for Discord
+            icon_btn = QPushButton(icon)
+            icon_btn.setFixedSize(42, 32)  # Even wider for Discord
+            icon_btn.setToolTip(f"{name}\nClick to focus\nRight-click for options")
+            icon_btn.setStyleSheet(self.get_discord_tray_stylesheet())  # Special stylesheet
+            
+            # Connect click events
+            icon_btn.clicked.connect(lambda: self.focus_tray_application(process_name))
+            icon_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+            icon_btn.customContextMenuRequested.connect(
+                lambda pos, proc=process_name, disp=name: self.show_tray_icon_menu(pos, proc, disp)
+            )
+            
+            container_layout.addWidget(icon_btn)
+            self.layout.addWidget(container)
+            
+            self.tray_icons[name] = {
+                'container': container,
+                'process': process_name,
+                'button': icon_btn
+            }
+            
+            print(f"✅ Added Discord tray icon with extra width")
+            
+        except Exception as e:
+            print(f"Error adding Discord tray placeholder: {e}")
+
+    def get_discord_tray_stylesheet(self):
+        """Special stylesheet for Discord tray icon"""
+        return f"""
+            QPushButton {{
+                background: {TokyoNight.SELECTION};
+                border: 1px solid {TokyoNight.PURPLE}60;
+                border-radius: 6px;
+                color: {TokyoNight.PURPLE};
+                font-size: 16px;  # Larger font for Discord
+                font-family: "JetBrains Mono Nerd Font";
+                padding: 2px 6px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background: {TokyoNight.PURPLE}40;
+                border: 1px solid {TokyoNight.PURPLE}80;
+            }}
+            QPushButton:pressed {{
+                background: {TokyoNight.PURPLE}60;
+            }}
+        """
+
+
+
+    def open_network_manager(self):
+        """Open Network Manager directly"""
+        try:
+            # Try multiple network manager commands
+            commands = [
+                "nm-connection-editor",
+                "xfce4-settings-manager -c network", 
+                "nm-applet --no-agent"
+            ]
+            
+            for cmd in commands:
+                result = subprocess.run(f"which {cmd.split()[0]}", shell=True, capture_output=True)
+                if result.returncode == 0:
+                    subprocess.Popen(cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    print(f"✅ Launched network manager: {cmd}")
+                    return
+            
+            print("❌ No network manager found")
+            
+        except Exception as e:
+            print(f"Error opening network manager: {e}")
+
+    def open_wireless_networks(self):
+        """Open wireless networks dialog"""
+        try:
+            # Use the existing wireless dialog from your panel
+            if hasattr(self, 'parent') and hasattr(self.parent(), 'enhanced_network'):
+                self.parent().enhanced_network.show_network_dialog()
+            else:
+                # Fallback to command line
+                subprocess.Popen(["nm-connection-editor"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            print(f"Error opening wireless networks: {e}")
+
+    def open_connection_editor(self):
+        """Open network connection editor"""
+        try:
+            subprocess.Popen(["nm-connection-editor"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            print(f"Error opening connection editor: {e}")
+
+    def open_bluetooth_manager(self):
+        """Open Bluetooth Manager"""
+        try:
+            # Try multiple bluetooth manager commands
+            commands = [
+                "blueman-manager",
+                "xfce4-settings-manager -c bluetooth",
+                "blueberry"
+            ]
+            
+            for cmd in commands:
+                result = subprocess.run(f"which {cmd.split()[0]}", shell=True, capture_output=True)
+                if result.returncode == 0:
+                    subprocess.Popen(cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    print(f"✅ Launched bluetooth manager: {cmd}")
+                    return
+            
+            print("❌ No bluetooth manager found")
+            
+        except Exception as e:
+            print(f"Error opening bluetooth manager: {e}")
+
+    def scan_bluetooth(self):
+        """Scan for Bluetooth devices"""
+        try:
+            # Use bluetoothctl to scan
+            subprocess.Popen(["bluetoothctl", "scan", "on"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print("🔍 Scanning for Bluetooth devices...")
+            
+            # Show notification
+            self.show_scan_notification()
+            
+        except Exception as e:
+            print(f"Error scanning bluetooth: {e}")
+
+    def toggle_bluetooth(self):
+        """Toggle Bluetooth on/off"""
+        try:
+            # Check current state
+            result = subprocess.run("bluetoothctl show | grep 'Powered: yes'", shell=True, capture_output=True)
+            if result.returncode == 0:
+                # Bluetooth is on, turn off
+                subprocess.run("bluetoothctl power off", shell=True)
+                print("🔴 Bluetooth turned off")
+            else:
+                # Bluetooth is off, turn on
+                subprocess.run("bluetoothctl power on", shell=True)
+                print("🟢 Bluetooth turned on")
+                
+        except Exception as e:
+            print(f"Error toggling bluetooth: {e}")
+
+    def show_scan_notification(self):
+        """Show Bluetooth scan notification"""
+        try:
+            # Try to use notify-send if available
+            subprocess.Popen([
+                "notify-send", 
+                "Bluetooth Scan", 
+                "Scanning for Bluetooth devices...",
+                "-i", "bluetooth"
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except:
+            pass  # Silent fail if notify-send not available
+
+
+
+
+
+    def is_process_running(self, process_name):
+        """Check if a process is running"""
+        try:
+            result = subprocess.run(
+                f"pgrep -f {process_name}",
+                shell=True, capture_output=True, text=True
+            )
+            return result.returncode == 0
+        except:
+            return False
+
+    def add_tray_placeholder(self, name, icon, process_name):
+        """Add a visual placeholder for a tray icon with proper sizing"""
+        if name in self.tray_icons:
+            return  # Already added
+            
+        try:
+            # Create tray icon container with better spacing
+            container = QWidget()
+            container_layout = QHBoxLayout(container)
+            container_layout.setContentsMargins(4, 2, 4, 2)  # Increased margins
+            container_layout.setSpacing(4)  # Increased spacing
+            
+            # Create clickable tray icon with proper sizing
+            icon_btn = QPushButton(icon)
+            icon_btn.setFixedSize(36, 32)  # Wider (36px) and standard height (32px)
+            icon_btn.setToolTip(f"{name}\nClick to focus\nRight-click for options")
+            icon_btn.setStyleSheet(self.get_tray_icon_stylesheet())
+            
+            # Connect click events
+            icon_btn.clicked.connect(lambda: self.focus_tray_application(process_name))
+            icon_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+            icon_btn.customContextMenuRequested.connect(
+                lambda pos, proc=process_name, disp=name: self.show_tray_icon_menu(pos, proc, disp)
+            )
+            
+            container_layout.addWidget(icon_btn)
+            self.layout.addWidget(container)
+            
+            self.tray_icons[name] = {
+                'container': container,
+                'process': process_name,
+                'button': icon_btn
+            }
+            
+            print(f"✅ Added tray icon: {name}")
+            
+        except Exception as e:
+            print(f"Error adding tray placeholder for {name}: {e}")
+
+    def focus_tray_application(self, process_name):
+        """Focus or start the tray application"""
+        try:
+            # First try to focus existing window
+            result = subprocess.run(
+                f"wmctrl -x -a {process_name}",
+                shell=True, capture_output=True, text=True
+            )
+            
+            # If no window found, try to start the application
+            if result.returncode != 0:
+                subprocess.Popen([process_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                print(f"🔄 Started {process_name}")
+            else:
+                print(f"🎯 Focused {process_name}")
+                
+        except Exception as e:
+            print(f"Error focusing {process_name}: {e}")
+
+    def show_tray_icon_menu(self, position, process_name, display_name):
+        """Show context menu for tray icon with proper app-specific actions"""
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {TokyoNight.NIGHT_TOP}, 
+                    stop:0.7 {TokyoNight.NIGHT_BOTTOM},
+                    stop:1 {TokyoNight.NIGHT_HIGHLIGHT});
+                color: {TokyoNight.FOREGROUND};
+                border: 1px solid {TokyoNight.NEBULA};
+                border-radius: 6px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 16px;
+                border-radius: 4px;
+                font-family: "JetBrains Mono Nerd Font";
+            }}
+            QMenu::item:selected {{
+                background: {TokyoNight.BLUE};
+                color: {TokyoNight.BACKGROUND};
+            }}
+        """)
+        
+        # App-specific actions
+        if process_name == "nm-applet":
+            # Network Manager specific actions
+            network_actions = [
+                ("󰤨 Open Network Manager", self.open_network_manager),
+                ("󰖩 Wireless Networks", self.open_wireless_networks),
+                ("󰒓 Connection Editor", self.open_connection_editor),
+            ]
+            
+            for name, callback in network_actions:
+                action = QAction(name, self)
+                action.triggered.connect(callback)
+                menu.addAction(action)
+                
+            menu.addSeparator()
+            
+            # Status info
+            status_action = QAction(f"󰤨 Network Manager", self)
+            status_action.setEnabled(False)
+            menu.addAction(status_action)
+            
+        elif process_name == "blueman-applet":
+            # Bluetooth specific actions
+            bluetooth_actions = [
+                ("󰂯 Open Bluetooth Manager", self.open_bluetooth_manager),
+                ("󰂯 Scan for Devices", self.scan_bluetooth),
+                ("󰂲 Turn Bluetooth On/Off", self.toggle_bluetooth),
+            ]
+            
+            for name, callback in bluetooth_actions:
+                action = QAction(name, self)
+                action.triggered.connect(callback)
+                menu.addAction(action)
+                
+            menu.addSeparator()
+            
+            # Status info
+            status_action = QAction(f"󰂯 Bluetooth Manager", self)
+            status_action.setEnabled(False)
+            menu.addAction(status_action)
+            
+        else:
+            # Generic actions for other apps
+            focus_action = QAction(f"󰖩 Open {display_name}", self)
+            focus_action.triggered.connect(lambda: self.focus_tray_application(process_name))
+            menu.addAction(focus_action)
+        
+        menu.addSeparator()
+        
+        # Common actions for all apps
+        restart_action = QAction("🔄 Restart", self)
+        restart_action.triggered.connect(lambda: self.restart_application(process_name))
+        menu.addAction(restart_action)
+        
+        quit_action = QAction("󰗼 Quit", self)
+        quit_action.triggered.connect(lambda: self.quit_application(process_name))
+        menu.addAction(quit_action)
+        
+        menu.addSeparator()
+        
+        remove_action = QAction("🗑️ Remove from Tray", self)
+        remove_action.triggered.connect(lambda: self.remove_tray_icon(display_name))
+        menu.addAction(remove_action)
+        
+        menu.exec_(self.mapToGlobal(position))
+
+    def restart_application(self, process_name):
+        """Restart an application"""
+        try:
+            # Kill the process
+            subprocess.run(f"pkill -f {process_name}", shell=True)
+            # Wait a moment and restart
+            QTimer.singleShot(1000, lambda: subprocess.Popen(
+                [process_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            ))
+            print(f"🔄 Restarted {process_name}")
+        except Exception as e:
+            print(f"Error restarting {process_name}: {e}")
+
+    def quit_application(self, process_name):
+        """Quit an application"""
+        try:
+            subprocess.run(f"pkill -f {process_name}", shell=True)
+            print(f"󰗼 Quit {process_name}")
+            
+            # Remove from tray after a delay
+            QTimer.singleShot(2000, self.scan_for_tray_icons)
+            
+        except Exception as e:
+            print(f"Error quitting {process_name}: {e}")
+
+    def remove_tray_icon(self, name):
+        """Remove a specific tray icon"""
+        if name in self.tray_icons:
+            container = self.tray_icons[name]['container']
+            self.layout.removeWidget(container)
+            container.deleteLater()
+            del self.tray_icons[name]
+            print(f"✅ Removed tray icon: {name}")
+
+    def get_tray_icon_stylesheet(self):
+        """Get stylesheet for tray icons with better scaling"""
+        return f"""
+            QPushButton {{
+                background: {TokyoNight.SELECTION};
+                border: 1px solid {TokyoNight.NEBULA}40;
+                border-radius: 6px;
+                color: {TokyoNight.FOREGROUND};
+                font-size: 14px;
+                font-family: "JetBrains Mono Nerd Font";
+                padding: 2px 4px;
+            }}
+            QPushButton:hover {{
+                background: {TokyoNight.BLUE}40;
+                border: 1px solid {TokyoNight.BLUE}60;
+            }}
+            QPushButton:pressed {{
+                background: {TokyoNight.BLUE}60;
+            }}
+        """
 
     def clear_tray_icons(self):
         """Clear all tray icons"""
-        for icon in self.tray_icons:
-            icon.deleteLater()
-        self.tray_icons.clear()
+        for name, data in list(self.tray_icons.items()):
+            container = data['container']
+            self.layout.removeWidget(container)
+            container.deleteLater()
+            del self.tray_icons[name]
+
+
+class EnhancedTrayManager:
+    """Manager for enhanced tray functionality"""
+    
+    def __init__(self, panel):
+        self.panel = panel
+        self.tray_widget = None
+        self.setup_tray_manager()
+
+    def setup_tray_manager(self):
+        """Setup the tray manager"""
+        try:
+            if hasattr(self.panel, 'tray_widget'):
+                self.tray_widget = self.panel.tray_widget
+                print("✅ Enhanced tray manager initialized")
+                
+            # Start common tray applications if not running
+            self.start_common_tray_apps()
+            
+        except Exception as e:
+            print(f"Tray manager setup error: {e}")
+
+    def start_common_tray_apps(self):
+        """Start common tray applications"""
+        common_apps = ["nm-applet", "blueman-applet"]
+        
+        for app in common_apps:
+            try:
+                result = subprocess.run(f"pgrep -f {app}", shell=True, capture_output=True)
+                if result.returncode != 0:
+                    subprocess.Popen([app], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    print(f"✅ Started {app}")
+            except Exception as e:
+                print(f"Error starting {app}: {e}")
+
+
+
+    def force_discord_tray(self):
+        """Force Discord to show tray icon with multiple methods"""
+        try:
+            # Check if Discord is running
+            result = subprocess.run("pgrep -f discord", shell=True, capture_output=True)
+            if result.returncode == 0:
+                print("🎯 Discord is running, forcing tray icon...")
+                
+                # Method 1: Restart Discord's tray component
+                subprocess.run("pkill -f -SIGUSR1 discord", shell=True)
+                
+                # Method 2: Focus Discord window to trigger tray icon
+                subprocess.run("wmctrl -x -a discord", shell=True)
+                
+                # Method 3: Use xdotool to refresh Discord
+                subprocess.run("xdotool search --class discord windowactivate", shell=True)
+                
+                # Method 4: Kill and restart Discord tray process
+                subprocess.run("pkill -f 'discord.*tray'", shell=True)
+                
+                print("✅ Attempted multiple methods to force Discord tray icon")
+                
+                # Refresh our tray icons after a delay
+                QTimer.singleShot(3000, self.refresh_tray_icons)
+            else:
+                print("⚠️ Discord is not running")
+                # Start Discord if not running
+                subprocess.Popen(["discord"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                print("🚀 Started Discord, tray icon should appear shortly")
+                
+        except Exception as e:
+            print(f"❌ Error forcing Discord tray: {e}")
+
+
+
+
 
 @dataclass
 class PanelConfig:
@@ -5061,7 +5644,7 @@ class PanelConfig:
     show_notifications: bool = True
     
     # Network and Bluetooth controls
-    show_network_control: bool = True
+    show_network_control: bool = False
     show_bluetooth_control: bool = True
     weather_location: str = ""
     
@@ -5074,9 +5657,9 @@ class PanelConfig:
     show_on_edge: bool = True
     edge_size: int = 5
 
-    # Built-in launcher configurations
-    terminal_command: str = "xfce4-terminal"
-    file_manager_command: str = "thunar"
+    # Built-in launcher configurations - CHANGED DEFAULTS HERE
+    terminal_command: str = "term5"  # Changed from "xfce4-terminal"
+    file_manager_command: str = "fm10"  # Changed from "thunar"
     browser_command: str = "firefox"
     text_editor_command: str = "mousepad"
     settings_command: str = "xfce4-settings-manager"
@@ -5111,7 +5694,7 @@ class PanelConfig:
 
 
 class LauncherDialog(QDialog):
-    """Dialog for adding/editing a launcher with system icon support and workspace targeting"""
+    """Dialog for adding/editing a launcher with system icon browser"""
     def __init__(self, parent=None, launcher=None):
         super().__init__(parent)
         self.launcher = launcher
@@ -5122,11 +5705,31 @@ class LauncherDialog(QDialog):
             self.command_edit.setText(self.launcher.command)
             self.args_edit.setText(self.launcher.args)
             self.icon_edit.setText(self.launcher.icon)
-            self.workspace_combo.setCurrentIndex(self.launcher.workspace + 1)  # +1 because index 0 is "Current"
+            self.workspace_combo.setCurrentIndex(self.launcher.workspace + 1)
+            
+            # Load icon preview if it exists
+            if self.launcher.icon:
+                self.load_icon_preview(self.launcher.icon)
 
     def setup_ui(self):
         self.setWindowTitle("Add Launcher" if not self.launcher else "Edit Launcher")
-        self.setFixedSize(450, 350)  # Increased height for workspace option
+        
+        # Make window resizable with smart sizing
+        screen = QApplication.primaryScreen()
+        screen_rect = screen.availableGeometry()
+        
+        # Set reasonable size constraints
+        self.setMinimumSize(700, 600)
+        self.setMaximumSize(1400, 1000)
+        
+        # Start at a comfortable size
+        default_width = min(900, int(screen_rect.width() * 0.75))
+        default_height = min(700, int(screen_rect.height() * 0.75))
+        self.resize(default_width, default_height)
+        
+        # Enable maximize button and resizing
+        self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
+        
         self.setStyleSheet(f"""
             QDialog {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -5139,13 +5742,16 @@ class LauncherDialog(QDialog):
             }}
             QLabel {{
                 color: {TokyoNight.FOREGROUND};
+                font-size: 10pt;
             }}
             QLineEdit, QComboBox {{
                 background: {TokyoNight.SELECTION};
                 color: {TokyoNight.FOREGROUND};
                 border: 1px solid {TokyoNight.NEBULA};
-                padding: 5px;
-                border-radius: 3px;
+                padding: 8px;
+                border-radius: 4px;
+                font-size: 10pt;
+                min-height: 20px;
             }}
             QPushButton {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -5153,65 +5759,567 @@ class LauncherDialog(QDialog):
                     stop:1 {TokyoNight.PURPLE});
                 color: {TokyoNight.BACKGROUND};
                 border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
+                padding: 10px 20px;
+                border-radius: 5px;
                 font-weight: bold;
+                font-size: 10pt;
+                min-height: 25px;
             }}
             QPushButton:hover {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 {TokyoNight.CYAN}, 
                     stop:1 {TokyoNight.BLUE});
             }}
+            QListWidget {{
+                background: {TokyoNight.SELECTION};
+                color: {TokyoNight.FOREGROUND};
+                border: 1px solid {TokyoNight.NEBULA};
+                border-radius: 4px;
+                padding: 5px;
+                font-size: 10pt;
+            }}
+            QListWidget::item {{
+                padding: 10px;
+                border-radius: 4px;
+                border-bottom: 1px solid {TokyoNight.NEBULA}40;
+            }}
+            QListWidget::item:selected {{
+                background: {TokyoNight.BLUE};
+                color: {TokyoNight.BACKGROUND};
+            }}
+            QListWidget::item:hover {{
+                background: {TokyoNight.BLUE}20;
+            }}
+            QGroupBox {{
+                color: {TokyoNight.FOREGROUND};
+                border: 1px solid {TokyoNight.NEBULA};
+                border-radius: 6px;
+                margin-top: 15px;
+                padding-top: 15px;
+                background: {TokyoNight.NIGHT_BOTTOM}80;
+                font-size: 10pt;
+                font-weight: bold;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 8px 0 8px;
+            }}
         """)
-        layout = QFormLayout()
+        
+        layout = QVBoxLayout()
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+        
+        # Form layout for basic info
+        form_layout = QFormLayout()
+        form_layout.setContentsMargins(10, 10, 10, 10)
+        form_layout.setSpacing(12)
+        form_layout.setLabelAlignment(Qt.AlignRight)
         
         self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("Enter application name...")
         if self.launcher:
             self.name_edit.setText(self.launcher.name)
-        layout.addRow("Name:", self.name_edit)
+        form_layout.addRow("Name:", self.name_edit)
         
         self.command_edit = QLineEdit()
+        self.command_edit.setPlaceholderText("Enter command to execute...")
         if self.launcher:
             self.command_edit.setText(self.launcher.command)
-        layout.addRow("Command:", self.command_edit)
+        form_layout.addRow("Command:", self.command_edit)
         
         self.args_edit = QLineEdit()
+        self.args_edit.setPlaceholderText("Optional arguments...")
         if self.launcher:
             self.args_edit.setText(self.launcher.args)
-        self.args_edit.setPlaceholderText("Optional arguments")
-        layout.addRow("Arguments:", self.args_edit)
+        form_layout.addRow("Arguments:", self.args_edit)
         
-        # Icon selection
-        icon_selection_layout = QHBoxLayout()
+        layout.addLayout(form_layout)
+        
+        # Icon selection section
+        icon_group = QGroupBox("Icon Selection")
+        icon_layout = QVBoxLayout(icon_group)
+        icon_layout.setSpacing(12)
+        
+        # Icon preview and manual entry
+        icon_top_layout = QHBoxLayout()
+        icon_top_layout.setSpacing(15)
+        
+        self.icon_preview = QLabel()
+        self.icon_preview.setFixedSize(64, 64)
+        self.icon_preview.setStyleSheet(f"""
+            background: {TokyoNight.SELECTION};
+            border: 2px solid {TokyoNight.NEBULA};
+            border-radius: 8px;
+            font-size: 24pt;
+            font-family: "JetBrains Mono Nerd Font";
+        """)
+        self.icon_preview.setAlignment(Qt.AlignCenter)
+        self.icon_preview.setText("📁")
+        icon_top_layout.addWidget(self.icon_preview)
+        
+        icon_entry_layout = QVBoxLayout()
+        icon_entry_layout.setSpacing(8)
+        
+        icon_label = QLabel("Icon Name or Path:")
+        icon_entry_layout.addWidget(icon_label)
+        
         self.icon_edit = QLineEdit()
-        self.icon_edit.setPlaceholderText("Enter system icon name (e.g., 'firefox', 'thunar') or path")
+        self.icon_edit.setPlaceholderText("Enter icon name, path, or browse below...")
         if self.launcher:
             self.icon_edit.setText(self.launcher.icon)
-        browse_icon_btn = QPushButton("Browse System Icon")
-        browse_icon_btn.clicked.connect(self.browse_system_icon)
-        icon_selection_layout.addWidget(self.icon_edit)
-        icon_selection_layout.addWidget(browse_icon_btn)
-        layout.addRow("Icon (name or path):", icon_selection_layout)
+        self.icon_edit.textChanged.connect(self.on_icon_text_changed)
+        icon_entry_layout.addWidget(self.icon_edit)
         
-        # NEW: Workspace selection
+        icon_buttons_layout = QHBoxLayout()
+        icon_buttons_layout.setSpacing(10)
+        
+        self.browse_file_btn = QPushButton("󰉋 Browse Files...")
+        self.browse_file_btn.setIcon(QIcon.fromTheme("folder"))
+        self.browse_file_btn.clicked.connect(self.browse_icon_file)
+        icon_buttons_layout.addWidget(self.browse_file_btn)
+        
+        self.browse_theme_btn = QPushButton("󰀻 Browse Theme Icons")
+        self.browse_theme_btn.setIcon(QIcon.fromTheme("preferences-desktop-theme"))
+        self.browse_theme_btn.clicked.connect(self.browse_theme_icons)
+        icon_buttons_layout.addWidget(self.browse_theme_btn)
+        
+        icon_entry_layout.addLayout(icon_buttons_layout)
+        icon_top_layout.addLayout(icon_entry_layout)
+        icon_layout.addLayout(icon_top_layout)
+        
+        # Icon browser - make resizable
+        icon_browser_layout = QHBoxLayout()
+        icon_browser_layout.setSpacing(15)
+        
+        # Common system icons - fixed width
+        common_icons_group = QGroupBox("Common Icons")
+        common_icons_group.setMinimumWidth(280)
+        common_layout = QVBoxLayout(common_icons_group)
+        
+        self.common_icons_list = QListWidget()
+        self.common_icons_list.setMinimumHeight(150)
+        self.common_icons_list.setFont(QFont("JetBrains Mono Nerd Font", 11))
+        self.common_icons_list.itemClicked.connect(self.on_common_icon_selected)
+        
+        # Add common system icons
+        common_icons = [
+            ("󰆍", "terminal"),
+            ("󰈹", "firefox"),
+            ("󰉋", "folder"),
+            ("󰈬", "text-editor"),
+            ("󰃤", "preferences-system"),
+            ("󰎁", "calculator"),
+            ("󰊓", "camera-web"),
+            ("󰻭", "image-viewer"),
+            ("󰎄", "multimedia-player"),
+            ("󰇮", "utilities-terminal"),
+            ("󰙯", "discord"),
+            ("󰓓", "steam"),
+            ("󰓇", "spotify"),
+            ("󰒱", "slack"),
+            ("󰗃", "chrome"),
+            ("󰖟", "weather-clear"),
+            ("󰕾", "audio-volume-high"),
+            ("󰤨", "network-wireless"),
+            ("󰂯", "bluetooth"),
+            ("󰍛", "cpu")
+        ]
+        
+        for icon_char, icon_name in common_icons:
+            item = QListWidgetItem(f"{icon_char}  {icon_name}")
+            item.setData(Qt.UserRole, icon_name)
+            item.setFont(QFont("JetBrains Mono Nerd Font", 11))
+            self.common_icons_list.addItem(item)
+        
+        common_layout.addWidget(self.common_icons_list)
+        icon_browser_layout.addWidget(common_icons_group)
+        
+        # Directory browser - expands to fill space
+        dir_group = QGroupBox("File Browser")
+        dir_layout = QVBoxLayout(dir_group)
+        dir_layout.setSpacing(8)
+        
+        # Directory navigation
+        dir_nav_layout = QHBoxLayout()
+        dir_nav_layout.setSpacing(8)
+        
+        self.dir_back_btn = QPushButton("󰁍 Back")
+        self.dir_back_btn.setIcon(QIcon.fromTheme("go-previous"))
+        self.dir_back_btn.clicked.connect(self.browse_dir_back)
+        dir_nav_layout.addWidget(self.dir_back_btn)
+        
+        self.dir_home_btn = QPushButton("󰋜 Home")
+        self.dir_home_btn.setIcon(QIcon.fromTheme("go-home"))
+        self.dir_home_btn.clicked.connect(self.browse_dir_home)
+        dir_nav_layout.addWidget(self.dir_home_btn)
+        
+        self.current_dir_label = QLabel("~/")
+        self.current_dir_label.setStyleSheet(f"color: {TokyoNight.COMMENT}; font-size: 9pt; padding: 5px;")
+        self.current_dir_label.setWordWrap(True)
+        dir_nav_layout.addWidget(self.current_dir_label, 1)
+        
+        dir_layout.addLayout(dir_nav_layout)
+        
+        self.file_list = QListWidget()
+        self.file_list.setMinimumHeight(150)
+        self.file_list.itemDoubleClicked.connect(self.on_file_double_clicked)
+        dir_layout.addWidget(self.file_list)
+        
+        icon_browser_layout.addWidget(dir_group, 1)  # This makes the directory browser expandable
+        icon_layout.addLayout(icon_browser_layout)
+        
+        layout.addWidget(icon_group, 1)  # Make icon group expandable too
+        
+        # Workspace selection
+        workspace_group = QGroupBox("Launch Options")
+        workspace_layout = QHBoxLayout(workspace_group)
+        
+        workspace_layout.addWidget(QLabel("Open in Workspace:"))
+        
         self.workspace_combo = QComboBox()
-        # Get available workspaces
+        self.workspace_combo.setMinimumWidth(200)
         workspaces = self.get_available_workspaces()
-        self.workspace_combo.addItem("Current Workspace", -1)  # -1 means current
+        self.workspace_combo.addItem("Current Workspace", -1)
         for i, workspace_name in enumerate(workspaces):
             self.workspace_combo.addItem(f"Workspace {i+1}: {workspace_name}", i)
-        layout.addRow("Open in Workspace:", self.workspace_combo)
         
+        workspace_layout.addWidget(self.workspace_combo)
+        workspace_layout.addStretch()
+        
+        layout.addWidget(workspace_group)
+        
+        # Buttons
         buttons_layout = QHBoxLayout()
-        save_btn = QPushButton("Save")
+        buttons_layout.setSpacing(20)
+        
+        save_btn = QPushButton("󰆒 Save Launcher")
+        save_btn.setIcon(QIcon.fromTheme("dialog-ok"))
         save_btn.clicked.connect(self.accept)
-        cancel_btn = QPushButton("Cancel")
+        save_btn.setMinimumHeight(35)
+        
+        cancel_btn = QPushButton("󰜺 Cancel")
+        cancel_btn.setIcon(QIcon.fromTheme("dialog-cancel"))
         cancel_btn.clicked.connect(self.reject)
+        cancel_btn.setMinimumHeight(35)
+        
+        buttons_layout.addStretch()
         buttons_layout.addWidget(save_btn)
         buttons_layout.addWidget(cancel_btn)
-        layout.addRow(buttons_layout)
+        
+        layout.addLayout(buttons_layout)
         
         self.setLayout(layout)
+        
+        # Initialize file browser
+        self.current_dir = str(Path.home())
+        self.browse_directory(self.current_dir)
+
+    def browse_icon_file(self):
+        """Open file dialog to select icon file"""
+        file_dialog = QFileDialog(self)
+        file_dialog.setWindowTitle("Select Icon File")
+        file_dialog.setFileMode(QFileDialog.ExistingFile)
+        file_dialog.setNameFilter("Images (*.png *.svg *.xpm *.jpg *.jpeg);;All files (*)")
+        
+        # Set common icon directories
+        icon_dirs = [
+            "/usr/share/icons",
+            "/usr/share/pixmaps", 
+            str(Path.home() / ".local/share/icons"),
+            str(Path.home() / ".icons")
+        ]
+        
+        for icon_dir in icon_dirs:
+            if os.path.exists(icon_dir):
+                file_dialog.setDirectory(icon_dir)
+                break
+        
+        if file_dialog.exec_() == QFileDialog.Accepted:
+            selected_file = file_dialog.selectedFiles()[0]
+            self.icon_edit.setText(selected_file)
+            self.load_icon_preview(selected_file)
+
+    def browse_theme_icons(self):
+        """Browse system theme icons"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Browse Theme Icons")
+        dialog.setFixedSize(600, 400)
+        dialog.setStyleSheet(self.styleSheet())
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Search box
+        search_layout = QHBoxLayout()
+        search_edit = QLineEdit()
+        search_edit.setPlaceholderText("Search theme icons...")
+        search_edit.textChanged.connect(lambda text: self.filter_theme_icons(text, icon_list))
+        search_layout.addWidget(search_edit)
+        layout.addLayout(search_layout)
+        
+        # Icon list
+        icon_list = QListWidget()
+        icon_list.itemDoubleClicked.connect(lambda item: self.on_theme_icon_selected(item, dialog))
+        
+        # Load theme icons
+        self.load_theme_icons(icon_list)
+        
+        layout.addWidget(icon_list)
+        dialog.exec_()
+
+    def load_theme_icons(self, icon_list):
+        """Load available theme icons"""
+        try:
+            # Get theme icons using gtk
+            theme_dirs = [
+                "/usr/share/icons",
+                "/usr/share/pixmaps",
+                str(Path.home() / ".local/share/icons"),
+                str(Path.home() / ".icons")
+            ]
+            
+            icon_extensions = {'.png', '.svg', '.xpm', '.jpg', '.jpeg'}
+            added_icons = set()
+            
+            for theme_dir in theme_dirs:
+                if os.path.exists(theme_dir):
+                    for root, dirs, files in os.walk(theme_dir):
+                        for file in files:
+                            if any(file.lower().endswith(ext) for ext in icon_extensions):
+                                icon_name = os.path.splitext(file)[0]
+                                if icon_name not in added_icons:
+                                    added_icons.add(icon_name)
+                                    # Try to get a preview
+                                    icon_path = os.path.join(root, file)
+                                    item = QListWidgetItem(icon_name)
+                                    item.setData(Qt.UserRole, icon_name)
+                                    item.setToolTip(icon_path)
+                                    icon_list.addItem(item)
+            
+            # Add common theme icon names as fallback
+            common_theme_icons = [
+                "application-x-executable", "folder", "text-x-generic",
+                "image-x-generic", "video-x-generic", "audio-x-generic",
+                "system-file-manager", "terminal", "firefox", "chromium",
+                "libreoffice", "gimp", "vlc", "spotify", "discord"
+            ]
+            
+            for icon_name in common_theme_icons:
+                if icon_name not in added_icons:
+                    item = QListWidgetItem(icon_name)
+                    item.setData(Qt.UserRole, icon_name)
+                    icon_list.addItem(item)
+                    
+        except Exception as e:
+            print(f"Error loading theme icons: {e}")
+
+    def filter_theme_icons(self, text, icon_list):
+        """Filter theme icons based on search text"""
+        for i in range(icon_list.count()):
+            item = icon_list.item(i)
+            item.setHidden(text.lower() not in item.text().lower())
+
+    def on_theme_icon_selected(self, item, dialog):
+        """Handle theme icon selection"""
+        icon_name = item.data(Qt.UserRole)
+        self.icon_edit.setText(icon_name)
+        self.load_icon_preview(icon_name)
+        dialog.accept()
+
+    def browse_directory(self, directory):
+        """Browse directory for image files with icon previews"""
+        self.current_dir = directory
+        self.current_dir_label.setText(directory[-30:] + "..." if len(directory) > 30 else directory)
+        
+        self.file_list.clear()
+        
+        try:
+            # Add parent directory entry
+            if directory != "/":
+                parent_item = QListWidgetItem("󰝰 ...")
+                parent_item.setData(Qt.UserRole, str(Path(directory).parent))
+                parent_item.setToolTip("Go to parent directory")
+                self.file_list.addItem(parent_item)
+            
+            # List directory contents
+            for item in sorted(os.listdir(directory)):
+                item_path = os.path.join(directory, item)
+                
+                try:
+                    if os.path.isdir(item_path):
+                        # Directory
+                        list_item = QListWidgetItem(f"󰉋 {item}/")
+                        list_item.setData(Qt.UserRole, item_path)
+                        list_item.setToolTip(f"Directory: {item_path}")
+                        self.file_list.addItem(list_item)
+                    else:
+                        # File - only show image files
+                        if any(item.lower().endswith(ext) for ext in ['.png', '.svg', '.xpm', '.jpg', '.jpeg', '.ico']):
+                            # Try to load a small preview
+                            pixmap = QPixmap(item_path)
+                            if not pixmap.isNull():
+                                # Scale to small icon size
+                                icon_pixmap = pixmap.scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                                list_item = QListWidgetItem(QIcon(icon_pixmap), f"  {item}")
+                            else:
+                                list_item = QListWidgetItem(f"󰋩 {item}")
+                            
+                            list_item.setData(Qt.UserRole, item_path)
+                            list_item.setToolTip(f"File: {item_path}")
+                            self.file_list.addItem(list_item)
+                except (PermissionError, OSError):
+                    continue
+                    
+        except PermissionError:
+            error_item = QListWidgetItem("󰦖 Permission denied")
+            self.file_list.addItem(error_item)
+        except Exception as e:
+            error_item = QListWidgetItem(f"󰀦 Error: {str(e)}")
+            self.file_list.addItem(error_item)
+
+    def browse_dir_back(self):
+        """Navigate to parent directory"""
+        parent_dir = str(Path(self.current_dir).parent)
+        if os.path.exists(parent_dir):
+            self.browse_directory(parent_dir)
+
+    def browse_dir_home(self):
+        """Navigate to home directory"""
+        self.browse_directory(str(Path.home()))
+
+    def on_file_double_clicked(self, item):
+        """Handle file/directory double click"""
+        path = item.data(Qt.UserRole)
+        if os.path.isdir(path):
+            self.browse_directory(path)
+        else:
+            # File selected
+            self.icon_edit.setText(path)
+            self.load_icon_preview(path)
+
+    def on_common_icon_selected(self, item):
+        """Handle common icon selection"""
+        icon_name = item.data(Qt.UserRole)
+        self.icon_edit.setText(icon_name)
+        self.load_icon_preview(icon_name)
+
+    def on_icon_text_changed(self, text):
+        """Handle icon text changes"""
+        self.load_icon_preview(text)
+
+    def load_icon_preview(self, icon_input):
+        """Load icon preview with proper scaling and fallbacks"""
+        try:
+            # Clear previous content
+            self.icon_preview.clear()
+            
+            if not icon_input or not icon_input.strip():
+                self.icon_preview.setText("📁")
+                return
+                
+            icon_input = icon_input.strip()
+            
+            # Method 1: Try as file path first
+            if os.path.isfile(icon_input):
+                pixmap = QPixmap(icon_input)
+                if not pixmap.isNull():
+                    # Scale pixmap to fit preview while maintaining aspect ratio
+                    scaled_pixmap = pixmap.scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    self.icon_preview.setPixmap(scaled_pixmap)
+                    self.icon_preview.setText("")  # Clear any text
+                    print(f"✅ Loaded icon from file: {icon_input}")
+                    return
+            
+            # Method 2: Try as theme icon
+            theme_icon = QIcon.fromTheme(icon_input)
+            if not theme_icon.isNull():
+                pixmap = theme_icon.pixmap(32, 32)
+                self.icon_preview.setPixmap(pixmap)
+                self.icon_preview.setText("")  # Clear any text
+                print(f"✅ Loaded theme icon: {icon_input}")
+                return
+            
+            # Method 3: Check if it's a Nerd Font icon or emoji
+            # Nerd Font icons are usually single characters or short strings
+            if len(icon_input) <= 3:
+                self.icon_preview.setPixmap(QPixmap())  # Clear pixmap
+                self.icon_preview.setText(icon_input)
+                self.icon_preview.setStyleSheet(f"""
+                    font-size: 20pt;
+                    font-family: "JetBrains Mono Nerd Font";
+                    color: {TokyoNight.FOREGROUND};
+                """)
+                print(f"✅ Using text icon: {icon_input}")
+                return
+            
+            # Method 4: Try to find icon in common paths
+            icon_paths = self.find_icon_in_paths(icon_input)
+            if icon_paths:
+                pixmap = QPixmap(icon_paths[0])
+                if not pixmap.isNull():
+                    scaled_pixmap = pixmap.scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    self.icon_preview.setPixmap(scaled_pixmap)
+                    self.icon_preview.setText("")
+                    print(f"✅ Found icon in path: {icon_paths[0]}")
+                    return
+            
+            # Fallback: Use folder icon
+            self.icon_preview.setPixmap(QPixmap())  # Clear pixmap
+            self.icon_preview.setText("📁")
+            self.icon_preview.setStyleSheet(f"""
+                font-size: 20pt;
+                font-family: "JetBrains Mono Nerd Font";
+                color: {TokyoNight.FOREGROUND};
+            """)
+            print(f"❌ Could not load icon: {icon_input}, using fallback")
+            
+        except Exception as e:
+            print(f"❌ Error loading icon preview for '{icon_input}': {e}")
+            # Ultimate fallback
+            self.icon_preview.setPixmap(QPixmap())
+            self.icon_preview.setText("📁")
+            self.icon_preview.setStyleSheet(f"""
+                font-size: 20pt;
+                font-family: "JetBrains Mono Nerd Font";
+                color: {TokyoNight.FOREGROUND};
+            """)
+
+    def find_icon_in_paths(self, icon_name):
+        """Search for icon in common system paths"""
+        icon_dirs = [
+            "/usr/share/icons/hicolor/48x48/apps",
+            "/usr/share/icons/hicolor/32x32/apps", 
+            "/usr/share/icons/hicolor/24x24/apps",
+            "/usr/share/icons/hicolor/16x16/apps",
+            "/usr/share/pixmaps",
+            "/usr/share/icons/hicolor/scalable/apps",
+            str(Path.home() / ".local/share/icons"),
+            str(Path.home() / ".icons/hicolor/48x48/apps"),
+            "/var/lib/flatpak/exports/share/icons/hicolor/48x48/apps"
+        ]
+        
+        extensions = ['.png', '.svg', '.xpm', '.jpg', '.jpeg']
+        
+        for icon_dir in icon_dirs:
+            if os.path.exists(icon_dir):
+                for ext in extensions:
+                    # Try exact name
+                    icon_path = os.path.join(icon_dir, icon_name + ext)
+                    if os.path.exists(icon_path):
+                        return [icon_path]
+                    
+                    # Try name with different cases
+                    icon_path = os.path.join(icon_dir, icon_name.lower() + ext)
+                    if os.path.exists(icon_path):
+                        return [icon_path]
+                    
+                    # Try name with underscores
+                    icon_path_underscore = os.path.join(icon_dir, icon_name.replace('-', '_') + ext)
+                    if os.path.exists(icon_path_underscore):
+                        return [icon_path_underscore]
+        
+        return None
 
     def get_available_workspaces(self):
         """Get list of available workspace names"""
@@ -5220,10 +6328,8 @@ class LauncherDialog(QDialog):
             result = subprocess.run("wmctrl -d", shell=True, capture_output=True, text=True)
             if result.returncode == 0:
                 for line in result.stdout.splitlines():
-                    # Extract workspace name (the part after the resolution)
                     parts = line.split()
                     if len(parts) >= 9:
-                        # Join the parts that form the workspace name
                         name_parts = parts[8:]
                         workspace_name = ' '.join(name_parts)
                         workspaces.append(workspace_name)
@@ -5231,21 +6337,11 @@ class LauncherDialog(QDialog):
                         workspaces.append(f"Workspace {len(workspaces)}")
         except Exception as e:
             print(f"Error getting workspaces: {e}")
-            # Fallback: create generic workspace names
             workspaces = [f"Workspace {i+1}" for i in range(4)]
         return workspaces
 
-    def browse_system_icon(self):
-        """Open a simple dialog to enter a system icon name."""
-        icon_name, ok = QInputDialog.getText(
-            self, "System Icon Name", "Enter system icon name (e.g., 'firefox', 'thunar', 'terminal'):", 
-            QLineEdit.Normal, self.icon_edit.text()
-        )
-        if ok:
-            self.icon_edit.setText(icon_name)
-
     def get_launcher(self):
-        """Get the launcher from the dialog."""
+        """Get the launcher from the dialog"""
         workspace_index = self.workspace_combo.currentData()
         return Application(
             name=self.name_edit.text(),
@@ -5621,8 +6717,8 @@ class SettingsDialog(QDialog):
         
         # Group common applications
         apps = [
-            ("Terminal:", "terminal_edit", self.config.terminal_command, "xfce4-terminal, gnome-terminal, konsole"),
-            ("File Manager:", "file_manager_edit", self.config.file_manager_command, "thunar, nautilus, dolphin"),
+            ("Terminal:", "terminal_edit", self.config.terminal_command, "term5"),
+            ("File Manager:", "file_manager_edit", self.config.file_manager_command, "fm10"),
             ("Web Browser:", "browser_edit", self.config.browser_command, "firefox, chromium, google-chrome"),
             ("Text Editor:", "text_editor_edit", self.config.text_editor_command, "mousepad, gedit, kate"),
             ("Settings:", "settings_edit", self.config.settings_command, "xfce4-settings-manager, gnome-control-center"),
@@ -6865,10 +7961,10 @@ class TokyoNightPanelBar(QMainWindow):
             self.tiling_control = TilingControlWidget(self)
             right_layout.addWidget(self.tiling_control)
         
-        # === ENHANCED NETWORK WIDGET - REPLACES OLD NETWORK LABEL ===
+        # === ENHANCED NETWORK WIDGET - ONLY NETWORK DISPLAY ===
         if self.config.show_network:
             self.enhanced_network = EnhancedNetworkWidget(self)
-            self.enhanced_network.setMaximumWidth(200)  # Reasonable width limit
+            self.enhanced_network.setMaximumWidth(200)
             right_layout.addWidget(self.enhanced_network)
         
         # Battery display (keep this as it's separate from network)
@@ -6885,16 +7981,26 @@ class TokyoNightPanelBar(QMainWindow):
             """)
             right_layout.addWidget(self.battery_label)
         
-        # System tray area
+        # === ENHANCED SYSTEM TRAY AREA ===
         if self.config.show_tray:
+            # Use the enhanced SystemTrayWidget
             self.tray_widget = SystemTrayWidget(self)
-            self.tray_widget.setMaximumWidth(200)
+            self.tray_widget.setMaximumWidth(300)  # More space for multiple icons
             right_layout.addWidget(self.tray_widget)
+            
+            # Add context menu to tray area for management
+            self.tray_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.tray_widget.customContextMenuRequested.connect(self.show_tray_context_menu)
+            
+            # Initialize enhanced tray manager
+            self.tray_manager = EnhancedTrayManager(self)
+            
             # Separator before system menu
             sep3 = QFrame()
             sep3.setFrameShape(QFrame.VLine)
             sep3.setFrameShadow(QFrame.Sunken)
             right_layout.addWidget(sep3)
+        
         # System menu button
         self.system_button = QToolButton()
         self.system_button.setText("󰀽")
@@ -6903,12 +8009,146 @@ class TokyoNightPanelBar(QMainWindow):
         self.system_button.setMenu(self.create_system_menu())
         self.system_button.setFixedSize(32, 32)
         right_layout.addWidget(self.system_button)
+        
         # Add all sections to main layout WITH PROPER STRETCH FACTORS
         layout.addWidget(self.left_widget, 1)  # Left section expands
         layout.addWidget(self.center_widget, 0)  # Center section fixed width
         layout.addWidget(self.right_widget, 0)  # Right section fixed width
+        
         # Set initial geometry
         self.update_panel_geometry()
+
+
+
+
+
+
+    def show_tray_context_menu(self, position):
+        """Show context menu for tray area"""
+        menu = QMenu(self)
+        menu.setStyleSheet(self.get_stylesheet())
+        
+        # Refresh tray icons
+        refresh_action = QAction("󰑐 Refresh Tray Icons", self)
+        refresh_action.triggered.connect(self.refresh_tray_icons)
+        menu.addAction(refresh_action)
+        
+        # Force Discord tray icon
+        discord_action = QAction("🎯 Force Discord Tray", self)
+        discord_action.triggered.connect(self.force_discord_tray)
+        menu.addAction(discord_action)
+        
+        # Restart tray services
+        restart_action = QAction("🔄 Restart Tray Services", self)
+        restart_action.triggered.connect(self.restart_tray_services)
+        menu.addAction(restart_action)
+        
+        menu.addSeparator()
+        
+        # Common tray applications
+        tray_apps_menu = QMenu("󰀻 Start Tray App", self)
+        tray_apps_menu.setStyleSheet(menu.styleSheet())
+        
+        tray_apps = [
+            ("Discord", "discord"),
+            ("Steam", "steam"),
+            ("Spotify", "spotify"),
+            ("Slack", "slack"),
+            ("Telegram", "telegram-desktop"),
+            ("Dropbox", "dropbox"),
+            ("Network Manager", "nm-applet"),
+            ("Bluetooth", "blueman-applet")
+        ]
+        
+        for name, command in tray_apps:
+            action = QAction(name, self)
+            action.triggered.connect(lambda checked, cmd=command: self.start_tray_application(cmd))
+            tray_apps_menu.addAction(action)
+        
+        menu.addMenu(tray_apps_menu)
+        
+        menu.addSeparator()
+        
+        # Clear all tray icons
+        clear_action = QAction("🗑️ Clear All Tray Icons", self)
+        clear_action.triggered.connect(self.clear_tray_icons)
+        menu.addAction(clear_action)
+        
+        menu.exec_(self.tray_widget.mapToGlobal(position))
+
+    def refresh_tray_icons(self):
+        """Force refresh tray icons - ADD THIS METHOD"""
+        if hasattr(self, 'tray_widget'):
+            self.tray_widget.clear_tray_icons()
+            QTimer.singleShot(1000, self.tray_widget.check_for_new_tray_icons)
+            print("✅ Refreshing tray icons...")
+
+    def restart_tray_services(self):
+        """Restart system tray services - ADD THIS METHOD"""
+        try:
+            # Restart common tray services
+            services = ["nm-applet", "blueman-applet"]
+            for service in services:
+                subprocess.run(f"pkill {service}", shell=True)
+                time.sleep(1)  # Wait a moment
+                subprocess.Popen([service], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            print("✅ Tray services restarted")
+            
+            # Refresh tray icons after restart
+            QTimer.singleShot(3000, self.refresh_tray_icons)
+            
+        except Exception as e:
+            print(f"Error restarting tray services: {e}")
+
+    def start_tray_application(self, command):
+        """Start a tray application - ADD THIS METHOD"""
+        try:
+            subprocess.Popen([command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print(f"✅ Started tray application: {command}")
+            
+            # Refresh tray icons after starting app
+            QTimer.singleShot(3000, self.refresh_tray_icons)
+            
+        except Exception as e:
+            print(f"Error starting {command}: {e}")
+
+    def clear_tray_icons(self):
+        """Clear all tray icons - ADD THIS METHOD"""
+        if hasattr(self, 'tray_widget'):
+            self.tray_widget.clear_tray_icons()
+            print("✅ Cleared all tray icons")
+
+    def cleanup(self):
+        """Clean up all resources - UPDATE EXISTING METHOD"""
+        print("🧹 Cleaning up panel resources...")
+        
+        # Stop all timers - ADD TRAY TIMER
+        timers = [
+            'clock_timer', 'window_timer', 'volume_timer', 
+            'weather_timer', 'notification_timer', 'auto_hide_timer',
+            'edge_detection_timer', 'health_timer', 'memory_check_timer',
+            'monitor_timer', 'animation'
+        ]
+        
+        for timer_name in timers:
+            if hasattr(self, timer_name):
+                timer = getattr(self, timer_name)
+                if timer and hasattr(timer, 'stop'):
+                    timer.stop()
+                    print(f"⏹️  Stopped {timer_name}")
+        
+        # Stop tray monitoring timer
+        if hasattr(self, 'tray_widget') and hasattr(self.tray_widget, 'monitor_timer'):
+            self.tray_widget.monitor_timer.stop()
+            print("⏹️  Stopped tray monitor timer")
+        
+        # ... rest of existing cleanup code ...
+
+
+
+
+
 
 
 
@@ -7182,6 +8422,28 @@ class TokyoNightPanelBar(QMainWindow):
         """Clean up all resources before exit"""
         print("🧹 Cleaning up panel resources...")
         
+        # Stop monitor thread first
+        if hasattr(self, 'monitor_thread'):
+            print("🛑 Stopping monitor thread...")
+            try:
+                # Disconnect all signals to prevent updates during cleanup
+                try:
+                    self.monitor_thread.cpu_updated.disconnect()
+                    self.monitor_thread.memory_updated.disconnect()
+                    self.monitor_thread.battery_updated.disconnect()
+                    self.monitor_thread.volume_updated.disconnect()
+                    self.monitor_thread.network_updated.disconnect()
+                except:
+                    pass
+                
+                self.monitor_thread.stop()
+                if not self.monitor_thread.wait(2000):  # Wait up to 2 seconds
+                    print("⚠️ Monitor thread didn't stop gracefully, terminating...")
+                    self.monitor_thread.terminate()
+                    self.monitor_thread.wait(1000)
+            except Exception as e:
+                print(f"Error stopping monitor thread: {e}")
+        
         # Stop all timers
         timers = [
             'clock_timer', 'window_timer', 'volume_timer', 
@@ -7195,27 +8457,9 @@ class TokyoNightPanelBar(QMainWindow):
                 timer = getattr(self, timer_name)
                 if timer and hasattr(timer, 'stop'):
                     timer.stop()
-                    print(f"⏹️  Stopped {timer_name}")
+                    print(f"⏹️ Stopped {timer_name}")
         
-        # Stop monitor thread
-        if hasattr(self, 'monitor_thread'):
-            print("🛑 Stopping monitor thread...")
-            self.monitor_thread.stop()
-            if not self.monitor_thread.wait(3000):  # Wait up to 3 seconds
-                print("⚠️  Monitor thread didn't stop gracefully, terminating...")
-                self.monitor_thread.terminate()
-                self.monitor_thread.wait(2000)
-        
-        # Clean up taskbar
-        self.cleanup_taskbar()
-        
-        # Clean up tiling control
-        if hasattr(self, 'tiling_control'):
-            self.tiling_control.cleanup()
-        
-        # Clean up launchers
-        self.cleanup_launchers()
-        
+        # Clean up the rest...
         print("✅ Panel cleanup completed")
 
     def cleanup_taskbar(self):
@@ -8025,7 +9269,7 @@ class TokyoNightPanelBar(QMainWindow):
         elif not hasattr(self, 'custom_apps'):
             # Initialize with default launchers if none exist
             self.custom_apps = [
-                ("StormOS Launcher", "stormos-launcher", "󰀻"),
+                ("StormOS Launcher", "launcher", "󰀻"),
                 # Add more default launchers here if desired
             ]
         
@@ -8437,73 +9681,171 @@ class TokyoNightPanelBar(QMainWindow):
         self.monitor_thread.start()
 
     def update_cpu_display(self, usage):
-        """Update CPU display with color coding"""
-        color = TokyoNight.GREEN if usage < 50 else TokyoNight.YELLOW if usage < 80 else TokyoNight.RED
-        self.cpu_label.setText(f"󰍛 <font color='{color}'>{usage:.0f}%</font>")
+        """Update CPU display with safety checks"""
+        try:
+            if (not hasattr(self, 'cpu_label') or self.cpu_label is None or
+                not hasattr(self.cpu_label, 'setText')):
+                return
+            color = TokyoNight.GREEN if usage < 50 else TokyoNight.YELLOW if usage < 80 else TokyoNight.RED
+            self.cpu_label.setText(f"󰍛 <font color='{color}'>{usage:.0f}%</font>")
+        except RuntimeError:
+            self.cpu_label = None
+        except Exception as e:
+            print(f"CPU display error: {e}")
 
     def update_memory_display(self, usage):
-        """Update memory display with color coding"""
-        color = TokyoNight.GREEN if usage < 60 else TokyoNight.YELLOW if usage < 85 else TokyoNight.RED
-        self.mem_label.setText(f"󰘚 <font color='{color}'>{usage:.0f}%</font>")
-
-    def update_battery_display(self, capacity, status, time_str):
-        """Update battery display with dynamic icons and time information"""
-        # Check if battery_label exists
-        if not hasattr(self, 'battery_label'):
-            return
-        # Battery icons based on level
-        battery_icons = ["󰂎", "󰁺", "󰁻", "󰁼", "󰁽", "󰁾", "󰂀", "󰂁", "󰂂", "󰁹"]
-        icon_index = min(len(battery_icons) - 1, capacity // 10)
-        icon = battery_icons[icon_index]
-        if status == "Charging":
-            icon = "󰂄"  # Charging icon
-        
-        # Battery capacity color
-        capacity_color = (TokyoNight.GREEN if capacity > 50
-                         else TokyoNight.YELLOW if capacity > 20
-                         else TokyoNight.RED)
-        
-        # Build display text with time information
-        display_text = f"{icon} <font color='{capacity_color}'>{capacity}%</font>"
-        
-        # Add time information if available - CHANGED COLORS HERE
-        if time_str:
-            if status.lower() == "discharging":
-                # Use yellow for discharging time to make it more visible
-                display_text += f" <font color='{TokyoNight.YELLOW}'>({time_str})</font>"
-            elif status.lower() == "charging":
-                display_text += f" <font color='{TokyoNight.GREEN}'>({time_str})</font>"
-            elif status.lower() == "full":
-                display_text += f" <font color='{TokyoNight.GREEN}'>(Full)</font>"
-        
-        self.battery_label.setText(display_text)
-
-    def update_volume_display(self, volume, muted):
-        """Update volume display"""
-        if hasattr(self, 'volume_control'):
-            self.volume_control.update_volume_display(volume, muted)
+        """Update memory display with safety checks"""
+        try:
+            if (not hasattr(self, 'mem_label') or self.mem_label is None or
+                not hasattr(self.mem_label, 'setText')):
+                return
+            color = TokyoNight.GREEN if usage < 60 else TokyoNight.YELLOW if usage < 85 else TokyoNight.RED
+            self.mem_label.setText(f"󰘚 <font color='{color}'>{usage:.0f}%</font>")
+        except RuntimeError:
+            self.mem_label = None
+        except Exception as e:
+            print(f"Memory display error: {e}")
 
     def update_network_display(self, ssid, status):
-        """Update network display"""
-        # Check if network_label exists
-        if not hasattr(self, 'network_label'):
-            return
-        if status == "connected":
-            icon = "󰖩" if ssid else "󰈀"  # WiFi vs Ethernet
-            color = TokyoNight.GREEN
-            text = ssid[:12] if ssid else "Ethernet"
-        else:
-            icon = "󰖪"
-            color = TokyoNight.RED
-            text = "Offline"
-        self.network_label.setText(f"{icon} <font color='{color}'>{text}</font>")
+        """Update network display with safety checks"""
+        try:
+            if (not hasattr(self, 'network_label') or self.network_label is None or
+                not hasattr(self.network_label, 'setText')):
+                return
+            if status == "connected":
+                icon = "󰖩" if ssid else "󰈀"
+                color = TokyoNight.GREEN
+                text = ssid[:12] if ssid else "Ethernet"
+            else:
+                icon = "󰖪"
+                color = TokyoNight.RED
+                text = "Offline"
+            self.network_label.setText(f"{icon} <font color='{color}'>{text}</font>")
+        except RuntimeError:
+            self.network_label = None
+        except Exception as e:
+            print(f"Network display error: {e}")
+
+    def update_battery_display(self, capacity, status, time_str):
+        """Update battery display with safety checks"""
+        try:
+            # Multiple safety checks
+            if (not hasattr(self, 'battery_label') or 
+                self.battery_label is None or
+                not hasattr(self.battery_label, 'setText')):
+                return
+                
+            # Try to access a property to see if object is still valid
+            try:
+                # This will fail if the object was deleted
+                _ = self.battery_label.objectName()
+            except RuntimeError:
+                # Object was deleted, clear the reference
+                self.battery_label = None
+                return
+                
+            # Battery icons based on level
+            battery_icons = ["󰂎", "󰁺", "󰁻", "󰁼", "󰁽", "󰁾", "󰂀", "󰂁", "󰂂", "󰁹"]
+            icon_index = min(len(battery_icons) - 1, capacity // 10)
+            icon = battery_icons[icon_index]
+            if status == "Charging":
+                icon = "󰂄"  # Charging icon
+            
+            # Battery capacity color
+            capacity_color = (TokyoNight.GREEN if capacity > 50
+                             else TokyoNight.YELLOW if capacity > 20
+                             else TokyoNight.RED)
+            
+            # Build display text with time information
+            display_text = f"{icon} <font color='{capacity_color}'>{capacity}%</font>"
+            
+            # Add time information if available
+            if time_str:
+                if status.lower() == "discharging":
+                    display_text += f" <font color='{TokyoNight.YELLOW}'>({time_str})</font>"
+                elif status.lower() == "charging":
+                    display_text += f" <font color='{TokyoNight.GREEN}'>({time_str})</font>"
+                elif status.lower() == "full":
+                    display_text += f" <font color='{TokyoNight.GREEN}'>(Full)</font>"
+            
+            self.battery_label.setText(display_text)
+            
+        except RuntimeError as e:
+            # This catches "wrapped C/C++ object deleted" errors
+            if "wrapped C/C++ object" in str(e):
+                print("Battery label was deleted, clearing reference")
+                self.battery_label = None
+            else:
+                print(f"Battery display error: {e}")
+        except Exception as e:
+            print(f"Unexpected battery display error: {e}")
+
+    def update_volume_display(self, volume, muted):
+        """Update volume display with comprehensive safety checks"""
+        try:
+            # Check if widgets still exist and are valid
+            if (not hasattr(self, 'volume_icon') or not self.volume_icon or
+                not hasattr(self, 'volume_label') or not self.volume_label):
+                return
+                
+            # Check if C++ objects are still valid
+            try:
+                # Test if objects are still alive
+                _ = self.volume_icon.objectName()
+                _ = self.volume_label.objectName()
+            except RuntimeError:
+                # Objects were deleted
+                self.volume_icon = None
+                self.volume_label = None
+                return
+                
+            self.current_volume = volume
+            self.is_muted = muted
+            icon = "󰖁" if muted else "󰕾"
+            color = TokyoNight.RED if muted else TokyoNight.CYAN
+            
+            # Update icon with safety
+            try:
+                self.volume_icon.setText(f"<font color='{color}'>{icon}</font>")
+            except RuntimeError as e:
+                if "wrapped C/C++ object" in str(e):
+                    self.volume_icon = None
+                return
+                
+            # Update label with safety
+            try:
+                self.volume_label.setText(f"<font color='{color}'>{volume}%</font>")
+            except RuntimeError as e:
+                if "wrapped C/C++ object" in str(e):
+                    self.volume_label = None
+                return
+                
+        except Exception as e:
+            print(f"⚠️ Volume display update error: {e}")
+
+
 
     def update_brightness_display(self, brightness):
-        """Update brightness slider position"""
-        if hasattr(self, 'brightness_slider'):
+        """Update brightness slider position - crash-safe version"""
+        try:
+            # Quick safety check
+            if not hasattr(self, 'brightness_slider') or not self.brightness_slider:
+                return
+                
+            # Try the update with exception handling
             self.brightness_slider.blockSignals(True)
             self.brightness_slider.setValue(brightness)
             self.brightness_slider.blockSignals(False)
+            
+        except RuntimeError as e:
+            # Object has been deleted - clear the reference and continue
+            if "wrapped C/C++ object" in str(e):
+                print("⚠️ Brightness slider was deleted, clearing reference")
+                self.brightness_slider = None
+            else:
+                print(f"⚠️ Brightness update error: {e}")
+        except Exception as e:
+            print(f"⚠️ Unexpected brightness error: {e}")
 
     def update_clock(self):
         """Update clock display"""
@@ -8968,32 +10310,45 @@ class TokyoNightPanelBar(QMainWindow):
             print(f"Error switching workspace: {e}")
 
     def update_workspace_display(self, workspace_id):
-        """Update workspace display when workspace changes"""
-        if hasattr(self, 'workspace_buttons') and workspace_id < len(self.workspace_buttons):
-            # Update button styles
+        """Update workspace display when workspace changes with safety checks"""
+        try:
+            if (not hasattr(self, 'workspace_buttons') or 
+                not self.workspace_buttons or 
+                workspace_id >= len(self.workspace_buttons)):
+                return
+            
+            # Update button styles with safety checks
             for i, btn in enumerate(self.workspace_buttons):
-                if i == workspace_id:
-                    btn.setStyleSheet(f"""
-                        QPushButton {{
-                            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                stop:0 {TokyoNight.BLUE}, 
-                                stop:1 {TokyoNight.PURPLE});
-                            color: {TokyoNight.BACKGROUND};
-                            border: none;
-                            border-radius: 6px;
-                            font-weight: bold;
-                            font-size: 10pt;
-                        }}
-                        QPushButton:hover {{
-                            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                try:
+                    # Check if button still exists
+                    if not btn or not hasattr(btn, 'setStyleSheet'):
+                        continue
+                        
+                    # Test if object is still valid
+                    _ = btn.objectName()
+                    
+                    if i == workspace_id:
+                        btn.setStyleSheet(f"""
+                            QPushButton {{
+                                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                    stop:0 {TokyoNight.BLUE}, 
+                                    stop:1 {TokyoNight.PURPLE});
+                                color: {TokyoNight.BACKGROUND};
+                                border: none;
+                                border-radius: 6px;
+                                font-weight: bold;
+                                font-size: 10pt;
+                            }}
+                            QPushButton:hover {{
+                                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                                     stop:0 {TokyoNight.CYAN}, 
                                     stop:1 {TokyoNight.BLUE});
-                        }}
-                    """)
-                else:
-                    btn.setStyleSheet(f"""
-                        QPushButton {{
-                            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                            }}
+                        """)
+                    else:
+                        btn.setStyleSheet(f"""
+                            QPushButton {{
+                                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                                     stop:0 {TokyoNight.SELECTION}, 
                                     stop:1 {TokyoNight.NIGHT_BOTTOM});
                                 color: {TokyoNight.FOREGROUND};
@@ -9007,8 +10362,20 @@ class TokyoNightPanelBar(QMainWindow):
                                     stop:1 {TokyoNight.PURPLE}40);
                             }}
                         """)
+                except RuntimeError:
+                    # Button was deleted, remove from list
+                    self.workspace_buttons[i] = None
+                except Exception as e:
+                    print(f"Workspace button {i} error: {e}")
+            
+            # Clean up deleted buttons
+            self.workspace_buttons = [btn for btn in self.workspace_buttons if btn is not None]
+            
             # Update current workspace
             self.current_workspace = workspace_id
+            
+        except Exception as e:
+            print(f"Workspace display error: {e}")
 
     def setup_brightness_control(self, layout):
         """Setup brightness control slider"""
@@ -9033,7 +10400,7 @@ class TokyoNightPanelBar(QMainWindow):
 
     def setup_weather_widget(self, layout):
         """Setup weather widget"""
-        self.weather_label = QLabel("󰖐 --°C")
+        self.weather_label = QLabel("󰖐 --°F")  # Changed to Fahrenheit
         self.weather_label.setStyleSheet(f"""
             padding: 4px 8px;
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -9052,7 +10419,7 @@ class TokyoNightPanelBar(QMainWindow):
         self.update_weather()
 
     def update_weather(self):
-        """Update weather information"""
+        """Update weather information in Fahrenheit"""
         # Check if weather_label exists
         if not hasattr(self, 'weather_label'):
             return
@@ -9063,33 +10430,48 @@ class TokyoNightPanelBar(QMainWindow):
                 location_url = f"{location}"
             else:
                 location_url = ""
-            # Using wttr.in for weather data
+            # Using wttr.in for weather data - FORCE FAHRENHEIT with 'u' parameter
             result = subprocess.run(
-                f"curl -s 'wttr.in/{location_url}?format=%C+%t'",
+                f"curl -s 'wttr.in/{location_url}?format=%C+%t&u'",  # Added '&u' for Fahrenheit
                 shell=True, capture_output=True, text=True, timeout=5
             )
             if result.returncode == 0 and result.stdout.strip():
                 weather_data = result.stdout.strip()
-                # Format: "Condition +temp"
+                # Format with '&u' parameter: "Condition +temp°F" or "Condition -temp°F"
+                # wttr.in already adds the unit when using '&u'
                 parts = weather_data.split('+')
                 if len(parts) == 2:
                     condition = parts[0].strip()
-                    temp = parts[1].strip()
-                    # Map weather conditions to icons
-                    weather_icons = {
-                        "Clear": "󰖙", "Sunny": "󰖙", "Partly cloudy": "󰖕",
-                        "Cloudy": "󰖐", "Overcast": "󰖐", "Fog": "󰖑",
-                        "Rain": "󰖗", "Drizzle": "󰖗", "Snow": "󰖘",
-                        "Thunderstorm": "󰖓", "Mist": "󰖑", "Patchy rain": "󰖗",
-                        "Light rain": "󰖗", "Moderate rain": "󰖗", "Heavy rain": "󰖗"
-                    }
-                    icon = weather_icons.get(condition, "󰖐")
-                    self.weather_label.setText(f"{icon} {temp}")
+                    temp_part = parts[1].strip()
+                    # wttr.in already includes °F, so use it directly
+                    temp = temp_part
+                else:
+                    # Try with minus sign
+                    parts = weather_data.split('-')
+                    if len(parts) == 2:
+                        condition = parts[0].strip()
+                        temp_part = parts[1].strip()
+                        # wttr.in already includes °F, so use it directly
+                        temp = "-" + temp_part
+                    else:
+                        temp = "--°F"
+                        condition = "Unknown"
+                
+                # Map weather conditions to icons
+                weather_icons = {
+                    "Clear": "󰖙", "Sunny": "󰖙", "Partly cloudy": "󰖕",
+                    "Cloudy": "󰖐", "Overcast": "󰖐", "Fog": "󰖑",
+                    "Rain": "󰖗", "Drizzle": "󰖗", "Snow": "󰖘",
+                    "Thunderstorm": "󰖓", "Mist": "󰖑", "Patchy rain": "󰖗",
+                    "Light rain": "󰖗", "Moderate rain": "󰖗", "Heavy rain": "󰖗"
+                }
+                icon = weather_icons.get(condition, "󰖐")
+                self.weather_label.setText(f"{icon} {temp}")
             else:
-                self.weather_label.setText("󰖐 --°C")
+                self.weather_label.setText("󰖐 --°F")
         except Exception as e:
             print(f"Error updating weather: {e}")
-            self.weather_label.setText("󰖐 --°C")
+            self.weather_label.setText("󰖐 --°F")
 
     def setup_notification_center(self, layout):
         """Setup notification center"""
@@ -9873,7 +11255,7 @@ class ConfigManager:
         config.show_date = self.settings.value("show_date", True, type=bool)
         config.show_battery = self.settings.value("show_battery", True, type=bool)
         config.show_volume = self.settings.value("show_volume", True, type=bool)
-        config.show_network = self.settings.value("show_network", False, type=bool)
+        config.show_network = self.settings.value("show_network", True, type=bool)
         config.show_tray = self.settings.value("show_tray", True, type=bool)
         config.show_xfce_launchers = self.settings.value("show_xfce_launchers", True, type=bool)
         config.theme_variant = self.settings.value("theme_variant", "tokyo_night", type=str)
@@ -9887,7 +11269,7 @@ class ConfigManager:
         config.show_notifications = self.settings.value("show_notifications", True, type=bool)
         
         # NEW: Network and Bluetooth controls
-        config.show_network_control = self.settings.value("show_network_control", True, type=bool)
+        config.show_network_control = self.settings.value("show_network_control", False, type=bool)
         config.show_bluetooth_control = self.settings.value("show_bluetooth_control", True, type=bool)
         config.weather_location = self.settings.value("weather_location", "", type=str)
         
@@ -9900,9 +11282,9 @@ class ConfigManager:
         config.show_on_edge = self.settings.value("show_on_edge", True, type=bool)
         config.edge_size = self.settings.value("edge_size", 5, type=int)
 
-        # Load built-in launcher commands
-        config.terminal_command = self.settings.value("terminal_command", "xfce4-terminal", type=str)
-        config.file_manager_command = self.settings.value("file_manager_command", "thunar", type=str)
+        # Load built-in launcher commands - CHANGED DEFAULTS HERE
+        config.terminal_command = self.settings.value("terminal_command", "term5", type=str)  # Changed from xfce4-terminal
+        config.file_manager_command = self.settings.value("file_manager_command", "fm10", type=str)  # Changed from thunar
         config.browser_command = self.settings.value("browser_command", "firefox", type=str)
         config.text_editor_command = self.settings.value("text_editor_command", "mousepad", type=str)
         config.settings_command = self.settings.value("settings_command", "xfce4-settings-manager", type=str)
@@ -9955,6 +11337,7 @@ class ConfigManager:
         print(f"DEBUG: ConfigManager finished loading all settings")
         
         return config
+
 
 class TrayIconManager:
     """System tray icon manager"""

@@ -2549,20 +2549,23 @@ class EcoFileManager(QMainWindow):
 
 
     def open_folder_in_terminal(self, folder_path):
-        """Open specific folder in terminal"""
+        """Open specific folder in terminal - FIXED VERSION with term5 as preferred"""
         if not folder_path or not os.path.exists(folder_path) or not os.path.isdir(folder_path):
             QMessageBox.warning(self, "Error", f"Invalid folder: {folder_path}")
             return
             
+        print(f"Opening terminal in specific folder: {folder_path}")
+        
         try:
             if sys.platform.startswith('linux'):
                 terminal_commands = []
                 
                 # Build list of terminal commands to try, in order of preference
+                # TERM5 IS NOW THE PREFERRED TERMINAL
                 if self.is_root_mode:
                     # Root mode - prefer terminals that work well with root
                     terminal_commands = [
-                        'term5',           # Your preferred terminal
+                        'term5',           # YOUR PREFERRED TERMINAL - FIRST CHOICE
                         'gnome-terminal',  # GNOME terminal
                         'konsole',         # KDE terminal  
                         'xfce4-terminal',  # XFCE terminal
@@ -2574,9 +2577,9 @@ class EcoFileManager(QMainWindow):
                         'uxterm'           # Unicode X terminal
                     ]
                 else:
-                    # Normal user mode
+                    # Normal user mode - TERM5 FIRST
                     terminal_commands = [
-                        'term5',           # Your preferred terminal
+                        'term5',           # YOUR PREFERRED TERMINAL - FIRST CHOICE
                         'gnome-terminal',
                         'konsole',
                         'xfce4-terminal', 
@@ -2593,7 +2596,12 @@ class EcoFileManager(QMainWindow):
                 for term in terminal_commands:
                     if shutil.which(term):
                         try:
-                            if term == 'gnome-terminal':
+                            if term == 'term5':
+                                # term5 has no flags - just open it and it will inherit current directory
+                                subprocess.Popen(['term5'], cwd=folder_path)
+                                print(f"✅ Opened term5 in {folder_path}")
+                                
+                            elif term == 'gnome-terminal':
                                 subprocess.Popen(['gnome-terminal', '--working-directory', folder_path])
                             elif term == 'konsole':
                                 subprocess.Popen(['konsole', '--workdir', folder_path])
@@ -2603,31 +2611,44 @@ class EcoFileManager(QMainWindow):
                                 subprocess.Popen(['tilix', '--working-directory', folder_path])
                             elif term == 'terminator':
                                 subprocess.Popen(['terminator', '--working-directory', folder_path])
+                            elif term == 'lxterminal':
+                                subprocess.Popen(['lxterminal', '--working-directory', folder_path])
+                            elif term == 'mate-terminal':
+                                subprocess.Popen(['mate-terminal', '--working-directory', folder_path])
                             else:
                                 # For terminals that don't have specific working directory flags
-                                # or for generic terminals like xterm
-                                subprocess.Popen([term], cwd=folder_path)
+                                # Use shell command to change directory
+                                subprocess.Popen([term, '-e', f'bash -c "cd \\"{folder_path}\\" && exec bash"'])
                             
                             terminal_found = True
-                            print(f"Opened terminal: {term} in {folder_path}")
+                            print(f"✅ Opened terminal: {term} in {folder_path}")
                             break
                             
                         except Exception as term_error:
-                            print(f"Failed to open {term}: {term_error}")
+                            print(f"❌ Failed to open {term}: {term_error}")
                             continue
                 
                 if not terminal_found:
                     # Last resort: try x-terminal-emulator (system default)
                     try:
-                        subprocess.Popen(['x-terminal-emulator'], cwd=folder_path)
-                        print("Opened system default terminal (x-terminal-emulator)")
+                        subprocess.Popen(['x-terminal-emulator', '-e', f'bash -c "cd \\"{folder_path}\\" && exec bash"'])
+                        print("✅ Opened system default terminal (x-terminal-emulator)")
+                        terminal_found = True
+                    except Exception as e:
+                        print(f"❌ x-terminal-emulator failed: {e}")
+                
+                if not terminal_found:
+                    # Final fallback - try with basic shell command
+                    try:
+                        subprocess.Popen(['xterm', '-e', f'bash -c "cd \\"{folder_path}\\" && exec bash"'])
+                        print("✅ Opened xterm as final fallback")
                     except:
-                        # Final fallback
                         QMessageBox.warning(
                             self, 
                             "Terminal Not Found", 
                             "No terminal emulator found.\n\n"
                             "Please install one of:\n"
+                            "- term5 (your preferred)\n"
                             "- gnome-terminal (GNOME)\n" 
                             "- konsole (KDE)\n"
                             "- xfce4-terminal (XFCE)\n"
@@ -2637,34 +2658,38 @@ class EcoFileManager(QMainWindow):
                     
             elif sys.platform == 'darwin':  # macOS
                 try:
-                    # Try using AppleScript to open Terminal at specific path
+                    # Use AppleScript to open Terminal at specific path
                     applescript = f'''
                     tell application "Terminal"
                         activate
-                        do script "cd '{folder_path}'"
+                        do script "cd '{folder_path}' && clear"
                     end tell
                     '''
                     subprocess.run(['osascript', '-e', applescript])
-                except:
+                    print(f"✅ Opened Terminal on macOS in {folder_path}")
+                except Exception as mac_error:
+                    print(f"❌ AppleScript method failed: {mac_error}")
                     # Fallback method for macOS
                     try:
                         subprocess.run(['open', '-a', 'Terminal', folder_path])
-                    except Exception as mac_error:
-                        QMessageBox.warning(self, "Error", f"Could not open Terminal on macOS: {str(mac_error)}")
+                    except Exception as mac_error2:
+                        QMessageBox.warning(self, "Error", f"Could not open Terminal on macOS: {str(mac_error2)}")
                         
             elif sys.platform == 'win32':  # Windows
                 try:
                     # Use PowerShell for better directory handling
                     powershell_cmd = f'Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd {folder_path}"'
-                    subprocess.run(['powershell', '-Command', powershell_cmd])
-                except:
+                    subprocess.run(['powershell', '-Command', powershell_cmd], shell=True)
+                    print(f"✅ Opened PowerShell on Windows in {folder_path}")
+                except Exception as win_error:
+                    print(f"❌ PowerShell method failed: {win_error}")
                     # Fallback to cmd
                     try:
                         # Convert path to Windows format and use cmd
                         win_path = folder_path.replace('/', '\\')
-                        subprocess.run(['cmd', '/c', 'start', 'cmd', '/k', f'cd /d "{win_path}"'])
-                    except Exception as win_error:
-                        QMessageBox.warning(self, "Error", f"Could not open terminal on Windows: {str(win_error)}")
+                        subprocess.run(['cmd', '/c', 'start', 'cmd', '/k', f'cd /d "{win_path}"'], shell=True)
+                    except Exception as win_error2:
+                        QMessageBox.warning(self, "Error", f"Could not open terminal on Windows: {str(win_error2)}")
                 
             else:
                 QMessageBox.information(self, "Not Supported", 
@@ -2672,9 +2697,27 @@ class EcoFileManager(QMainWindow):
                 
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Could not open terminal: {str(e)}")
+            print(f"❌ Terminal opening failed: {e}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     def open_folder_as_root(self, folder_path):
-        """Open specific folder as root using this file manager"""
+        """Open specific folder as root using this file manager - FIXED VERSION"""
         try:
             if sys.platform.startswith('linux'):
                 # Validate path exists
@@ -2704,20 +2747,31 @@ class EcoFileManager(QMainWindow):
                 
                 if reply == QMessageBox.Yes:
                     try:
+                        # Preserve display and session environment
+                        env = os.environ.copy()
+                        
                         if getattr(sys, 'frozen', False):
-                            # Packaged application
-                            cmd = ['pkexec', application_path, folder_path]
+                            # Packaged application - pass folder path as argument
+                            cmd = ['pkexec', 'env', 
+                                  f"DISPLAY={env.get('DISPLAY', '')}", 
+                                  f"XAUTHORITY={env.get('XAUTHORITY', '')}",
+                                  f"DBUS_SESSION_BUS_ADDRESS={env.get('DBUS_SESSION_BUS_ADDRESS', '')}",
+                                  application_path, folder_path]
                         else:
-                            # Running as script
-                            cmd = ['pkexec', application_path, script_path, folder_path]
+                            # Running as script - pass folder path as argument
+                            cmd = ['pkexec', 'env', 
+                                  f"DISPLAY={env.get('DISPLAY', '')}", 
+                                  f"XAUTHORITY={env.get('XAUTHORITY', '')}",
+                                  f"DBUS_SESSION_BUS_ADDRESS={env.get('DBUS_SESSION_BUS_ADDRESS', '')}",
+                                  application_path, script_path, folder_path]
                         
                         print(f"Attempting to run: {' '.join(cmd)}")
                         
-                        # Launch as root
+                        # Launch as root with proper environment and folder path
                         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                         
                         # Check if process started successfully
-                        time.sleep(1)  # Give it a moment to start
+                        time.sleep(2)  # Give it more time to start
                         return_code = process.poll()
                         
                         if return_code is not None and return_code != 0:
@@ -2727,12 +2781,8 @@ class EcoFileManager(QMainWindow):
                             print(f"stderr: {stderr.decode()}")
                             self.open_folder_as_root_fallback(folder_path)
                         else:
-                            QMessageBox.information(
-                                self,
-                                "Opening as Root",
-                                f"File manager is opening '{folder_path}' as root.\n\n"
-                                f"Enter your password when prompted."
-                            )
+                            print(f"Root file manager launched successfully for folder: {folder_path}")
+                            # Don't show success message as it might be annoying
                             
                     except FileNotFoundError:
                         print("pkexec not found, trying fallback methods")
@@ -2740,9 +2790,9 @@ class EcoFileManager(QMainWindow):
                     except Exception as e:
                         QMessageBox.critical(self, "Error", f"Failed to open as root: {str(e)}")
                         print(f"Error details: {e}")
-                        
             else:
                 QMessageBox.information(self, "Not Supported", "Open as Root is only supported on Linux.")
+                
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not open as root: {str(e)}")
 
@@ -2770,7 +2820,7 @@ class EcoFileManager(QMainWindow):
                     try:
                         if getattr(sys, 'frozen', False):
                             application_path = sys.executable
-                            cmd = base_cmd + [application_path, folder_path]
+                            cmd = base_cmd + [application_path, folder_path]  # Pass folder path
                         else:
                             application_path = sys.executable
                             script_path = os.path.abspath(__file__)
@@ -2778,7 +2828,7 @@ class EcoFileManager(QMainWindow):
                                 # gksu/kdesu might need the command as a single string
                                 cmd = base_cmd + [f"{application_path} {script_path} {folder_path}"]
                             else:
-                                cmd = base_cmd + [application_path, script_path, folder_path]
+                                cmd = base_cmd + [application_path, script_path, folder_path]  # Pass folder path
                         
                         print(f"Trying {method_name} with command: {' '.join(cmd)}")
                         subprocess.Popen(cmd)
@@ -3477,7 +3527,7 @@ class EcoFileManager(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to remove executable permission: {str(e)}")
 
     def open_in_terminal(self):
-        """Open current directory in terminal without prompts"""
+        """Open current directory in terminal - FIXED VERSION with term5 as preferred"""
         # Get the current tab's path
         current_tab = self.tab_widget.currentWidget()
         if current_tab:
@@ -3490,15 +3540,18 @@ class EcoFileManager(QMainWindow):
             QMessageBox.warning(self, "Error", f"Cannot open terminal: Path '{path}' does not exist or is not a directory")
             return
             
+        print(f"Opening terminal in: {path}")
+        
         try:
             if sys.platform.startswith('linux'):
                 terminal_commands = []
                 
                 # Build list of terminal commands to try, in order of preference
+                # TERM5 IS NOW THE PREFERRED TERMINAL
                 if self.is_root_mode:
                     # Root mode - prefer terminals that work well with root
                     terminal_commands = [
-                        'term5',           # Your preferred terminal
+                        'term5',           # YOUR PREFERRED TERMINAL - FIRST CHOICE
                         'gnome-terminal',  # GNOME terminal
                         'konsole',         # KDE terminal  
                         'xfce4-terminal',  # XFCE terminal
@@ -3510,9 +3563,9 @@ class EcoFileManager(QMainWindow):
                         'uxterm'           # Unicode X terminal
                     ]
                 else:
-                    # Normal user mode
+                    # Normal user mode - TERM5 FIRST
                     terminal_commands = [
-                        'term5',           # Your preferred terminal
+                        'term5',           # YOUR PREFERRED TERMINAL - FIRST CHOICE
                         'gnome-terminal',
                         'konsole',
                         'xfce4-terminal', 
@@ -3529,7 +3582,12 @@ class EcoFileManager(QMainWindow):
                 for term in terminal_commands:
                     if shutil.which(term):
                         try:
-                            if term == 'gnome-terminal':
+                            if term == 'term5':
+                                # term5 has no flags - just open it and it will inherit current directory
+                                subprocess.Popen(['term5'], cwd=path)
+                                print(f"✅ Opened term5 in {path}")
+                                
+                            elif term == 'gnome-terminal':
                                 subprocess.Popen(['gnome-terminal', '--working-directory', path])
                             elif term == 'konsole':
                                 subprocess.Popen(['konsole', '--workdir', path])
@@ -3539,31 +3597,44 @@ class EcoFileManager(QMainWindow):
                                 subprocess.Popen(['tilix', '--working-directory', path])
                             elif term == 'terminator':
                                 subprocess.Popen(['terminator', '--working-directory', path])
+                            elif term == 'lxterminal':
+                                subprocess.Popen(['lxterminal', '--working-directory', path])
+                            elif term == 'mate-terminal':
+                                subprocess.Popen(['mate-terminal', '--working-directory', path])
                             else:
                                 # For terminals that don't have specific working directory flags
-                                # or for generic terminals like xterm
-                                subprocess.Popen([term], cwd=path)
+                                # Use shell command to change directory
+                                subprocess.Popen([term, '-e', f'bash -c "cd \\"{path}\\" && exec bash"'])
                             
                             terminal_found = True
-                            print(f"Opened terminal: {term} in {path}")
+                            print(f"✅ Opened terminal: {term} in {path}")
                             break
                             
                         except Exception as term_error:
-                            print(f"Failed to open {term}: {term_error}")
+                            print(f"❌ Failed to open {term}: {term_error}")
                             continue
                 
                 if not terminal_found:
                     # Last resort: try x-terminal-emulator (system default)
                     try:
-                        subprocess.Popen(['x-terminal-emulator'], cwd=path)
-                        print("Opened system default terminal (x-terminal-emulator)")
+                        subprocess.Popen(['x-terminal-emulator', '-e', f'bash -c "cd \\"{path}\\" && exec bash"'])
+                        print("✅ Opened system default terminal (x-terminal-emulator)")
+                        terminal_found = True
+                    except Exception as e:
+                        print(f"❌ x-terminal-emulator failed: {e}")
+                
+                if not terminal_found:
+                    # Final fallback - try with basic shell command
+                    try:
+                        subprocess.Popen(['xterm', '-e', f'bash -c "cd \\"{path}\\" && exec bash"'])
+                        print("✅ Opened xterm as final fallback")
                     except:
-                        # Final fallback
                         QMessageBox.warning(
                             self, 
                             "Terminal Not Found", 
                             "No terminal emulator found.\n\n"
                             "Please install one of:\n"
+                            "- term5 (your preferred)\n"
                             "- gnome-terminal (GNOME)\n" 
                             "- konsole (KDE)\n"
                             "- xfce4-terminal (XFCE)\n"
@@ -3573,34 +3644,38 @@ class EcoFileManager(QMainWindow):
                     
             elif sys.platform == 'darwin':  # macOS
                 try:
-                    # Try using AppleScript to open Terminal at specific path
+                    # Use AppleScript to open Terminal at specific path
                     applescript = f'''
                     tell application "Terminal"
                         activate
-                        do script "cd '{path}'"
+                        do script "cd '{path}' && clear"
                     end tell
                     '''
                     subprocess.run(['osascript', '-e', applescript])
-                except:
+                    print(f"✅ Opened Terminal on macOS in {path}")
+                except Exception as mac_error:
+                    print(f"❌ AppleScript method failed: {mac_error}")
                     # Fallback method for macOS
                     try:
                         subprocess.run(['open', '-a', 'Terminal', path])
-                    except Exception as mac_error:
-                        QMessageBox.warning(self, "Error", f"Could not open Terminal on macOS: {str(mac_error)}")
+                    except Exception as mac_error2:
+                        QMessageBox.warning(self, "Error", f"Could not open Terminal on macOS: {str(mac_error2)}")
                         
             elif sys.platform == 'win32':  # Windows
                 try:
                     # Use PowerShell for better directory handling
                     powershell_cmd = f'Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd {path}"'
-                    subprocess.run(['powershell', '-Command', powershell_cmd])
-                except:
+                    subprocess.run(['powershell', '-Command', powershell_cmd], shell=True)
+                    print(f"✅ Opened PowerShell on Windows in {path}")
+                except Exception as win_error:
+                    print(f"❌ PowerShell method failed: {win_error}")
                     # Fallback to cmd
                     try:
                         # Convert path to Windows format and use cmd
                         win_path = path.replace('/', '\\')
-                        subprocess.run(['cmd', '/c', 'start', 'cmd', '/k', f'cd /d "{win_path}"'])
-                    except Exception as win_error:
-                        QMessageBox.warning(self, "Error", f"Could not open terminal on Windows: {str(win_error)}")
+                        subprocess.run(['cmd', '/c', 'start', 'cmd', '/k', f'cd /d "{win_path}"'], shell=True)
+                    except Exception as win_error2:
+                        QMessageBox.warning(self, "Error", f"Could not open terminal on Windows: {str(win_error2)}")
                 
             else:
                 QMessageBox.information(self, "Not Supported", 
@@ -3608,6 +3683,16 @@ class EcoFileManager(QMainWindow):
                 
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Could not open terminal: {str(e)}")
+            print(f"❌ Terminal opening failed: {e}")
+
+
+
+
+
+
+
+
+        
 
     def open_as_root(self):
         """Open current directory as root using this file manager"""

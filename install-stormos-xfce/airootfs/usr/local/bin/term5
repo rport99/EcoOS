@@ -383,13 +383,15 @@ class Terminal(Gtk.Box):
         self.child_pid = None
         self.is_alive = True
 
-        # Determine working directory
+        # Determine working directory - FIXED: Use provided directory
         if working_dir and os.path.isdir(working_dir):
             self.working_dir = working_dir
         else:
             self.working_dir = os.getcwd()
             if not os.path.exists(self.working_dir):
                 self.working_dir = os.environ.get('HOME', '/')
+
+        print(f"Terminal starting in: {self.working_dir}")  # Debug
 
         # Create VTE terminal widget
         self.terminal = Vte.Terminal()
@@ -442,9 +444,10 @@ class Terminal(Gtk.Box):
             else:
                 shell_args = [shell]
 
+            print(f"Spawning shell in: {self.working_dir}")  # Debug
             pid = self.terminal.spawn_sync(
                 Vte.PtyFlags.DEFAULT,
-                self.working_dir,
+                self.working_dir,  # This is the key - use the working directory
                 shell_args,
                 env_list,
                 GLib.SpawnFlags.SEARCH_PATH | GLib.SpawnFlags.DO_NOT_REAP_CHILD,
@@ -803,6 +806,14 @@ class TerminalWindow(Gtk.ApplicationWindow):
         )
         self.set_border_width(0)
         self.set_icon_name("utilities-terminal")
+
+        # FIXED: Change to the specified directory BEFORE creating UI
+        if working_dir and os.path.isdir(working_dir):
+            try:
+                os.chdir(working_dir)
+                print(f"Changed working directory to: {working_dir}")
+            except Exception as e:
+                print(f"Warning: Could not change to {working_dir}: {e}")
 
         # Connect window events
         self.connect("realize", self._on_window_realize)
@@ -1346,13 +1357,16 @@ class TerminalApplication(Gtk.Application):
     def do_activate(self):
         """Activates the application, creating the main window."""
         CSSProvider.setup_css()
-        # Get working directory from command line arguments or current directory
+        
+        # Get working directory from command line arguments
         working_dir = None
         if len(sys.argv) > 1:
             arg_dir = sys.argv[1]
             if os.path.isdir(arg_dir):
                 working_dir = os.path.abspath(arg_dir)
+                print(f"Starting term5 in directory: {working_dir}")
             else:
+                print(f"Warning: Provided path '{arg_dir}' is not a directory, using current directory")
                 working_dir = os.getcwd()
         else:
             working_dir = os.getcwd()

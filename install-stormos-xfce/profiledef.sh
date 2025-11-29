@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034
 
-iso_name="StormOS_Eco"
+iso_name="Seekers-Adv_StormOS"
 iso_label="StormOS_Eco_Release"
 iso_publisher="StormOS"
 iso_application="StormOS Install Media"
-iso_version="November-Point 2"
+iso_version="v1"
 install_dir="arch"
 buildmodes=('iso')
 bootmodes=('bios.syslinux'
@@ -38,6 +38,6 @@ file_permissions=(
   ["/usr/local/bin/fm10"]="0:0:755"
   ["/usr/local/bin/term5"]="0:0:755"
   ["/usr/local/bin/launcher"]="0:0:755"
-  ["/usr/local/bin/hyper8"]="0:0:755"
+  ["/usr/local/bin/hyper9"]="0:0:755"
   ["/usr/local/bin/autoi"]="0:0:755"
 )
