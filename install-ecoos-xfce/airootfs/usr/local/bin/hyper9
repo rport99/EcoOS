@@ -10419,59 +10419,103 @@ class TokyoNightPanelBar(QMainWindow):
         self.update_weather()
 
     def update_weather(self):
-        """Update weather information in Fahrenheit"""
-        # Check if weather_label exists
+        """Update weather using Open-Meteo free API (no key required)"""
         if not hasattr(self, 'weather_label'):
             return
+        
         try:
-            # Build location parameter
-            location = self.config.weather_location if self.config.weather_location else ""
-            if location:
-                location_url = f"{location}"
-            else:
-                location_url = ""
-            # Using wttr.in for weather data - FORCE FAHRENHEIT with 'u' parameter
-            result = subprocess.run(
-                f"curl -s 'wttr.in/{location_url}?format=%C+%t&u'",  # Added '&u' for Fahrenheit
-                shell=True, capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                weather_data = result.stdout.strip()
-                # Format with '&u' parameter: "Condition +temp°F" or "Condition -temp°F"
-                # wttr.in already adds the unit when using '&u'
-                parts = weather_data.split('+')
-                if len(parts) == 2:
-                    condition = parts[0].strip()
-                    temp_part = parts[1].strip()
-                    # wttr.in already includes °F, so use it directly
-                    temp = temp_part
+            import requests
+            
+            # Get location from config or use auto-detection
+            location = self.config.weather_location
+            
+            if not location:
+                # Auto-detect location using free IP geolocation
+                ip_result = subprocess.run(
+                    "curl -s 'http://ip-api.com/json/' | grep -o '\"city\":\"[^\"]*' | cut -d'\"' -f4",
+                    shell=True, capture_output=True, text=True
+                )
+                if ip_result.returncode == 0 and ip_result.stdout.strip():
+                    location = ip_result.stdout.strip()
                 else:
-                    # Try with minus sign
-                    parts = weather_data.split('-')
-                    if len(parts) == 2:
-                        condition = parts[0].strip()
-                        temp_part = parts[1].strip()
-                        # wttr.in already includes °F, so use it directly
-                        temp = "-" + temp_part
-                    else:
-                        temp = "--°F"
-                        condition = "Unknown"
-                
-                # Map weather conditions to icons
-                weather_icons = {
-                    "Clear": "󰖙", "Sunny": "󰖙", "Partly cloudy": "󰖕",
-                    "Cloudy": "󰖐", "Overcast": "󰖐", "Fog": "󰖑",
-                    "Rain": "󰖗", "Drizzle": "󰖗", "Snow": "󰖘",
-                    "Thunderstorm": "󰖓", "Mist": "󰖑", "Patchy rain": "󰖗",
-                    "Light rain": "󰖗", "Moderate rain": "󰖗", "Heavy rain": "󰖗"
-                }
-                icon = weather_icons.get(condition, "󰖐")
-                self.weather_label.setText(f"{icon} {temp}")
-            else:
-                self.weather_label.setText("󰖐 --°F")
-        except Exception as e:
-            print(f"Error updating weather: {e}")
+                    location = "New York"  # Fallback
+            
+            # Geocoding to get coordinates
+            geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={location}&count=1"
+            geo_response = requests.get(geo_url, timeout=5)
+            
+            if geo_response.status_code == 200:
+                geo_data = geo_response.json()
+                if 'results' in geo_data and geo_data['results']:
+                    result = geo_data['results'][0]
+                    lat = result['latitude']
+                    lon = result['longitude']
+                    city_name = result['name']
+                    
+                    # Get weather data
+                    weather_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,weather_code&temperature_unit=fahrenheit"
+                    weather_response = requests.get(weather_url, timeout=5)
+                    
+                    if weather_response.status_code == 200:
+                        weather_data = weather_response.json()
+                        current = weather_data['current']
+                        temp_f = current['temperature_2m']
+                        weather_code = current['weather_code']
+                        
+                        # Map WMO weather codes to icons
+                        weather_icons = {
+                            0: "󰖙",   # Clear
+                            1: "󰖙",   # Mainly clear
+                            2: "󰖕",   # Partly cloudy
+                            3: "󰖐",   # Overcast
+                            45: "󰖑",  # Fog
+                            48: "󰖑",  # Fog
+                            51: "󰖗",  # Light drizzle
+                            53: "󰖗",  # Moderate drizzle  
+                            55: "󰖗",  # Dense drizzle
+                            61: "󰖗",  # Slight rain
+                            63: "󰖗",  # Moderate rain
+                            65: "󰖗",  # Heavy rain
+                            71: "󰖘",  # Slight snow
+                            73: "󰖘",  # Moderate snow
+                            75: "󰖘",  # Heavy snow
+                            80: "󰖗",  # Rain showers
+                            81: "󰖗",  # Rain showers
+                            82: "󰖗",  # Violent rain showers
+                            95: "󰖓",  # Thunderstorm
+                            96: "󰖓",  # Thunderstorm with hail
+                            99: "󰖓",  # Thunderstorm with hail
+                        }
+                        
+                        icon = weather_icons.get(weather_code, "󰖐")
+                        display_text = f"{icon} {temp_f:.0f}°F"
+                        
+                        # Weather code descriptions
+                        weather_descriptions = {
+                            0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
+                            45: "Fog", 48: "Fog", 51: "Light drizzle", 53: "Moderate drizzle",
+                            55: "Dense drizzle", 61: "Slight rain", 63: "Moderate rain", 
+                            65: "Heavy rain", 71: "Slight snow", 73: "Moderate snow", 
+                            75: "Heavy snow", 80: "Rain showers", 81: "Rain showers",
+                            82: "Violent rain showers", 95: "Thunderstorm", 
+                            96: "Thunderstorm with hail", 99: "Thunderstorm with hail"
+                        }
+                        
+                        description = weather_descriptions.get(weather_code, "Unknown")
+                        tooltip_text = f"{city_name}: {description}\nTemperature: {temp_f:.0f}°F"
+                        
+                        self.weather_label.setText(display_text)
+                        self.weather_label.setToolTip(tooltip_text)
+                        return
+                        
+            # Fallback if anything fails
             self.weather_label.setText("󰖐 --°F")
+            self.weather_label.setToolTip("Weather data unavailable")
+                
+        except Exception as e:
+            print(f"Weather update error: {e}")
+            self.weather_label.setText("󰖐 --°F")
+            self.weather_label.setToolTip("Weather service error")
 
     def setup_notification_center(self, layout):
         """Setup notification center"""
