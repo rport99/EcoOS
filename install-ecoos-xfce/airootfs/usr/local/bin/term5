@@ -796,6 +796,7 @@ class Terminal(Gtk.Box):
             self.is_alive = False
 
 # --- Main Application Window ---
+# --- Main Application Window ---
 class TerminalWindow(Gtk.ApplicationWindow):
     def __init__(self, application, working_dir=None):
         super().__init__(application=application, title="Eco Terminal")
@@ -833,26 +834,65 @@ class TerminalWindow(Gtk.ApplicationWindow):
             self.header_bar = Gtk.HeaderBar()
             self.header_bar.set_show_close_button(True)
             self.header_bar.set_title("Eco Terminal")
+            self.header_bar.set_hexpand(True)
             self.set_titlebar(self.header_bar)
 
-            # Header bar buttons
+            # Header bar buttons - LEFT SIDE
+            # New Window button
             new_btn = Gtk.Button()
-            new_btn.set_image(Gtk.Image.new_from_icon_name("window-new-symbolic", Gtk.IconSize.SMALL_TOOLBAR))
+            new_icon = Gtk.Image.new_from_icon_name("window-new", Gtk.IconSize.BUTTON)
+            new_btn.set_image(new_icon)
             new_btn.connect("clicked", lambda _: self.new_window())
             new_btn.set_tooltip_text("New Window")
             self.header_bar.pack_start(new_btn)
 
-            split_btn = Gtk.Button()
-            split_btn.set_image(Gtk.Image.new_from_icon_name("view-split-symbolic", Gtk.IconSize.SMALL_TOOLBAR))
-            split_btn.connect("clicked", lambda _: self.split_intelligently())
-            split_btn.set_tooltip_text("Split Terminal")
-            self.header_bar.pack_start(split_btn)
+            # Split intelligent button
+            split_intelligent_btn = Gtk.Button()
+            split_intelligent_icon = Gtk.Image.new_from_icon_name("view-grid", Gtk.IconSize.BUTTON)
+            split_intelligent_btn.set_image(split_intelligent_icon)
+            split_intelligent_btn.connect("clicked", lambda _: self.split_intelligently())
+            split_intelligent_btn.set_tooltip_text("Split Intelligent")
+            self.header_bar.pack_start(split_intelligent_btn)
 
+            # Split horizontal button
+            split_h_btn = Gtk.Button()
+            split_h_icon = Gtk.Image.new_from_icon_name("view-split-vertical", Gtk.IconSize.BUTTON)
+            split_h_btn.set_image(split_h_icon)
+            split_h_btn.connect("clicked", lambda _: self.split_horizontal())
+            split_h_btn.set_tooltip_text("Split Horizontal")
+            self.header_bar.pack_start(split_h_btn)
+
+            # Split vertical button
+            split_v_btn = Gtk.Button()
+            split_v_icon = Gtk.Image.new_from_icon_name("view-split-horizontal", Gtk.IconSize.BUTTON)
+            split_v_btn.set_image(split_v_icon)
+            split_v_btn.connect("clicked", lambda _: self.split_vertical())
+            split_v_btn.set_tooltip_text("Split Vertical")
+            self.header_bar.pack_start(split_v_btn)
+
+            # Close split button
+            close_split_btn = Gtk.Button()
+            close_split_icon = Gtk.Image.new_from_icon_name("window-close", Gtk.IconSize.BUTTON)
+            close_split_btn.set_image(close_split_icon)
+            close_split_btn.connect("clicked", lambda _: self.close_active_split())
+            close_split_btn.set_tooltip_text("Close Split")
+            self.header_bar.pack_start(close_split_btn)
+
+            # Header bar buttons - RIGHT SIDE
             menu_button = Gtk.Button()
-            menu_button.set_image(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.SMALL_TOOLBAR))
+            menu_icon = Gtk.Image.new_from_icon_name("open-menu", Gtk.IconSize.BUTTON)
+            menu_button.set_image(menu_icon)
             menu_button.connect("clicked", self._on_menu_clicked)
             menu_button.set_tooltip_text("Menu")
             self.header_bar.pack_end(menu_button)
+
+            # Show all header bar widgets
+            new_btn.show_all()
+            split_intelligent_btn.show_all()
+            split_h_btn.show_all()
+            split_v_btn.show_all()
+            close_split_btn.show_all()
+            menu_button.show_all()
 
         # Container for terminals
         self.root_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -861,6 +901,9 @@ class TerminalWindow(Gtk.ApplicationWindow):
         # List to keep track of terminal instances
         self.terminals = []
         self.add_terminal(self.root_container, working_dir)
+
+        # Show all widgets
+        self.show_all()
 
     def add_terminal(self, container, working_dir=None):
         """Adds a new terminal instance to the specified container."""
@@ -911,6 +954,7 @@ class TerminalWindow(Gtk.ApplicationWindow):
 
     def split_intelligently(self, terminal=None):
         """Splits the specified terminal intelligently."""
+        print("Split intelligently called")  # Debug
         if not terminal:
             terminal = self.terminals[0] if self.terminals else None
         if not terminal:
@@ -925,6 +969,7 @@ class TerminalWindow(Gtk.ApplicationWindow):
 
     def split_horizontal(self, terminal=None):
         """Splits the specified terminal horizontally."""
+        print("Split horizontal called")  # Debug
         if not terminal:
             terminal = self.terminals[0] if self.terminals else None
         if not terminal:
@@ -936,6 +981,7 @@ class TerminalWindow(Gtk.ApplicationWindow):
 
     def split_vertical(self, terminal=None):
         """Splits the specified terminal vertically."""
+        print("Split vertical called")  # Debug
         if not terminal:
             terminal = self.terminals[0] if self.terminals else None
         if not terminal:
@@ -944,6 +990,25 @@ class TerminalWindow(Gtk.ApplicationWindow):
         self.split_terminal(terminal, new_terminal, Gtk.Orientation.HORIZONTAL)
         self.terminals.append(new_terminal)
         GLib.idle_add(new_terminal.terminal.grab_focus)
+
+    def close_active_split(self):
+        """Closes the currently focused terminal split."""
+        print("Close split called")  # Debug
+        if len(self.terminals) > 1:
+            # Find the focused terminal
+            focused_terminal = None
+            for terminal in self.terminals:
+                if terminal.terminal.has_focus():
+                    focused_terminal = terminal
+                    break
+            
+            # If no focused terminal found, close the last one
+            if not focused_terminal:
+                focused_terminal = self.terminals[-1]
+            
+            self.close_terminal(focused_terminal)
+        else:
+            print("Cannot close the last terminal")  # Debug
 
     def close_terminal(self, terminal):
         """Closes a specific terminal instance and manages the UI layout."""
@@ -971,6 +1036,7 @@ class TerminalWindow(Gtk.ApplicationWindow):
 
     def new_window(self, working_dir=None):
         """Creates and shows a new terminal window."""
+        print("New window called")  # Debug
         app = self.get_application()
         if app:
             new_win = TerminalWindow(app, working_dir)
@@ -1013,7 +1079,7 @@ class TerminalWindow(Gtk.ApplicationWindow):
     def show_about(self):
         """Displays the about dialog."""
         dialog = Gtk.AboutDialog()
-        dialog.set_program_name("Eco Terminal")
+        dialog.set_program_name("Eco-6 Terminal")
         dialog.set_version("2.0.0")
         dialog.set_comments("A modern terminal emulator with Tokyo Night theme")
         dialog.set_authors(["Eco Team"])
