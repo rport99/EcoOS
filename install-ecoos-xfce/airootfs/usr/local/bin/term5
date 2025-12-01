@@ -479,12 +479,20 @@ class Terminal(Gtk.Box):
         """Send signal to the child process."""
         if self.child_pid and self.is_alive:
             try:
-                os.kill(self.child_pid, sig)
+                # Send signal to the entire process group
+                os.killpg(os.getpgid(self.child_pid), sig)
                 return True
             except ProcessLookupError:
                 self.is_alive = False
+                print("Process no longer exists")
             except Exception as e:
                 print(f"Error sending signal {sig}: {e}")
+                # Fallback: try sending to PID directly
+                try:
+                    os.kill(self.child_pid, sig)
+                    return True
+                except Exception as e2:
+                    print(f"Fallback signal failed: {e2}")
         return False
 
     def apply_settings(self):
@@ -576,58 +584,58 @@ class Terminal(Gtk.Box):
     def _on_key_press(self, widget, event):
         """Handles key press events for the terminal."""
         modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
+        keyval = event.keyval
 
-        # Enhanced keyboard shortcuts for copy/paste/cut
-        if modifiers == Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK:
-            if event.keyval == Gdk.KEY_C:
+        # Handle Ctrl+Shift combinations first
+        if modifiers == (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK):
+            if keyval == Gdk.KEY_C:
                 if self.terminal.get_has_selection():
                     self.terminal.copy_clipboard()
                 return True
-            elif event.keyval == Gdk.KEY_V:
+            elif keyval == Gdk.KEY_V:
                 self.terminal.paste_clipboard()
                 return True
-            elif event.keyval == Gdk.KEY_X:
+            elif keyval == Gdk.KEY_X:
                 if self.terminal.get_has_selection():
                     self.terminal.copy_clipboard()
-                    # Clear selection (simulate cut)
                     self.terminal.copy_primary()
                 return True
-            elif event.keyval == Gdk.KEY_A:
+            elif keyval == Gdk.KEY_A:
                 self.terminal.select_all()
                 return True
+
+        # Handle Ctrl combinations (without Shift)
         elif modifiers == Gdk.ModifierType.CONTROL_MASK:
-            if event.keyval in [Gdk.KEY_plus, Gdk.KEY_equal, Gdk.KEY_KP_Add]:
+            if keyval in [Gdk.KEY_plus, Gdk.KEY_equal, Gdk.KEY_KP_Add]:
                 self.increase_font_size()
                 return True
-            elif event.keyval in [Gdk.KEY_minus, Gdk.KEY_KP_Subtract]:
+            elif keyval in [Gdk.KEY_minus, Gdk.KEY_KP_Subtract]:
                 self.decrease_font_size()
                 return True
-            elif event.keyval == Gdk.KEY_0:
+            elif keyval == Gdk.KEY_0:
                 self.reset_font_size()
                 return True
-            elif event.keyval == Gdk.KEY_c:
-                # IMPORTANT: This is the fix for Ctrl+C
-                # Only send SIGINT if there's no selection, otherwise copy
+            elif keyval == Gdk.KEY_c:
                 if self.terminal.get_has_selection():
                     self.terminal.copy_clipboard()
-                else:
-                    self.send_signal(signal.SIGINT)
-                return True
-            elif event.keyval == Gdk.KEY_v:
+                    return True
+                # Let VTE forward ^C (0x03) through the PTY → handled as SIGINT by shell
+                return False
+            elif keyval == Gdk.KEY_v:
                 self.terminal.paste_clipboard()
                 return True
-            elif event.keyval == Gdk.KEY_a:
-                # Select all
+            elif keyval == Gdk.KEY_a:
                 self.terminal.select_all()
                 return True
-            elif event.keyval == Gdk.KEY_d:
-                # Ctrl+D for EOF
-                self.send_signal(signal.SIGQUIT)
+            elif keyval == Gdk.KEY_d:
+                # Ctrl+D sends EOF character (0x04)
+                self.terminal.feed_child(b'\x04')
                 return True
-            elif event.keyval == Gdk.KEY_z:
-                # Ctrl+Z for suspend
-                self.send_signal(signal.SIGTSTP)
-                return True
+            elif keyval == Gdk.KEY_z:
+                # Let VTE forward ^Z (0x1A) through the PTY → handled as SIGTSTP by shell
+                return False
+
+        # Allow all other keys to be handled normally by VTE
         return False
 
     def _on_focus_in(self, widget, event):
@@ -795,7 +803,7 @@ class Terminal(Gtk.Box):
                 pass
             self.is_alive = False
 
-# --- Main Application Window ---
+
 # --- Main Application Window ---
 class TerminalWindow(Gtk.ApplicationWindow):
     def __init__(self, application, working_dir=None):
@@ -951,6 +959,17 @@ class TerminalWindow(Gtk.ApplicationWindow):
             paned.pack2(new_terminal, True, True)
             parent.pack_start(paned, True, True, 0)
             paned.show_all()
+
+
+
+
+    def _on_window_state(self, widget, event):
+        """Handles window state changes (minimize, maximize, fullscreen)."""
+        # You can add window state handling logic here if needed
+        # For now, just return False to let the event propagate
+        return False
+
+
 
     def split_intelligently(self, terminal=None):
         """Splits the specified terminal intelligently."""
@@ -1126,47 +1145,46 @@ class TerminalWindow(Gtk.ApplicationWindow):
     def _on_key_press(self, widget, event):
         """Handles global key press events for the window."""
         modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
-        if modifiers == Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK:
+        
+        # Get the currently focused terminal
+        focused_terminal = None
+        for terminal in self.terminals:
+            if terminal.terminal.has_focus():
+                focused_terminal = terminal
+                break
+        
+        # If no terminal is focused, use the first one
+        if not focused_terminal and self.terminals:
+            focused_terminal = self.terminals[0]
+        
+        if not focused_terminal:
+            return False
+
+        # Handle Ctrl+Shift combinations
+        if modifiers == (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK):
             if event.keyval == Gdk.KEY_n:
                 self.new_window()
                 return True
             elif event.keyval == Gdk.KEY_Return:
-                self.split_intelligently()
+                self.split_intelligently(focused_terminal)
                 return True
             elif event.keyval == Gdk.KEY_h:
-                self.split_horizontal()
+                self.split_horizontal(focused_terminal)
                 return True
             elif event.keyval == Gdk.KEY_v:
-                self.split_vertical()
+                self.split_vertical(focused_terminal)
                 return True
-            elif event.keyval == Gdk.KEY_c:
-                if self.terminals and self.terminals[0].terminal.get_has_selection():
-                    self.terminals[0].terminal.copy_clipboard()
-                return True
-            elif event.keyval == Gdk.KEY_v:
-                if self.terminals:
-                    self.terminals[0].terminal.paste_clipboard()
-                return True
-            elif event.keyval == Gdk.KEY_x:
-                if self.terminals and self.terminals[0].terminal.get_has_selection():
-                    self.terminals[0].terminal.copy_clipboard()
-                return True
-            elif event.keyval == Gdk.KEY_a:
-                if self.terminals:
-                    self.terminals[0].terminal.select_all()
-                return True
+        
+        # Handle Ctrl combinations (without Shift) - window-level shortcuts only
         elif modifiers == Gdk.ModifierType.CONTROL_MASK:
             if event.keyval in [Gdk.KEY_plus, Gdk.KEY_equal, Gdk.KEY_KP_Add]:
-                if self.terminals:
-                    self.terminals[0].increase_font_size()
+                focused_terminal.increase_font_size()
                 return True
             elif event.keyval in [Gdk.KEY_minus, Gdk.KEY_KP_Subtract]:
-                if self.terminals:
-                    self.terminals[0].decrease_font_size()
+                focused_terminal.decrease_font_size()
                 return True
             elif event.keyval == Gdk.KEY_0:
-                if self.terminals:
-                    self.terminals[0].reset_font_size()
+                focused_terminal.reset_font_size()
                 return True
             elif event.keyval == Gdk.KEY_F11:
                 if self.get_window().get_state() & Gdk.WindowState.FULLSCREEN:
@@ -1174,10 +1192,8 @@ class TerminalWindow(Gtk.ApplicationWindow):
                 else:
                     self.fullscreen()
                 return True
-        return False
-
-    def _on_window_state(self, widget, event):
-        """Handles window state changes (minimize, maximize, fullscreen)."""
+        
+        # Let all other key events pass through to the terminal widgets
         return False
 
 # --- Settings Dialog ---
