@@ -5658,7 +5658,7 @@ class PanelConfig:
     edge_size: int = 5
 
     # Built-in launcher configurations - CHANGED DEFAULTS HERE
-    terminal_command: str = "term5"  # Changed from "xfce4-terminal"
+    terminal_command: str = "eco_term"  # Changed from "xfce4-terminal"
     file_manager_command: str = "eco_fm"  # Changed from "thunar"
     browser_command: str = "firefox"
     text_editor_command: str = "mousepad"
@@ -6722,7 +6722,7 @@ class SettingsDialog(QDialog):
         
         # Group common applications
         apps = [
-            ("Terminal:", "terminal_edit", self.config.terminal_command, "term5"),
+            ("Terminal:", "terminal_edit", self.config.terminal_command, "eco_term"),
             ("File Manager:", "file_manager_edit", self.config.file_manager_command, "eco_fm"),
             ("Web Browser:", "browser_edit", self.config.browser_command, "firefox, chromium, google-chrome"),
             ("Text Editor:", "text_editor_edit", self.config.text_editor_command, "mousepad, gedit, kate"),
@@ -11503,7 +11503,7 @@ class ConfigManager:
         config.edge_size = self.settings.value("edge_size", 5, type=int)
 
         # Load built-in launcher commands - CHANGED DEFAULTS HERE
-        config.terminal_command = self.settings.value("terminal_command", "term5", type=str)  # Changed from xfce4-terminal
+        config.terminal_command = self.settings.value("terminal_command", "eco_term", type=str)  # Changed from xfce4-terminal
         config.file_manager_command = self.settings.value("file_manager_command", "eco_fm", type=str)  # Changed from thunar
         config.browser_command = self.settings.value("browser_command", "firefox", type=str)
         config.text_editor_command = self.settings.value("text_editor_command", "mousepad", type=str)
