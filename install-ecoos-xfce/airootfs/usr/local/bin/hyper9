@@ -5659,7 +5659,7 @@ class PanelConfig:
 
     # Built-in launcher configurations - CHANGED DEFAULTS HERE
     terminal_command: str = "term5"  # Changed from "xfce4-terminal"
-    file_manager_command: str = "fm10"  # Changed from "thunar"
+    file_manager_command: str = "eco_fm"  # Changed from "thunar"
     browser_command: str = "firefox"
     text_editor_command: str = "mousepad"
     settings_command: str = "xfce4-settings-manager"
@@ -6356,6 +6356,11 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.config = config
         self.setup_ui()
+        self.set_initial_format_values()
+        
+        # Connect combo box changes
+        self.time_format_combo.currentTextChanged.connect(self.on_time_format_changed)
+        self.date_format_combo.currentTextChanged.connect(self.on_date_format_changed)
 
     def setup_ui(self):
         self.setWindowTitle("Panel Settings")
@@ -6586,7 +6591,7 @@ class SettingsDialog(QDialog):
         weather_info.setStyleSheet(f"color: {TokyoNight.COMMENT}; font-size: 8pt;")
         weather_layout.addRow(weather_info)
 
-        # Launchers tab - FIXED VERSION
+        # Launchers tab
         launchers_tab = QWidget()
         launchers_tab.setStyleSheet(f"background: {TokyoNight.NIGHT_BOTTOM};")
         launchers_layout = QVBoxLayout(launchers_tab)
@@ -6718,7 +6723,7 @@ class SettingsDialog(QDialog):
         # Group common applications
         apps = [
             ("Terminal:", "terminal_edit", self.config.terminal_command, "term5"),
-            ("File Manager:", "file_manager_edit", self.config.file_manager_command, "fm10"),
+            ("File Manager:", "file_manager_edit", self.config.file_manager_command, "eco_fm"),
             ("Web Browser:", "browser_edit", self.config.browser_command, "firefox, chromium, google-chrome"),
             ("Text Editor:", "text_editor_edit", self.config.text_editor_command, "mousepad, gedit, kate"),
             ("Settings:", "settings_edit", self.config.settings_command, "xfce4-settings-manager, gnome-control-center"),
@@ -6824,21 +6829,12 @@ class SettingsDialog(QDialog):
             "2024-01-01",
             "Custom..."
         ])
-        if self.config.date_format in ["ddd MMM d", "dddd, MMMM d", "MM/dd/yyyy", "dd-MM-yyyy", "yyyy-MM-dd"]:
-            format_map = {
-                "ddd MMM d": "Mon Jan 1",
-                "dddd, MMMM d": "Monday, January 1",
-                "MM/dd/yyyy": "01/01/2024", 
-                "dd-MM-yyyy": "01-01-2024",
-                "yyyy-MM-dd": "2024-01-01"
-            }
-            self.date_format_combo.setCurrentText(format_map.get(self.config.date_format, "Mon Jan 1"))
-        else:
-            self.date_format_combo.setCurrentText("Custom...")
-        self.custom_date_edit = QLineEdit(self.config.date_format)
-        self.custom_date_edit.setPlaceholderText("Custom date format")
-        self.custom_date_edit.setStyleSheet(f"font-size: 9pt; background: {TokyoNight.SELECTION}; color: {TokyoNight.FOREGROUND}; border: 1px solid {TokyoNight.NEBULA}; border-radius: 3px; padding: 4px;")
         clock_layout.addRow("Date Format:", self.date_format_combo)
+        
+        self.custom_date_edit = QLineEdit()
+        self.custom_date_edit.setPlaceholderText("Custom date format (e.g., %a %b %d)")
+        self.custom_date_edit.setStyleSheet(f"font-size: 9pt; background: {TokyoNight.SELECTION}; color: {TokyoNight.FOREGROUND}; border: 1px solid {TokyoNight.NEBULA}; border-radius: 3px; padding: 4px;")
+        self.custom_date_edit.setVisible(False)
         clock_layout.addRow("Custom Format:", self.custom_date_edit)
         
         # Time format  
@@ -6850,24 +6846,16 @@ class SettingsDialog(QDialog):
             "24:00:00",
             "Custom..."
         ])
-        format_map = {
-            "hh:mm AP": "12:00 PM",
-            "HH:mm": "24:00",
-            "hh:mm:ss AP": "12:00:00 PM",
-            "HH:mm:ss": "24:00:00"
-        }
-        if self.config.time_format in format_map:
-            self.time_format_combo.setCurrentText(format_map[self.config.time_format])
-        else:
-            self.time_format_combo.setCurrentText("Custom...")
-        self.custom_time_edit = QLineEdit(self.config.time_format)
-        self.custom_time_edit.setPlaceholderText("Custom time format")
-        self.custom_time_edit.setStyleSheet(f"font-size: 9pt; background: {TokyoNight.SELECTION}; color: {TokyoNight.FOREGROUND}; border: 1px solid {TokyoNight.NEBULA}; border-radius: 3px; padding: 4px;")
         clock_layout.addRow("Time Format:", self.time_format_combo)
+        
+        self.custom_time_edit = QLineEdit()
+        self.custom_time_edit.setPlaceholderText("Custom time format (e.g., %I:%M %p)")
+        self.custom_time_edit.setStyleSheet(f"font-size: 9pt; background: {TokyoNight.SELECTION}; color: {TokyoNight.FOREGROUND}; border: 1px solid {TokyoNight.NEBULA}; border-radius: 3px; padding: 4px;")
+        self.custom_time_edit.setVisible(False)
         clock_layout.addRow("Custom Format:", self.custom_time_edit)
         
         # Format help
-        help_label = QLabel("Format codes: d=day, M=month, y=year, h=hour, m=minute, s=second, AP=AM/PM")
+        help_label = QLabel("Format codes: %a=abbr weekday, %A=full weekday, %b=abbr month, %B=full month, %d=day, %m=month, %y=2-digit year, %Y=4-digit year, %I=12-hour, %H=24-hour, %M=minute, %S=second, %p=AM/PM")
         help_label.setStyleSheet(f"color: {TokyoNight.COMMENT}; font-size: 7pt; margin-top: 8px;")
         clock_layout.addRow(help_label)
 
@@ -6895,6 +6883,206 @@ class SettingsDialog(QDialog):
 
         self.setLayout(layout)
 
+    def set_initial_format_values(self):
+        """Set initial format values from config"""
+        try:
+            # Reverse mapping for display (from stored format to display text)
+            format_to_display = {
+                # Time formats
+                "hh:mm AP": "12:00 PM",
+                "HH:mm": "24:00",
+                "hh:mm:ss AP": "12:00:00 PM",
+                "HH:mm:ss": "24:00:00",
+                "%I:%M %p": "12:00 PM",
+                "%H:%M": "24:00",
+                "%I:%M:%S %p": "12:00:00 PM",
+                "%H:%M:%S": "24:00:00",
+                # Date formats
+                "ddd MMM d": "Mon Jan 1",
+                "dddd, MMMM d": "Monday, January 1",
+                "MM/dd/yyyy": "01/01/2024",
+                "dd-MM-yyyy": "01-01-2024",
+                "yyyy-MM-dd": "2024-01-01",
+                "%a %b %d": "Mon Jan 1",
+                "%A, %B %d": "Monday, January 1",
+                "%m/%d/%Y": "01/01/2024",
+                "%d-%m-%Y": "01-01-2024",
+                "%Y-%m-%d": "2024-01-01"
+            }
+            
+            # Set time format
+            current_time_format = self.config.time_format
+            display_time = format_to_display.get(current_time_format, "Custom...")
+            
+            if display_time != "Custom...":
+                index = self.time_format_combo.findText(display_time)
+                if index >= 0:
+                    self.time_format_combo.setCurrentIndex(index)
+                    self.custom_time_edit.setVisible(False)
+                else:
+                    # If not found in combo, treat as custom
+                    self.time_format_combo.setCurrentText("Custom...")
+                    self.custom_time_edit.setText(current_time_format)
+                    self.custom_time_edit.setVisible(True)
+            else:
+                # Custom format
+                self.time_format_combo.setCurrentText("Custom...")
+                self.custom_time_edit.setText(current_time_format)
+                self.custom_time_edit.setVisible(True)
+            
+            # Set date format
+            current_date_format = self.config.date_format
+            display_date = format_to_display.get(current_date_format, "Custom...")
+            
+            if display_date != "Custom...":
+                index = self.date_format_combo.findText(display_date)
+                if index >= 0:
+                    self.date_format_combo.setCurrentIndex(index)
+                    self.custom_date_edit.setVisible(False)
+                else:
+                    # If not found in combo, treat as custom
+                    self.date_format_combo.setCurrentText("Custom...")
+                    self.custom_date_edit.setText(current_date_format)
+                    self.custom_date_edit.setVisible(True)
+            else:
+                # Custom format
+                self.date_format_combo.setCurrentText("Custom...")
+                self.custom_date_edit.setText(current_date_format)
+                self.custom_date_edit.setVisible(True)
+                
+        except Exception as e:
+            print(f"Error setting initial format values: {e}")
+            # Fallback to defaults
+            self.time_format_combo.setCurrentText("12:00 PM")
+            self.date_format_combo.setCurrentText("Mon Jan 1")
+
+    def on_time_format_changed(self, text):
+        """Handle time format combo box change"""
+        if text == "Custom...":
+            self.custom_time_edit.setVisible(True)
+            # If custom field is empty, set a default
+            if not self.custom_time_edit.text():
+                self.custom_time_edit.setText("%I:%M %p")
+        else:
+            self.custom_time_edit.setVisible(False)
+
+    def on_date_format_changed(self, text):
+        """Handle date format combo box change"""
+        if text == "Custom...":
+            self.custom_date_edit.setVisible(True)
+            # If custom field is empty, set a default
+            if not self.custom_date_edit.text():
+                self.custom_date_edit.setText("%a %b %d")
+        else:
+            self.custom_date_edit.setVisible(False)
+
+    def save_settings(self):
+        """Save all settings including clock customization and built-in launcher commands"""
+        # Save appearance settings
+        self.config.position = self.position_combo.currentText()
+        self.config.height = self.height_spin.value()
+        self.config.opacity = self.opacity_slider.value() / 100.0
+        self.config.theme_variant = self.theme_combo.currentText()
+        self.config.rounded_corners = self.rounded_corners_check.isChecked()
+        self.config.corner_radius = self.corner_radius_spin.value()
+        
+        # Save module visibility settings
+        self.config.show_date = self.show_date_check.isChecked()
+        self.config.show_battery = self.show_battery_check.isChecked()
+        self.config.show_volume = self.show_volume_check.isChecked()
+        self.config.show_network = self.show_network_check.isChecked()
+        self.config.show_tray = self.show_tray_check.isChecked()
+        self.config.show_xfce_launchers = self.show_xfce_launchers_check.isChecked()
+        self.config.show_workspace_switcher = self.show_workspace_switcher_check.isChecked()
+        self.config.show_brightness_control = self.show_brightness_control_check.isChecked()
+        self.config.show_weather = self.show_weather_check.isChecked()
+        self.config.show_notifications = self.show_notifications_check.isChecked()
+        self.config.show_network_control = self.show_network_control_check.isChecked()
+        self.config.show_bluetooth_control = self.show_bluetooth_control_check.isChecked()
+        # NEW: Tiling control
+        self.config.show_tiling_control = self.show_tiling_control_check.isChecked()
+        
+        # Save weather settings
+        self.config.weather_location = self.weather_location_edit.text()
+        
+        # Save auto-hide settings
+        self.config.auto_hide = self.auto_hide_check.isChecked()
+        self.config.auto_hide_delay = self.auto_hide_delay_spin.value()
+        self.config.show_on_edge = self.show_on_edge_check.isChecked()
+        self.config.edge_size = self.edge_size_spin.value()
+        
+        # Save built-in launcher commands
+        self.config.terminal_command = self.terminal_edit.text()
+        self.config.file_manager_command = self.file_manager_edit.text()
+        self.config.browser_command = self.browser_edit.text()
+        self.config.text_editor_command = self.text_editor_edit.text()
+        self.config.settings_command = self.settings_edit.text()
+        self.config.calculator_command = self.calculator_edit.text()
+        self.config.screenshot_command = self.screenshot_edit.text()
+        self.config.image_viewer_command = self.image_viewer_edit.text()
+        self.config.music_player_command = self.music_player_edit.text()
+        self.config.music_player_args = self.music_player_args_edit.text()
+        
+        # Save clock settings
+        self.config.clock_font_size = self.clock_font_size_spin.value()
+        self.config.date_font_size = self.date_font_size_spin.value()
+        self.config.clock_color = self.clock_color_edit.text()
+        self.config.date_color = self.date_color_edit.text()
+        self.config.clock_font_weight = self.clock_font_weight_combo.currentText()
+        self.config.date_font_weight = self.date_font_weight_combo.currentText()
+        self.config.show_seconds = self.show_seconds_check.isChecked()
+        
+        # Handle date/time formats
+        if self.time_format_combo.currentText() == "Custom...":
+            self.config.time_format = self.custom_time_edit.text()
+        else:
+            # Map the display text to our format string
+            display_to_format = {
+                "12:00 PM": "hh:mm AP",
+                "24:00": "HH:mm",
+                "12:00:00 PM": "hh:mm:ss AP",
+                "24:00:00": "HH:mm:ss"
+            }
+            self.config.time_format = display_to_format.get(
+                self.time_format_combo.currentText(),
+                self.time_format_combo.currentText()
+            )
+        
+        if self.date_format_combo.currentText() == "Custom...":
+            self.config.date_format = self.custom_date_edit.text()
+        else:
+            # Map the display text to our format string
+            display_to_format = {
+                "Mon Jan 1": "ddd MMM d",
+                "Monday, January 1": "dddd, MMMM d",
+                "01/01/2024": "MM/dd/yyyy",
+                "01-01-2024": "dd-MM-yyyy",
+                "2024-01-01": "yyyy-MM-dd"
+            }
+            self.config.date_format = display_to_format.get(
+                self.date_format_combo.currentText(),
+                self.date_format_combo.currentText()
+            )
+        
+        print(f"DEBUG: Time format saved as: {self.config.time_format}")
+        print(f"DEBUG: Date format saved as: {self.config.date_format}")
+        print(f"DEBUG: Show seconds: {self.config.show_seconds}")
+        
+        # CRITICAL FIX: Save custom launchers properly
+        custom_launchers = []
+        for i in range(self.launchers_list.count()):
+            item = self.launchers_list.item(i)
+            if item:
+                launcher = item.data(Qt.UserRole)
+                if launcher:
+                    custom_launchers.append(launcher)
+        
+        self.config.launcher_customizations = custom_launchers
+        print(f"DEBUG: Saved {len(custom_launchers)} custom launchers")
+        
+        self.accept()
+
+    # Other methods that need to be in the class
     def load_launchers(self):
         """Load existing launchers into the list"""
         self.launchers_list.clear()
@@ -6988,87 +7176,6 @@ class SettingsDialog(QDialog):
         color = QColorDialog.getColor(current_color, self, "Choose Color")
         if color.isValid():
             line_edit.setText(color.name())
-
-    def save_settings(self):
-        """Save all settings including clock customization"""
-        # Save appearance settings
-        self.config.position = self.position_combo.currentText()
-        self.config.height = self.height_spin.value()
-        self.config.opacity = self.opacity_slider.value() / 100.0
-        self.config.theme_variant = self.theme_combo.currentText()
-        self.config.rounded_corners = self.rounded_corners_check.isChecked()
-        self.config.corner_radius = self.corner_radius_spin.value()
-        
-        # Save module visibility settings
-        self.config.show_date = self.show_date_check.isChecked()
-        self.config.show_battery = self.show_battery_check.isChecked()
-        self.config.show_volume = self.show_volume_check.isChecked()
-        self.config.show_network = self.show_network_check.isChecked()
-        self.config.show_tray = self.show_tray_check.isChecked()
-        self.config.show_xfce_launchers = self.show_xfce_launchers_check.isChecked()
-        self.config.show_workspace_switcher = self.show_workspace_switcher_check.isChecked()
-        self.config.show_brightness_control = self.show_brightness_control_check.isChecked()
-        self.config.show_weather = self.show_weather_check.isChecked()
-        self.config.show_notifications = self.show_notifications_check.isChecked()
-        self.config.show_network_control = self.show_network_control_check.isChecked()
-        self.config.show_bluetooth_control = self.show_bluetooth_control_check.isChecked()
-        # NEW: Tiling control
-        self.config.show_tiling_control = self.show_tiling_control_check.isChecked()
-        
-        # Save weather settings
-        self.config.weather_location = self.weather_location_edit.text()
-        
-        # Save auto-hide settings
-        self.config.auto_hide = self.auto_hide_check.isChecked()
-        self.config.auto_hide_delay = self.auto_hide_delay_spin.value()
-        self.config.show_on_edge = self.show_on_edge_check.isChecked()
-        self.config.edge_size = self.edge_size_spin.value()
-        
-        # Save built-in launcher commands
-        self.config.terminal_command = self.terminal_edit.text()
-        self.config.file_manager_command = self.file_manager_edit.text()
-        self.config.browser_command = self.browser_edit.text()
-        self.config.text_editor_command = self.text_editor_edit.text()
-        self.config.settings_command = self.settings_edit.text()
-        self.config.calculator_command = self.calculator_edit.text()
-        self.config.screenshot_command = self.screenshot_edit.text()
-        self.config.image_viewer_command = self.image_viewer_edit.text()
-        self.config.music_player_command = self.music_player_edit.text()
-        self.config.music_player_args = self.music_player_args_edit.text()
-        
-        # Save clock settings
-        self.config.clock_font_size = self.clock_font_size_spin.value()
-        self.config.date_font_size = self.date_font_size_spin.value()
-        self.config.clock_color = self.clock_color_edit.text()
-        self.config.date_color = self.date_color_edit.text()
-        self.config.clock_font_weight = self.clock_font_weight_combo.currentText()
-        self.config.date_font_weight = self.date_font_weight_combo.currentText()
-        self.config.show_seconds = self.show_seconds_check.isChecked()
-        
-        # Handle date/time formats
-        if self.date_format_combo.currentText() == "Custom...":
-            self.config.date_format = self.custom_date_edit.text()
-        else:
-            self.config.date_format = self.date_format_combo.currentText()
-            
-        if self.time_format_combo.currentText() == "Custom...":
-            self.config.time_format = self.custom_time_edit.text()
-        else:
-            self.config.time_format = self.time_format_combo.currentText()
-        
-        # CRITICAL FIX: Save custom launchers properly
-        custom_launchers = []
-        for i in range(self.launchers_list.count()):
-            item = self.launchers_list.item(i)
-            if item:
-                launcher = item.data(Qt.UserRole)
-                if launcher:
-                    custom_launchers.append(launcher)
-        
-        self.config.launcher_customizations = custom_launchers
-        print(f"DEBUG: Saved {len(custom_launchers)} custom launchers to config")
-        
-        self.accept()
 
     def get_stylesheet(self):
         return f"""
@@ -7185,7 +7292,7 @@ class SettingsDialog(QDialog):
         """
 
     def save_settings(self):
-        """Save all settings including built-in launcher commands and custom launchers"""
+        """Save all settings including clock customization and built-in launcher commands"""
         # Save appearance settings
         self.config.position = self.position_combo.currentText()
         self.config.height = self.height_spin.value()
@@ -7230,6 +7337,47 @@ class SettingsDialog(QDialog):
         self.config.image_viewer_command = self.image_viewer_edit.text()
         self.config.music_player_command = self.music_player_edit.text()
         self.config.music_player_args = self.music_player_args_edit.text()
+        
+        # Save clock settings
+        self.config.clock_font_size = self.clock_font_size_spin.value()
+        self.config.date_font_size = self.date_font_size_spin.value()
+        self.config.clock_color = self.clock_color_edit.text()
+        self.config.date_color = self.date_color_edit.text()
+        self.config.clock_font_weight = self.clock_font_weight_combo.currentText()
+        self.config.date_font_weight = self.date_font_weight_combo.currentText()
+        self.config.show_seconds = self.show_seconds_check.isChecked()
+        
+        # Handle date/time formats
+        if self.date_format_combo.currentText() == "Custom...":
+            self.config.date_format = self.custom_date_edit.text()
+        else:
+            # Map the display text to the actual format string
+            date_format_map = {
+                "Mon Jan 1": "ddd MMM d",
+                "Monday, January 1": "dddd, MMMM d",
+                "01/01/2024": "MM/dd/yyyy",
+                "01-01-2024": "dd-MM-yyyy",
+                "2024-01-01": "yyyy-MM-dd"
+            }
+            self.config.date_format = date_format_map.get(
+                self.date_format_combo.currentText(), 
+                self.date_format_combo.currentText()
+            )
+            
+        if self.time_format_combo.currentText() == "Custom...":
+            self.config.time_format = self.custom_time_edit.text()
+        else:
+            # Map the display text to the actual format string
+            time_format_map = {
+                "12:00 PM": "hh:mm AP",
+                "24:00": "HH:mm",
+                "12:00:00 PM": "hh:mm:ss AP",
+                "24:00:00": "HH:mm:ss"
+            }
+            self.config.time_format = time_format_map.get(
+                self.time_format_combo.currentText(),
+                self.time_format_combo.currentText()
+            )
         
         # CRITICAL FIX: Save custom launchers properly
         custom_launchers = []
@@ -8993,30 +9141,58 @@ class TokyoNightPanelBar(QMainWindow):
         now = datetime.now()
         
         try:
-            # Format time
-            if self.config.show_seconds:
-                # If show_seconds is enabled, use format that includes seconds
-                if "ss" not in self.config.time_format:
-                    # Auto-add seconds to format if not present
-                    time_format = self.config.time_format.replace("mm", "mm:ss")
-                else:
-                    time_format = self.config.time_format
-            else:
-                # Remove seconds from format if present
-                time_format = self.config.time_format.replace(":ss", "").replace("ss", "")
+            # Convert our format strings to Python strftime format codes
+            # Map our custom format codes to Python's strftime codes
+            format_to_python = {
+                # Time formats
+                "hh:mm AP": "%I:%M %p",      # 12-hour with AM/PM
+                "HH:mm": "%H:%M",            # 24-hour
+                "hh:mm:ss AP": "%I:%M:%S %p", # 12-hour with seconds
+                "HH:mm:ss": "%H:%M:%S",      # 24-hour with seconds
+                # Date formats  
+                "ddd MMM d": "%a %b %d",     # Mon Jan 1
+                "dddd, MMMM d": "%A, %B %d", # Monday, January 1
+                "MM/dd/yyyy": "%m/%d/%Y",    # 01/01/2024
+                "dd-MM-yyyy": "%d-%m-%Y",    # 01-01-2024
+                "yyyy-MM-dd": "%Y-%m-%d",    # 2024-01-01
+                # Also handle Python format codes directly if user entered them
+                "%I:%M %p": "%I:%M %p",
+                "%H:%M": "%H:%M",
+                "%I:%M:%S %p": "%I:%M:%S %p",
+                "%H:%M:%S": "%H:%M:%S",
+                "%a %b %d": "%a %b %d",
+                "%A, %B %d": "%A, %B %d",
+                "%m/%d/%Y": "%m/%d/%Y",
+                "%d-%m-%Y": "%d-%m-%Y",
+                "%Y-%m-%d": "%Y-%m-%d"
+            }
             
+            # Get the time format
+            time_format = self.config.time_format
+            # Convert to Python format if needed
+            time_format = format_to_python.get(time_format, time_format)
+            
+            # Handle seconds based on config
+            if not self.config.show_seconds:
+                # Remove seconds if not showing
+                time_format = time_format.replace(":%S", "").replace("%S", "")
+            
+            # Get the date format
+            date_format = self.config.date_format
+            # Convert to Python format if needed
+            date_format = format_to_python.get(date_format, date_format)
+            
+            # Format the strings
             time_str = now.strftime(time_format)
-            
-            # Format date
-            date_str = now.strftime(self.config.date_format)
+            date_str = now.strftime(date_format)
             
             self.clock_label.setText(time_str)
             self.date_label.setText(date_str)
             
         except Exception as e:
-            # Fallback to default formatting if custom format fails
+            # Fallback to default formatting
             print(f"Clock format error: {e}, using defaults")
-            time_str = now.strftime("%I:%M %p")
+            time_str = now.strftime("%I:%M %p" if not self.config.show_seconds else "%I:%M:%S %p")
             date_str = now.strftime("%a %b %d")
             self.clock_label.setText(time_str)
             self.date_label.setText(date_str)
@@ -11328,7 +11504,7 @@ class ConfigManager:
 
         # Load built-in launcher commands - CHANGED DEFAULTS HERE
         config.terminal_command = self.settings.value("terminal_command", "term5", type=str)  # Changed from xfce4-terminal
-        config.file_manager_command = self.settings.value("file_manager_command", "fm10", type=str)  # Changed from thunar
+        config.file_manager_command = self.settings.value("file_manager_command", "eco_fm", type=str)  # Changed from thunar
         config.browser_command = self.settings.value("browser_command", "firefox", type=str)
         config.text_editor_command = self.settings.value("text_editor_command", "mousepad", type=str)
         config.settings_command = self.settings.value("settings_command", "xfce4-settings-manager", type=str)
