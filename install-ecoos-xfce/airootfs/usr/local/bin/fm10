@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QListWidget, QListWidgetItem, QProgressDialog,
                             QProgressBar, QDockWidget, QFrame, QTreeView, QListView, QSplitter, QSlider, QButtonGroup)
 from PyQt5.QtCore import QDir, QModelIndex, Qt, QSortFilterProxyModel, pyqtSignal, QSize, QThread, QMimeData, QTimer, QSettings, QUrl, QPoint
-from PyQt5.QtGui import QIcon, QKeySequence, QPalette, QColor, QFont, QPixmap, QDrag, QPainter
+from PyQt5.QtGui import QIcon, QKeySequence, QPalette, QColor, QFont, QPixmap, QDrag, QPainter, QClipboard
 import platform
 import psutil
 import getpass
@@ -201,6 +201,42 @@ def check_mount_dependencies():
     else:
         print("All required mounting tools are available")
         return True
+
+def handle_url_scheme(url):
+    """Handle file:// and trash:// URLs from browsers"""
+    if url.startswith('file://'):
+        # Convert file URL to local path
+        from urllib.parse import unquote
+        path = unquote(url[7:])  # Remove 'file://' prefix
+        return path
+    elif url.startswith('trash:///'):
+        # Handle trash:/// URI scheme
+        return 'trash:///'
+    return None
+
+def detect_launch_intent():
+    """Detect how the application was launched and what to open"""
+    # Check command line arguments
+    for arg in sys.argv[1:]:
+        if arg.startswith('trash:///'):
+            return 'trash:///'
+        elif arg.startswith('file://'):
+            return handle_url_scheme(arg)
+        elif os.path.isdir(arg):
+            return arg
+    
+    # Check environment variables for desktop launches
+    desktop_session = os.environ.get('DESKTOP_SESSION', '').lower()
+    xdg_current_desktop = os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
+    
+    # If launched from desktop with no specific target, open home directory
+    if 'DISPLAY' in os.environ and os.environ.get('DISPLAY'):
+        print(f"Desktop launch detected: {desktop_session} / {xdg_current_desktop}")
+        return os.path.expanduser('~')
+    
+    # Default to current directory
+    return os.getcwd()
+
 
 # =============================================================================
 # THREAD MONITOR
@@ -414,11 +450,29 @@ class FileOperationThread(QThread):
     def safe_move(self, src, dst):
         if self.is_cancelled():
             return False
-        
-        # Check if destination file exists
+
+        # Use realpath to resolve symlinks and normalize paths
+        src_real = os.path.realpath(src)
+        dst_real = os.path.realpath(dst)
+
+        # Skip if source and destination resolve to the same file/directory
+        if src_real == dst_real:
+            return True  # Nothing to do
+
+        # Check if source exists
+        if not os.path.exists(src_real):
+            return False
+
+        # Prevent moving a directory into itself
+        if os.path.isdir(src_real):
+            src_norm = os.path.normpath(src_real)
+            dst_norm = os.path.normpath(dst_real)
+            if dst_norm.startswith(src_norm + os.sep):
+                self.error_occurred.emit(f"Cannot move directory into itself: {src}")
+                return False
+
+        # Handle destination conflict by auto-renaming
         if os.path.exists(dst):
-            # File conflict - we need to handle this
-            # For now, we'll auto-rename to avoid overwriting
             base, ext = os.path.splitext(dst)
             counter = 1
             while os.path.exists(f"{base} ({counter}){ext}"):
@@ -426,13 +480,23 @@ class FileOperationThread(QThread):
                     return False
                 counter += 1
             dst = f"{base} ({counter}){ext}"
-            
+
         try:
-            shutil.move(src, dst)
+            src_stat = os.stat(src)
+            dst_parent = os.path.dirname(dst)
+            if os.path.exists(dst_parent):
+                dst_stat = os.stat(dst_parent)
+                if src_stat.st_dev == dst_stat.st_dev:
+                    os.rename(src, dst)  # Same filesystem
+                else:
+                    shutil.move(src, dst)  # Cross-filesystem
+            else:
+                shutil.move(src, dst)
             return True
         except Exception as e:
             self.error_occurred.emit(f"Failed to move {src}: {str(e)}")
             return False
+
 
 # =============================================================================
 # THUMBNAIL GENERATOR
@@ -469,28 +533,41 @@ class ThumbnailGenerator:
             return False
 
 # =============================================================================
-# THUMBNAIL FILE SYSTEM MODEL
+# SORTABLE FILE SYSTEM MODEL
 # =============================================================================
 
-class ThumbnailFileSystemModel(QFileSystemModel):
+# =============================================================================
+# SORTABLE FILE SYSTEM MODEL
+# =============================================================================
+
+# =============================================================================
+# SORTABLE FILE SYSTEM MODEL
+# =============================================================================
+
+class SortableFileSystemModel(QFileSystemModel):
+    """Enhanced QFileSystemModel with better sorting capabilities"""
+    
     def __init__(self, show_hidden=False):
+        # Call parent __init__ FIRST
         super().__init__()
+        
+        # Now initialize your custom properties
         self.thumbnail_cache = {}
         self.thumbnail_dir = os.path.expanduser('~/.cache/eco-filemanager/thumbnails')
         os.makedirs(self.thumbnail_dir, exist_ok=True)
         self.show_hidden = show_hidden
-        self.max_cache_size = 500  # Limit cache size
+        self.max_cache_size = 500
         self.cache_hits = 0
         self.cache_misses = 0
+        
         # Cleanup timer for cache management
         self.cleanup_timer = QTimer()
         self.cleanup_timer.timeout.connect(self.cleanup_cache)
-        self.cleanup_timer.start(30000)  # Clean every 30 seconds
+        self.cleanup_timer.start(30000)
 
     def cleanup_cache(self):
         """Clean up thumbnail cache to prevent memory leaks"""
         if len(self.thumbnail_cache) > self.max_cache_size:
-            # Remove oldest items (simple FIFO)
             keys_to_remove = list(self.thumbnail_cache.keys())[:len(self.thumbnail_cache) - self.max_cache_size]
             for key in keys_to_remove:
                 del self.thumbnail_cache[key]
@@ -499,7 +576,6 @@ class ThumbnailFileSystemModel(QFileSystemModel):
         # Handle thumbnails for decoration role in first column only
         if role == Qt.DecorationRole and index.column() == 0:
             file_path = self.filePath(index)
-            # Check if we should generate thumbnail
             if self.should_generate_thumbnail(file_path):
                 thumbnail = self.get_thumbnail(file_path)
                 if thumbnail:
@@ -510,31 +586,31 @@ class ThumbnailFileSystemModel(QFileSystemModel):
     def should_generate_thumbnail(self, file_path):
         if os.path.isdir(file_path):
             return False
-        # Video files
         video_extensions = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.3gp'}
-        # Image files
         image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.svg'}
         ext = os.path.splitext(file_path)[1].lower()
         return ext in video_extensions.union(image_extensions)
 
     def get_thumbnail(self, file_path):
-        # Check cache first with size limit
+        # Check cache first
         if file_path in self.thumbnail_cache and len(self.thumbnail_cache) < self.max_cache_size:
             self.cache_hits += 1
             return self.thumbnail_cache[file_path]
         self.cache_misses += 1
+        
         # Generate thumbnail path
         file_hash = str(hash(file_path))
         thumbnail_path = os.path.join(self.thumbnail_dir, f"{file_hash}.png")
+        
         # Check if thumbnail exists and is recent
         if os.path.exists(thumbnail_path):
             file_mtime = os.path.getmtime(file_path)
             thumb_mtime = os.path.getmtime(thumbnail_path)
-            # Use cached thumbnail if it's newer than file modification
             if thumb_mtime >= file_mtime:
                 icon = QIcon(thumbnail_path)
                 self.thumbnail_cache[file_path] = icon
                 return icon
+        
         # Generate new thumbnail
         ext = os.path.splitext(file_path)[1].lower()
         success = False
@@ -542,22 +618,164 @@ class ThumbnailFileSystemModel(QFileSystemModel):
             success = ThumbnailGenerator.generate_video_thumbnail(file_path, thumbnail_path)
         elif ext in {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'}:
             success = ThumbnailGenerator.generate_image_thumbnail(file_path, thumbnail_path)
+        
         if success and os.path.exists(thumbnail_path):
             icon = QIcon(thumbnail_path)
             self.thumbnail_cache[file_path] = icon
             return icon
-        # Fallback to default icon - return None to use parent implementation
+        
         return None
+
+
+# =============================================================================
+# SORTABLE TREE VIEW
+# =============================================================================
+
+# =============================================================================
+# SORTABLE TREE VIEW
+# =============================================================================
+
+class SortableTreeView(QTreeView):
+    """Tree view with enhanced column sorting"""
+    file_dropped = pyqtSignal(list, str, str)
+    drag_cut_completed = pyqtSignal(list)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setDragEnabled(True)
+        self.setDropIndicatorShown(True)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.setDragDropMode(QAbstractItemView.DragDrop)
+        self.is_cut_operation = False
+        
+        # Enable sorting
+        self.setSortingEnabled(True)
+        
+        # Set up column header to be clickable for sorting
+        header = self.header()
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(True)
+        header.setStretchLastSection(False)
+        header.setDefaultSectionSize(150)
+        header.setSectionResizeMode(QHeaderView.Interactive)
+
+    def startDrag(self, supportedActions):
+        indexes = self.selectedIndexes()
+        if not indexes:
+            return
+        
+        main_window = self.window()
+        if main_window:
+            main_window.raise_()
+        
+        modifiers = QApplication.keyboardModifiers()
+        self.is_cut_operation = bool(modifiers & Qt.AltModifier)
+        
+        drag = QDrag(self)
+        mime_data = QMimeData()
+        
+        file_paths = []
+        model = self.model()
+        for index in indexes:
+            if index.column() == 0:
+                file_path = model.filePath(index)
+                file_paths.append(file_path)
+        
+        mime_data.setUrls([QUrl.fromLocalFile(path) for path in file_paths])
+        
+        if self.is_cut_operation:
+            gnome_format = "cut\n" + '\n'.join([f"file://{path}" for path in file_paths])
+        else:
+            gnome_format = "copy\n" + '\n'.join([f"file://{path}" for path in file_paths])
+        
+        mime_data.setData("x-special/gnome-copied-files", gnome_format.encode('utf-8'))
+        mime_data.setData("text/uri-list", '\n'.join([f"file://{path}" for path in file_paths]).encode('utf-8'))
+        mime_data.setText('\n'.join(file_paths))
+        
+        drag.setMimeData(mime_data)
+        
+        if len(file_paths) == 1:
+            icon = model.data(indexes[0], Qt.DecorationRole)
+            if icon:
+                pixmap = icon.pixmap(32, 32)
+                drag.setPixmap(pixmap)
+        
+        if self.is_cut_operation:
+            action = drag.exec_(Qt.MoveAction | Qt.CopyAction, Qt.MoveAction)
+        else:
+            action = drag.exec_(Qt.MoveAction | Qt.CopyAction, Qt.CopyAction)
+            
+        if self.is_cut_operation and action == Qt.MoveAction:
+            self.drag_cut_completed.emit(file_paths)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            self.window().raise_()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            self.window().raise_()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            file_paths = [url.toLocalFile() for url in urls]
+            
+            index = self.indexAt(event.pos())
+            
+            if index.isValid():
+                model = self.model()
+                item_path = model.filePath(index)
+                
+                if os.path.isfile(item_path):
+                    destination_dir = os.path.dirname(item_path)
+                else:
+                    destination_dir = item_path
+                    
+                    for file_path in file_paths:
+                        if os.path.abspath(file_path) == os.path.abspath(item_path):
+                            destination_dir = os.path.dirname(item_path)
+                            break
+            else:
+                destination_dir = self.model().rootPath()
+            
+            operation = 'copy'
+            
+            mime_data = event.mimeData()
+            if mime_data.hasFormat("x-special/gnome-copied-files"):
+                data = mime_data.data("x-special/gnome-copied-files").data().decode('utf-8')
+                if data.startswith("cut\n"):
+                    operation = 'move'
+                elif data.startswith("copy\n"):
+                    operation = 'copy'
+            elif event.keyboardModifiers() & Qt.ShiftModifier:
+                operation = 'move'
+            elif event.keyboardModifiers() & Qt.ControlModifier:
+                operation = 'copy'
+            
+            self.file_dropped.emit(file_paths, destination_dir, operation)
+            
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
 # =============================================================================
 # AUTO MOUNTER
 # =============================================================================
+
 class AutoMounter(QThread):
-    """Thread for automatically mounting USB devices with proper udisks2 handling"""
-    mount_success = pyqtSignal(str, str)  # device, mount_point
-    mount_failed = pyqtSignal(str, str)   # device, error
-    unmount_success = pyqtSignal(str)     # mount_point
-    unmount_failed = pyqtSignal(str, str) # mount_point, error
+    """Thread for automatically mounting USB devices"""
+    mount_success = pyqtSignal(str, str)
+    mount_failed = pyqtSignal(str, str)
+    unmount_success = pyqtSignal(str)
+    unmount_failed = pyqtSignal(str, str)
     
     def __init__(self):
         super().__init__()
@@ -596,22 +814,18 @@ class AutoMounter(QThread):
                 time.sleep(5)
 
     def add_device(self, device):
-        """Add device to mount queue"""
         with self._lock:
             if device not in self.mount_queue:
                 print(f"📥 AutoMounter: Queuing device for mount: {device}")
                 self.mount_queue.append(device)
 
     def debug_mount_issue(self, device):
-        """Debug why mounting is failing"""
         print(f"🔍 Debugging mount issue for {device}:")
         
-        # Check if device exists and is accessible
         if not os.path.exists(device):
             print(f"  ❌ Device {device} does not exist")
             return False
             
-        # Check device permissions
         try:
             stat_info = os.stat(device)
             print(f"  ✅ Device exists, permissions: {oct(stat_info.st_mode)}")
@@ -620,7 +834,6 @@ class AutoMounter(QThread):
             print(f"  ❌ Cannot access device: {e}")
             return False
             
-        # Check filesystem type
         try:
             result = subprocess.run(['blkid', device], capture_output=True, text=True)
             if result.returncode == 0:
@@ -630,7 +843,6 @@ class AutoMounter(QThread):
         except Exception as e:
             print(f"  ❌ blkid failed: {e}")
             
-        # Check if already mounted
         try:
             result = subprocess.run(['findmnt', device], capture_output=True, text=True)
             if result.returncode == 0:
@@ -640,7 +852,6 @@ class AutoMounter(QThread):
         except Exception as e:
             print(f"  ❌ findmnt failed: {e}")
             
-        # Check udisks2 info
         try:
             result = subprocess.run(['udisksctl', 'info', '-b', device], 
                                   capture_output=True, text=True)
@@ -657,18 +868,15 @@ class AutoMounter(QThread):
         return True
 
     def try_mount_device(self, device):
-        """Try multiple methods to mount a device"""
         if platform.system() != "Linux":
             return
             
         print(f"🚀 AutoMounter: Attempting to mount {device}")
         
-        # First debug the issue
         if not self.debug_mount_issue(device):
             self.mount_failed.emit(device, "Device not accessible")
             return
         
-        # Check if already mounted
         mount_point = self.get_existing_mount_point(device)
         if mount_point:
             print(f"✅ AutoMounter: {device} already mounted at {mount_point}")
@@ -677,27 +885,21 @@ class AutoMounter(QThread):
             
         print("🔄 Trying mount methods...")
         
-        # Method 1: Try udisks2 with better error handling
         if self.try_udisks_mount(device):
             return
             
-        # Method 2: Try gio mount (GNOME)
         if self.try_gio_mount(device):
             return
             
-        # Method 3: Try DBus directly
         if self.try_dbus_mount(device):
             return
             
-        # Method 4: Try pmount (user-level mounting)
         if self.try_pmount(device):
             return
             
-        # Method 5: Try direct mount as last resort
         if self.try_direct_mount(device):
             return
             
-        # Method 6: Try with explicit filesystem type
         if self.try_mount_with_fstype(device):
             return
             
@@ -706,9 +908,7 @@ class AutoMounter(QThread):
         self.mount_failed.emit(device, error_msg)
 
     def get_existing_mount_point(self, device):
-        """Check if device is already mounted"""
         try:
-            # Method 1: Use findmnt
             result = subprocess.run(
                 ['findmnt', '-n', '-o', 'TARGET', '-S', device],
                 capture_output=True, text=True, timeout=5
@@ -718,7 +918,6 @@ class AutoMounter(QThread):
                 print(f"📍 Found existing mount point: {mount_point}")
                 return mount_point
                 
-            # Method 2: Check /proc/mounts
             with open('/proc/mounts', 'r') as f:
                 for line in f:
                     if device in line:
@@ -732,11 +931,9 @@ class AutoMounter(QThread):
         return None
 
     def try_udisks_mount(self, device):
-        """Mount using udisks2 with comprehensive error handling"""
         try:
             print(f"🔧 Method 1: Trying udisks2 mount for {device}")
             
-            # Try udisksctl mount
             result = subprocess.run(
                 ['udisksctl', 'mount', '-b', device],
                 capture_output=True, text=True, timeout=15
@@ -747,7 +944,6 @@ class AutoMounter(QThread):
             print(f"🔢 udisksctl return code: {result.returncode}")
             
             if result.returncode == 0:
-                # Parse mount point from output
                 for line in result.stdout.split('\n'):
                     if 'mounted at' in line:
                         mount_point = line.split('mounted at')[-1].strip().rstrip('.')
@@ -755,7 +951,6 @@ class AutoMounter(QThread):
                         self.mount_success.emit(device, mount_point)
                         return True
                         
-                # Alternative parsing
                 if 'at ' in result.stdout:
                     parts = result.stdout.split('at ')
                     if len(parts) > 1:
@@ -774,11 +969,9 @@ class AutoMounter(QThread):
         return False
 
     def try_gio_mount(self, device):
-        """Mount using gio (GNOME)"""
         try:
             print(f"🔧 Method 2: Trying gio mount for {device}")
             
-            # First get the device file URI
             device_uri = f"file://{device}"
             
             result = subprocess.run(
@@ -790,7 +983,6 @@ class AutoMounter(QThread):
             print(f"📥 gio stderr: {result.stderr}")
             
             if result.returncode == 0:
-                # gio doesn't return the mount point directly, so we need to find it
                 mount_point = self.find_gio_mount_point(device)
                 if mount_point:
                     print(f"✅ Gio mounted {device} at {mount_point}")
@@ -809,9 +1001,7 @@ class AutoMounter(QThread):
         return False
 
     def find_gio_mount_point(self, device):
-        """Find where gio mounted the device"""
         try:
-            # Check common gio mount locations
             result = subprocess.run(
                 ['gio', 'mount', '-l'],
                 capture_output=True, text=True, timeout=10
@@ -821,7 +1011,6 @@ class AutoMounter(QThread):
                 for line in result.stdout.split('\n'):
                     if device in line:
                         print(f"🔍 Found in gio mount -l: {line}")
-                        # Parse the mount point from gio output
                         if '->' in line:
                             parts = line.split('->')
                             if len(parts) > 1:
@@ -830,7 +1019,6 @@ class AutoMounter(QThread):
                                     mount_point = mount_point[7:]
                                 return mount_point
                                 
-            # Fallback: check standard locations
             standard_locations = [
                 f"/run/media/{self.username}",
                 f"/media/{self.username}",
@@ -844,7 +1032,6 @@ class AutoMounter(QThread):
                     for item in os.listdir(location):
                         full_path = os.path.join(location, item)
                         if os.path.ismount(full_path):
-                            # Check if this mount point corresponds to our device
                             try:
                                 result = subprocess.run(
                                     ['findmnt', '-n', '-o', 'SOURCE', full_path],
@@ -862,23 +1049,19 @@ class AutoMounter(QThread):
         return None
 
     def try_dbus_mount(self, device):
-        """Mount using DBus directly"""
         try:
             print(f"🔧 Method 3: Trying DBus mount for {device}")
             
-            # This requires python-dbus, try to import
             try:
                 import dbus
                 print("✅ dbus module available")
                 
-                # Get the UDisks2 object manager
                 bus = dbus.SystemBus()
                 udisks = dbus.Interface(
                     bus.get_object('org.freedesktop.UDisks2', '/org/freedesktop/UDisks2'),
                     'org.freedesktop.DBus.ObjectManager'
                 )
                 
-                # Find the block device
                 objects = udisks.GetManagedObjects()
                 for obj_path, interfaces in objects.items():
                     if 'org.freedesktop.UDisks2.Block' in interfaces:
@@ -886,11 +1069,9 @@ class AutoMounter(QThread):
                         device_prop = block.get('Device', '')
                         if str(device_prop) == device:
                             print(f"✅ Found device in DBus: {obj_path}")
-                            # Found the device, try to mount it
                             block_obj = bus.get_object('org.freedesktop.UDisks2', obj_path)
                             filesystem = dbus.Interface(block_obj, 'org.freedesktop.UDisks2.Filesystem')
                             
-                            # Mount options
                             options = dbus.Dictionary({
                                 'auth.no_user_interaction': True
                             }, signature='sv')
@@ -911,7 +1092,6 @@ class AutoMounter(QThread):
         return False
 
     def try_pmount(self, device):
-        """Try using pmount (allows users to mount without sudo)"""
         try:
             print(f"🔧 Method 4: Trying pmount for {device}")
             
@@ -924,7 +1104,6 @@ class AutoMounter(QThread):
             print(f"📥 pmount stderr: {result.stderr}")
             
             if result.returncode == 0:
-                # pmount mounts to /media/device_name
                 mount_point = f"/media/{os.path.basename(device)}"
                 if os.path.ismount(mount_point):
                     print(f"✅ pmount successful at {mount_point}")
@@ -941,15 +1120,12 @@ class AutoMounter(QThread):
         return False
 
     def try_direct_mount(self, device):
-        """Try direct mount command as fallback"""
         try:
             print(f"🔧 Method 5: Trying direct mount for {device}")
             
-            # Create a mount point in /media
             mount_point = f"/media/{os.path.basename(device)}"
             os.makedirs(mount_point, exist_ok=True)
             
-            # Try to mount directly
             result = subprocess.run(
                 ['mount', device, mount_point],
                 capture_output=True, text=True
@@ -967,7 +1143,6 @@ class AutoMounter(QThread):
                     print(f"❌ mount succeeded but {mount_point} is not a mount point")
             else:
                 print(f"❌ Direct mount failed with return code {result.returncode}")
-                # Clean up empty directory
                 try:
                     if not os.path.ismount(mount_point):
                         os.rmdir(mount_point)
@@ -980,11 +1155,9 @@ class AutoMounter(QThread):
         return False
 
     def try_mount_with_fstype(self, device):
-        """Try mounting with explicit filesystem type"""
         try:
             print(f"🔧 Method 6: Trying mount with explicit filesystem type for {device}")
             
-            # First detect filesystem type
             result = subprocess.run(['blkid', '-s', 'TYPE', '-o', 'value', device], 
                                   capture_output=True, text=True)
             if result.returncode == 0:
@@ -992,11 +1165,9 @@ class AutoMounter(QThread):
                 print(f"📋 Detected filesystem type: {fstype}")
                 
                 if fstype:
-                    # Create mount point
                     mount_point = f"/media/{os.path.basename(device)}"
                     os.makedirs(mount_point, exist_ok=True)
                     
-                    # Mount with explicit filesystem type
                     cmd = ['mount', '-t', fstype, device, mount_point]
                     result = subprocess.run(cmd, capture_output=True, text=True)
                     
@@ -1008,7 +1179,6 @@ class AutoMounter(QThread):
                         self.mount_success.emit(device, mount_point)
                         return True
                     else:
-                        # Clean up
                         try:
                             if not os.path.ismount(mount_point):
                                 os.rmdir(mount_point)
@@ -1023,11 +1193,9 @@ class AutoMounter(QThread):
         return False
 
     def try_unmount_device(self, mount_point):
-        """Unmount device using multiple methods"""
         try:
             print(f"🔧 Trying to unmount {mount_point}")
             
-            # Method 1: udisks2
             result = subprocess.run(
                 ['udisksctl', 'unmount', '-m', mount_point],
                 capture_output=True, text=True, timeout=10
@@ -1037,7 +1205,6 @@ class AutoMounter(QThread):
                 self.unmount_success.emit(mount_point)
                 return
                 
-            # Method 2: gio unmount
             result = subprocess.run(
                 ['gio', 'mount', '-u', f"file://{mount_point}"],
                 capture_output=True, text=True, timeout=10
@@ -1047,7 +1214,6 @@ class AutoMounter(QThread):
                 self.unmount_success.emit(mount_point)
                 return
                 
-            # Method 3: direct unmount
             result = subprocess.run(
                 ['umount', mount_point],
                 capture_output=True, text=True, timeout=10
@@ -1077,9 +1243,9 @@ class AutoMounter(QThread):
 class USBMonitor(QThread):
     """Improved USB monitoring with reliable device detection"""
     usb_detected = pyqtSignal(list)
-    device_removed = pyqtSignal(str)  # Add this signal for device removal
+    device_removed = pyqtSignal(str)
     status_message = pyqtSignal(str)
-    mount_success = pyqtSignal(str, str)  # Add mount success signal
+    mount_success = pyqtSignal(str, str)
     
     def __init__(self):
         super().__init__()
@@ -1093,47 +1259,39 @@ class USBMonitor(QThread):
     def run(self):
         print("USBMonitor: Starting USB monitoring...")
         
-        # Initial scan
         self.scan_devices()
         
         while self.running:
             try:
                 self.scan_devices()
-                time.sleep(2)  # Scan every 2 seconds
+                time.sleep(2)
             except Exception as e:
                 print(f"USBMonitor error: {e}")
                 time.sleep(5)
 
     def scan_devices(self):
-        """Scan for USB devices and mounted filesystems"""
         try:
-            # Get both USB devices and mounted filesystems
             current_devices = self.get_usb_devices()
             mounted_devices = self.get_mounted_filesystems()
             
-            # Combine both lists
             all_devices = current_devices.union(mounted_devices)
             
             new_devices = all_devices - self.last_devices
             removed_devices = self.last_devices - all_devices
             
-            # Mount new USB devices
             for device in new_devices:
                 if device.startswith('/dev/') and self.is_actual_usb_device(device):
                     print(f"USBMonitor: New USB device detected: {device}")
                     self.status_message.emit(f"Detected USB device: {os.path.basename(device)}")
-                    # Auto-mount the device
                     self.auto_mounter.add_device(device)
                 elif not device.startswith('/dev/'):
                     print(f"USBMonitor: New mount point detected: {device}")
                     
-            # Handle removed devices - emit signal for each removed device
             for device in removed_devices:
                 print(f"USBMonitor: Device removed: {device}")
                 self.status_message.emit(f"Device removed: {os.path.basename(device)}")
-                self.device_removed.emit(device)  # Emit the new signal
+                self.device_removed.emit(device)
             
-            # Emit current state if there are changes
             if new_devices or removed_devices:
                 print(f"USBMonitor: Emitting {len(all_devices)} devices")
                 self.usb_detected.emit(list(all_devices))
@@ -1144,12 +1302,10 @@ class USBMonitor(QThread):
             print(f"USBMonitor: Scan error: {e}")
 
     def get_usb_devices(self):
-        """Get all USB block devices using multiple reliable methods"""
         devices = set()
         
         print("USBMonitor: Scanning for USB devices...")
         
-        # Method 1: Use lsblk to find all removable devices
         try:
             result = subprocess.run(
                 ['lsblk', '-J', '-o', 'NAME,TYPE,MOUNTPOINT,RM,SIZE,MODEL,VENDOR'],
@@ -1163,7 +1319,6 @@ class USBMonitor(QThread):
                     is_removable = device.get('rm') == '1'
                     device_type = device.get('type', '')
                     
-                    # Include if it's removable or looks like USB storage
                     if (is_removable or 
                         self.looks_like_usb_storage(device) or 
                         device_type == 'disk'):
@@ -1172,7 +1327,6 @@ class USBMonitor(QThread):
                         devices.add(dev_path)
                         print(f"USBMonitor: Found device: {dev_path} (removable: {is_removable})")
                         
-                        # Add partitions
                         for child in device.get('children', []):
                             child_name = child.get('name', '')
                             dev_path = f"/dev/{child_name}"
@@ -1182,7 +1336,6 @@ class USBMonitor(QThread):
         except Exception as e:
             print(f"USBMonitor: lsblk method failed: {e}")
 
-        # Method 2: Check /dev/disk/by-path for USB devices
         try:
             by_path = '/dev/disk/by-path'
             if os.path.exists(by_path):
@@ -1196,7 +1349,6 @@ class USBMonitor(QThread):
         except Exception as e:
             print(f"USBMonitor: by-path method failed: {e}")
 
-        # Method 3: Check /dev/disk/by-id for USB devices
         try:
             by_id = '/dev/disk/by-id'
             if os.path.exists(by_id):
@@ -1210,7 +1362,6 @@ class USBMonitor(QThread):
         except Exception as e:
             print(f"USBMonitor: by-id method failed: {e}")
 
-        # Method 4: Check udev for USB devices
         try:
             result = subprocess.run(
                 ['udevadm', 'info', '--export-db'],
@@ -1219,7 +1370,6 @@ class USBMonitor(QThread):
             if result.returncode == 0:
                 for line in result.stdout.split('\n'):
                     if 'ID_BUS=usb' in line and 'DEVPATH=' in line:
-                        # Extract device path
                         for dev_line in result.stdout.split('\n'):
                             if 'DEVNAME=' in dev_line and '/dev/sd' in dev_line:
                                 dev_path = dev_line.split('=')[1].strip()
@@ -1233,11 +1383,9 @@ class USBMonitor(QThread):
         return devices
 
     def get_mounted_filesystems(self):
-        """Get all mounted filesystems that might be USB devices"""
         mounts = set()
         
         try:
-            # Read /proc/mounts
             with open('/proc/mounts', 'r') as f:
                 for line in f:
                     parts = line.split()
@@ -1245,12 +1393,10 @@ class USBMonitor(QThread):
                         device = parts[0]
                         mount_point = parts[1]
                         
-                        # Only include actual mount points (not virtual filesystems)
                         if (mount_point.startswith('/') and 
                             not mount_point.startswith(('/sys', '/proc', '/dev', '/run')) and
                             not any(virtual in device for virtual in ['sysfs', 'proc', 'devpts', 'tmpfs', 'cgroup'])):
                             
-                            # Add both the device and mount point
                             if device.startswith('/dev/'):
                                 mounts.add(device)
                             mounts.add(mount_point)
@@ -1258,7 +1404,6 @@ class USBMonitor(QThread):
         except Exception as e:
             print(f"USBMonitor: Error reading mounts: {e}")
             
-        # Also check standard mount directories
         mount_dirs = ['/media', '/run/media', '/mnt']
         for mount_dir in mount_dirs:
             if os.path.exists(mount_dir):
@@ -1273,22 +1418,18 @@ class USBMonitor(QThread):
         return mounts
 
     def looks_like_usb_storage(self, device_info):
-        """Check if device looks like USB storage based on various heuristics"""
         name = device_info.get('name', '')
         model = device_info.get('model', '')
         vendor = device_info.get('vendor', '')
         
-        # Skip system devices
         if name.startswith(('sda', 'nvme', 'mmcblk', 'loop', 'ram', 'sr')):
             return False
             
-        # Check if it's a USB model
         usb_indicators = ['flash', 'drive', 'usb', 'pen', 'stick', 'sd', 'cf', 'ms']
         model_lower = model.lower()
         if any(indicator in model_lower for indicator in usb_indicators):
             return True
             
-        # Check vendor
         usb_vendors = ['sandisk', 'kingston', 'samsung', 'transcend', 'pny', 'lexar']
         vendor_lower = vendor.lower()
         if any(usb_vendor in vendor_lower for usb_vendor in usb_vendors):
@@ -1297,21 +1438,14 @@ class USBMonitor(QThread):
         return False
 
     def is_actual_usb_device(self, device_path):
-        """Check if device is actually a USB device"""
         if not device_path.startswith('/dev/'):
             return False
             
         device_name = os.path.basename(device_path)
         
-        # Skip system drives - but be less restrictive
         if device_name.startswith(('nvme', 'mmcblk', 'loop', 'ram', 'sr')):
             return False
-            
-        # Don't skip all sda devices as some might be USB
-        # if device_name.startswith('sda'):
-        #     return False
         
-        # Check if it's removable via sysfs
         try:
             base_device = device_name.rstrip('0123456789')
             removable_path = f"/sys/block/{base_device}/removable"
@@ -1322,7 +1456,6 @@ class USBMonitor(QThread):
         except:
             pass
             
-        # Check by-path for USB
         try:
             if os.path.exists('/dev/disk/by-path'):
                 for link in os.listdir('/dev/disk/by-path'):
@@ -1337,8 +1470,7 @@ class USBMonitor(QThread):
         message = f"Mounted {os.path.basename(device)} at {mount_point}"
         print(f"USBMonitor: {message}")
         self.status_message.emit(message)
-        self.mount_success.emit(device, mount_point)  # Forward the signal
-        # Refresh devices list after mount
+        self.mount_success.emit(device, mount_point)
         QTimer.singleShot(1000, self.scan_devices)
 
     def on_mount_failed(self, device, error):
@@ -1358,11 +1490,11 @@ class USBMonitor(QThread):
 
 class DevicesPane(QWidget):
     device_clicked = pyqtSignal(str)
-    device_context_menu = pyqtSignal(str, QPoint)  # mount_point, global_pos
+    device_context_menu = pyqtSignal(str, QPoint)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.main_window = parent  # Store reference to main window
+        self.main_window = parent
         self.init_ui()
         self.usb_monitor = USBMonitor()
         self.usb_monitor.usb_detected.connect(self.refresh_devices)
@@ -1375,7 +1507,6 @@ class DevicesPane(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
 
-        # Header
         header_layout = QHBoxLayout()
         devices_label = QLabel("Devices and Drives")
         devices_label.setStyleSheet("font-weight: bold; color: #00ff9f;")
@@ -1383,23 +1514,22 @@ class DevicesPane(QWidget):
         refresh_btn.setIcon(QIcon.fromTheme('view-refresh'))
         refresh_btn.setToolTip("Refresh devices")
         refresh_btn.clicked.connect(self.refresh_devices)
-        # Add a manual mount button
+        
         mount_btn = QToolButton()
         mount_btn.setIcon(QIcon.fromTheme('media-mount'))
         mount_btn.setToolTip("Scan and mount USB devices")
         mount_btn.clicked.connect(self.scan_and_mount_usb)
+        
         header_layout.addWidget(devices_label)
         header_layout.addStretch()
         header_layout.addWidget(mount_btn)
         header_layout.addWidget(refresh_btn)
         layout.addLayout(header_layout)
 
-        # Status message
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("color: #0080ff; font-style: italic;")
         layout.addWidget(self.status_label)
 
-        # Devices list
         self.devices_list = QListWidget()
         self.devices_list.setIconSize(QSize(24, 24))
         self.devices_list.itemDoubleClicked.connect(self.on_device_double_clicked)
@@ -1407,18 +1537,14 @@ class DevicesPane(QWidget):
         self.devices_list.customContextMenuRequested.connect(self.show_device_context_menu)
         layout.addWidget(self.devices_list)
 
-        # Initial refresh
         self.refresh_devices()
 
     def on_device_removed(self, device):
-        """Handle device removal - close any tabs viewing this device"""
-        # Get the mount point for this device if it's a device path
         if device.startswith('/dev/'):
             mount_point = self.get_mount_point_for_device(device)
             if mount_point:
                 device = mount_point
         
-        # Close any tabs that are viewing this mount point
         if self.main_window:
             for i in range(self.main_window.tab_widget.count()):
                 tab = self.main_window.tab_widget.widget(i)
@@ -1426,11 +1552,9 @@ class DevicesPane(QWidget):
                     self.main_window.tab_widget.removeTab(i)
                     break
         
-        # Refresh the devices list
         self.refresh_devices()
         
     def get_mount_point_for_device(self, device):
-        """Get the mount point for a device"""
         try:
             result = subprocess.run(['findmnt', '-n', '-o', 'TARGET', '-S', device], 
                                   capture_output=True, text=True)
@@ -1441,12 +1565,10 @@ class DevicesPane(QWidget):
         return None
 
     def on_device_mounted(self, device, mount_point):
-        """Refresh devices list when a device is mounted"""
         print(f"Device mounted: {device} at {mount_point}")
-        QTimer.singleShot(1000, self.refresh_devices)  # Refresh after a short delay
+        QTimer.singleShot(1000, self.refresh_devices)
 
     def scan_and_mount_usb(self):
-        """Manually scan for and mount USB devices"""
         self.status_label.setText("Scanning for USB devices...")
         devices = self.usb_monitor.get_usb_devices()
         for device in devices:
@@ -1454,20 +1576,16 @@ class DevicesPane(QWidget):
                 self.status_label.setText(f"Found USB device: {device}")
                 self.usb_monitor.auto_mounter.add_device(device)
         self.status_label.setText("USB scan complete")
-        # Clear the message after 3 seconds
         QTimer.singleShot(3000, lambda: self.status_label.setText(""))
 
     def show_status_message(self, message):
         self.status_label.setText(message)
-        # Clear the message after 5 seconds
         QTimer.singleShot(5000, lambda: self.status_label.setText(""))
 
     def refresh_devices(self, devices_list=None):
         self.devices_list.clear()
         
-        # Get mounted filesystems
         try:
-            # Read /proc/mounts
             mounts_file = '/proc/mounts'
             if os.path.exists(mounts_file):
                 with open(mounts_file, 'r') as f:
@@ -1476,61 +1594,48 @@ class DevicesPane(QWidget):
                         if len(parts) >= 2:
                             device = parts[0]
                             mount_point = parts[1]
-                            # Filter out system mounts and only show actual directories
                             if (mount_point.startswith('/') and 
                                 os.path.isdir(mount_point) and
                                 not mount_point.startswith(('/sys', '/proc', '/dev', '/run')) and
                                 not any(x in device for x in ('sysfs', 'proc', 'devpts', 'tmpfs', 'cgroup'))):
-                                # Add all mount points, not just filtering out sda
                                 self.add_device(device, mount_point, is_mounted=True)
         
-            # Add removable media from /media and /run/media
             self.add_removable_media()
             
-            # Add USB devices from monitor if provided
             if devices_list:
                 for device in devices_list:
-                    # Only add if it's a valid directory path (already mounted)
                     if isinstance(device, str) and os.path.isdir(device):
                         self.add_device(device, device, is_mounted=True)
                     elif isinstance(device, str) and device.startswith('/dev/'):
-                        # This is a device, not a mount point - check if it's mounted
                         try:
                             result = subprocess.run(['findmnt', '-n', '-o', 'TARGET', '-S', device], 
                                                   capture_output=True, text=True)
                             if result.returncode == 0 and result.stdout.strip():
                                 mount_point = result.stdout.strip()
-                                # Don't show system drives
                                 device_name = os.path.basename(device)
                                 if not device_name.startswith('sda'):
                                     self.add_device(device, mount_point, is_mounted=True)
                             else:
-                                # Device is NOT mounted - add it as an unmounted device
                                 if self.is_usb_device(device):
                                     self.add_unmounted_device(device)
                         except:
-                            # If check failed, assume it's unmounted and add if USB
                             if self.is_usb_device(device):
                                 self.add_unmounted_device(device)
             
-            # Also scan for any unmounted USB devices that might have been missed
             self.add_unmounted_usb_devices()
             
         except Exception as e:
             print(f"Error reading devices: {e}")
 
     def is_usb_device(self, device_path):
-        """Check if device is a USB device"""
         if not device_path.startswith('/dev/'):
             return False
             
         device_name = os.path.basename(device_path)
         
-        # Skip system drives and partitions
         if device_name.startswith(('sda', 'nvme', 'mmcblk', 'loop', 'ram', 'sr')):
             return False
             
-        # Check if it's removable via sysfs
         try:
             base_device = device_name.rstrip('0123456789')
             removable_path = f"/sys/block/{base_device}/removable"
@@ -1541,7 +1646,6 @@ class DevicesPane(QWidget):
         except:
             pass
             
-        # Check by-path for USB
         try:
             if os.path.exists('/dev/disk/by-path'):
                 for link in os.listdir('/dev/disk/by-path'):
@@ -1550,7 +1654,6 @@ class DevicesPane(QWidget):
         except:
             pass
             
-        # Check by-id for USB
         try:
             if os.path.exists('/dev/disk/by-id'):
                 for link in os.listdir('/dev/disk/by-id'):
@@ -1562,14 +1665,12 @@ class DevicesPane(QWidget):
         return False
 
     def add_device(self, device, mount_point, is_mounted=True):
-        # Only add if mount_point is a valid directory for mounted devices
         if is_mounted and not os.path.isdir(mount_point):
             return
             
         item = QListWidgetItem()
         
         if is_mounted:
-            # Get device name for mounted devices
             device_name = os.path.basename(mount_point)
             if device_name == '':
                 device_name = "Root Filesystem"
@@ -1579,7 +1680,6 @@ class DevicesPane(QWidget):
             item.setText(f"{device_name}\n{mount_point}")
             item.setData(Qt.UserRole, mount_point)
             
-            # Set icon based on device type
             if 'cdrom' in device or 'dvd' in device:
                 icon = QIcon.fromTheme('drive-optical')
             elif 'usb' in device or 'sd' in device:
@@ -1587,40 +1687,33 @@ class DevicesPane(QWidget):
             else:
                 icon = QIcon.fromTheme('drive-harddisk')
         else:
-            # For unmounted devices
             device_name = os.path.basename(device)
             size_info = self.get_device_size(device)
             item.setText(f"{device_name} (Not Mounted)\n{device} {size_info}")
-            item.setData(Qt.UserRole, device)  # Store device path instead of mount point
+            item.setData(Qt.UserRole, device)
             icon = QIcon.fromTheme('drive-removable-media')
-            # Make it look different - maybe grayed out
-            item.setForeground(QColor(128, 128, 128))  # Gray color for unmounted
+            item.setForeground(QColor(128, 128, 128))
         
         if icon.isNull():
             icon = self.style().standardIcon(self.style().SP_DriveHDIcon)
         item.setIcon(icon)
         
-        # Store additional data to distinguish mounted vs unmounted
-        item.setData(Qt.UserRole + 1, is_mounted)  # True for mounted, False for unmounted
-        item.setData(Qt.UserRole + 2, device)  # Store the device path
+        item.setData(Qt.UserRole + 1, is_mounted)
+        item.setData(Qt.UserRole + 2, device)
         
         self.devices_list.addItem(item)
 
     def add_unmounted_device(self, device):
-        """Add an unmounted USB device to the list"""
-        # Check if this device is already in the list as mounted
         for i in range(self.devices_list.count()):
             item = self.devices_list.item(i)
             item_device = item.data(Qt.UserRole + 2)
             if item_device == device:
-                return  # Already in list
+                return
         
         self.add_device(device, device, is_mounted=False)
 
     def add_unmounted_usb_devices(self):
-        """Scan for and add unmounted USB devices"""
         try:
-            # Use lsblk to find USB devices
             result = subprocess.run(['lsblk', '-J', '-o', 'NAME,TYPE,MOUNTPOINT,RM'], 
                                   capture_output=True, text=True)
             if result.returncode == 0:
@@ -1632,12 +1725,10 @@ class DevicesPane(QWidget):
                     mountpoint = device.get('mountpoint')
                     
                     if is_removable and not mountpoint:
-                        # This is an unmounted removable device
                         dev_path = f"/dev/{device_name}"
                         if self.is_usb_device(dev_path):
                             self.add_unmounted_device(dev_path)
                             
-                    # Check partitions too
                     for child in device.get('children', []):
                         child_name = child.get('name', '')
                         child_mountpoint = child.get('mountpoint')
@@ -1650,7 +1741,6 @@ class DevicesPane(QWidget):
             print(f"Error scanning for unmounted USB devices: {e}")
 
     def get_device_size(self, device):
-        """Get device size information"""
         try:
             result = subprocess.run(['lsblk', '-n', '-o', 'SIZE', device], 
                                   capture_output=True, text=True)
@@ -1676,7 +1766,6 @@ class DevicesPane(QWidget):
                                     item.setText(f"{device_dir}\n{device_path}")
                                     item.setData(Qt.UserRole, device_path)
                                     item.setIcon(QIcon.fromTheme('drive-removable-media'))
-                                    # Mark as mounted
                                     item.setData(Qt.UserRole + 1, True)
                                     item.setData(Qt.UserRole + 2, device_path)
                                     self.devices_list.addItem(item)
@@ -1688,32 +1777,25 @@ class DevicesPane(QWidget):
         device_path = item.data(Qt.UserRole + 2)
         
         if is_mounted:
-            # For mounted devices, open the mount point
             mount_point = item.data(Qt.UserRole)
             if os.path.exists(mount_point) and os.path.isdir(mount_point):
                 self.device_clicked.emit(mount_point)
         else:
-            # For unmounted devices, try to mount it
             self.mount_device(device_path)
 
     def mount_device(self, device):
-        """Mount an unmounted device"""
         print(f"Attempting to mount {device}")
         self.status_label.setText(f"Mounting {os.path.basename(device)}...")
         
-        # Use the USB monitor's auto mounter to mount the device
         self.usb_monitor.auto_mounter.add_device(device)
         
-        # Set up a timer to refresh the devices list after a short delay
         QTimer.singleShot(2000, self.refresh_devices)
 
     def create_action(self, text, icon_name, shortcut, slot):
-        """Helper to create menu actions"""
         action = QAction(text, self)
         if icon_name:
             icon = QIcon.fromTheme(icon_name)
             if icon.isNull():
-                # Fallback to standard icons
                 if icon_name == 'document-open':
                     icon = self.style().standardIcon(self.style().SP_DialogOpenButton)
                 elif icon_name == 'tab-new':
@@ -1730,7 +1812,6 @@ class DevicesPane(QWidget):
         return action
 
     def show_device_context_menu(self, position):
-        """Show context menu for devices with appropriate options"""
         item = self.devices_list.itemAt(position)
         if not item:
             return
@@ -1742,21 +1823,18 @@ class DevicesPane(QWidget):
         menu = QMenu(self)
         
         if is_mounted:
-            # For mounted devices
             menu.addAction(self.create_action('Open', 'document-open', None, 
                              lambda: self.device_clicked.emit(mount_point)))
             menu.addAction(self.create_action('Open in New Tab', 'tab-new', None,
                              lambda: self.open_in_new_tab(mount_point)))
             menu.addSeparator()
             
-            # Check if it's a removable device
             if self.is_removable_device(mount_point):
                 menu.addAction(self.create_action('Safely Remove', 'media-eject', None,
                                  lambda: self.unmount_device(mount_point)))
                 menu.addAction(self.create_action('Eject', 'media-eject', None,
                                  lambda: self.eject_device(mount_point)))
         else:
-            # For unmounted devices
             menu.addAction(self.create_action('Mount', 'media-mount', None,
                              lambda: self.mount_device(device_path)))
             menu.addAction(self.create_action('Mount and Open', 'document-open', None,
@@ -1765,26 +1843,18 @@ class DevicesPane(QWidget):
         menu.exec_(self.devices_list.mapToGlobal(position))
 
     def mount_and_open(self, device):
-        """Mount a device and open it when mounted"""
         def open_after_mount(dev, mount_point):
             if dev == device:
-                # Device was mounted, now open it
                 QTimer.singleShot(500, lambda: self.device_clicked.emit(mount_point))
                 self.usb_monitor.mount_success.disconnect(open_after_mount)
         
-        # Connect to the mount success signal
         self.usb_monitor.mount_success.connect(open_after_mount)
-        
-        # Start mounting
         self.mount_device(device)
 
     def is_removable_device(self, mount_point):
-        """Check if device is removable (USB, CD, etc.)"""
         try:
-            # Check if it's in typical removable media locations
             if any(path in mount_point for path in ['/media/', '/run/media/', '/mnt/']):
                 return True
-            # Check filesystem type
             result = subprocess.run(['findmnt', '-n', '-o', 'FSTYPE', mount_point], 
                                   capture_output=True, text=True)
             if result.returncode == 0:
@@ -1796,21 +1866,17 @@ class DevicesPane(QWidget):
         return False
 
     def unmount_device(self, mount_point):
-        """Unmount a device"""
         try:
             self.usb_monitor.auto_mounter.try_unmount_device(mount_point)
         except Exception as e:
             QMessageBox.warning(self, "Unmount Error", f"Failed to unmount device: {str(e)}")
 
     def eject_device(self, mount_point):
-        """Eject a device"""
         try:
-            # First find the device for this mount point
             result = subprocess.run(['findmnt', '-n', '-o', 'SOURCE', mount_point], 
                                   capture_output=True, text=True)
             if result.returncode == 0:
                 device = result.stdout.strip()
-                # Use udisksctl to power-off the device
                 result = subprocess.run(['udisksctl', 'power-off', '-b', device], 
                                       capture_output=True, text=True)
                 if result.returncode == 0:
@@ -1823,109 +1889,14 @@ class DevicesPane(QWidget):
             QMessageBox.warning(self, "Eject Error", f"Failed to eject device: {str(e)}")
 
     def open_in_new_tab(self, mount_point):
-        """Open device in new tab"""
         self.device_context_menu.emit(mount_point, self.mapToGlobal(QPoint(0, 0)))
 
     def closeEvent(self, event):
-        # Clean up threads when closing
         if hasattr(self, 'usb_monitor'):
             self.usb_monitor.stop()
             self.usb_monitor.wait(3000)
         super().closeEvent(event)
 
-# =============================================================================
-# DRAG DROP TREE VIEW
-# =============================================================================
-
-class DragDropTreeView(QTreeView):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAcceptDrops(True)
-        self.setDragEnabled(True)
-        self.setDropIndicatorShown(True)
-        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.setDragDropMode(QAbstractItemView.DragDrop)
-
-    def startDrag(self, supportedActions):
-        indexes = self.selectedIndexes()
-        if not indexes:
-            return
-        
-        # Get the main window and ensure it stays visible
-        main_window = self.window()
-        if main_window:
-            main_window.raise_()
-        
-        drag = QDrag(self)
-        mime_data = QMimeData()
-        
-        # Get file paths
-        file_paths = []
-        model = self.model()
-        for index in indexes:
-            if index.column() == 0:  # Only process first column
-                file_path = model.filePath(index)
-                file_paths.append(file_path)
-        
-        # Set MIME data
-        mime_data.setUrls([QUrl.fromLocalFile(path) for path in file_paths])
-        drag.setMimeData(mime_data)
-        
-        # Set drag pixmap
-        if len(file_paths) == 1:
-            icon = model.data(indexes[0], Qt.DecorationRole)
-            if icon:
-                pixmap = icon.pixmap(32, 32)
-                drag.setPixmap(pixmap)
-        
-        # Start drag - don't affect window focus
-        drag.exec_(Qt.CopyAction | Qt.MoveAction, Qt.CopyAction)
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-            # Keep window visible but don't steal focus aggressively
-            self.window().raise_()
-        else:
-            event.ignore()
-
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-            # Show drop indicator without changing window focus
-            self.window().raise_()
-        else:
-            event.ignore()
-
-    def dropEvent(self, event):
-        if event.mimeData().hasUrls():
-            urls = event.mimeData().urls()
-            file_paths = [url.toLocalFile() for url in urls]
-            
-            # Get drop position
-            index = self.indexAt(event.pos())
-            if index.isValid():
-                target_path = self.model().filePath(index)
-                if os.path.isdir(target_path):
-                    destination_dir = target_path
-                else:
-                    destination_dir = os.path.dirname(target_path)
-            else:
-                destination_dir = self.model().rootPath()
-            
-            # Determine operation (copy or move)
-            if event.keyboardModifiers() & Qt.ShiftModifier:
-                operation = 'move'
-            else:
-                operation = 'copy'
-            
-            # Emit signal for main window to handle
-            if hasattr(self.parent(), 'file_dropped'):
-                self.parent().file_dropped.emit(file_paths, destination_dir, operation)
-            
-            event.acceptProposedAction()
-        else:
-            event.ignore()
 
 # =============================================================================
 # ENHANCED PROGRESS DIALOG
@@ -1939,18 +1910,18 @@ class EnhancedProgressDialog(QDialog):
         self.resize(400, 150)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         layout = QVBoxLayout(self)
-        # Operation label
+        
         self.operation_label = QLabel("Preparing operation...")
         layout.addWidget(self.operation_label)
-        # Progress bar
+        
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         layout.addWidget(self.progress_bar)
-        # Details label
+        
         self.details_label = QLabel("")
         self.details_label.setWordWrap(True)
         layout.addWidget(self.details_label)
-        # Button layout
+        
         button_layout = QHBoxLayout()
         self.pause_button = QToolButton()
         self.pause_button.setText("Pause")
@@ -1978,6 +1949,7 @@ class EnhancedProgressDialog(QDialog):
         if details:
             self.details_label.setText(details)
 
+
 # =============================================================================
 # FILE CONFLICT RESOLUTION DIALOG
 # =============================================================================
@@ -1991,11 +1963,9 @@ class FileConflictDialog(QDialog):
         
         layout = QVBoxLayout(self)
         
-        # Conflict message
         message = QLabel(f"A file with the same name already exists in the destination folder.")
         layout.addWidget(message)
         
-        # File info
         info_group = QGroupBox("File Information")
         info_layout = QFormLayout(info_group)
         
@@ -2006,7 +1976,6 @@ class FileConflictDialog(QDialog):
         info_layout.addRow("Destination file:", QLabel(target_info))
         layout.addWidget(info_group)
         
-        # Options
         options_group = QGroupBox("What would you like to do?")
         options_layout = QVBoxLayout(options_group)
         
@@ -2022,7 +1991,6 @@ class FileConflictDialog(QDialog):
         
         layout.addWidget(options_group)
         
-        # Buttons
         button_layout = QHBoxLayout()
         self.ok_btn = QToolButton()
         self.ok_btn.setText("OK")
@@ -2036,7 +2004,6 @@ class FileConflictDialog(QDialog):
         button_layout.addWidget(self.cancel_btn)
         layout.addLayout(button_layout)
         
-        # Set default selection
         self.rename_btn.setChecked(True)
 
     def get_file_size(self, file_path):
@@ -2057,23 +2024,23 @@ class FileConflictDialog(QDialog):
             return "rename"
         elif self.skip_btn.isChecked():
             return "skip"
-        return "rename"  # default
+        return "rename"
 
     def apply_to_all_conflicts(self):
         return self.apply_to_all.isChecked()
+
 
 # =============================================================================
 # FILE BROWSER TAB
 # =============================================================================
 
 class FileBrowserTab(QWidget):
-    """A tab containing a file browser view"""
-    file_dropped = pyqtSignal(list, str, str)  # file_paths, destination, operation
-    status_update = pyqtSignal(str, str)  # status_text, path
+    file_dropped = pyqtSignal(list, str, str)
+    drag_cut_completed = pyqtSignal(list)
+    status_update = pyqtSignal(str, str)
 
     def __init__(self, path, main_window, parent=None):
         super().__init__(parent)
-        # Enhanced path validation with debugging
         print(f"FileBrowserTab initial path: {path}")
         
         if not path or not os.path.exists(path):
@@ -2090,46 +2057,50 @@ class FileBrowserTab(QWidget):
         self.history_index = 0
         self.main_window = main_window
         self.init_ui()
+        
+        self.drag_cut_completed.connect(self.handle_drag_cut_completion)
 
     def init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        # Use custom tree view with drag-drop support for detailed view
-        self.tree_view = DragDropTreeView()
-        # Get filter flags based on main window's show_hidden setting
+        
+        self.tree_view = SortableTreeView()
+        
         filter_flags = QDir.AllEntries | QDir.NoDotAndDotDot | QDir.AllDirs
         if self.main_window.show_hidden:
             filter_flags |= QDir.Hidden
-        self.list_model = ThumbnailFileSystemModel(show_hidden=self.main_window.show_hidden)
+            
+        self.list_model = SortableFileSystemModel(show_hidden=self.main_window.show_hidden)
         self.list_model.setRootPath("")
         self.list_model.setFilter(filter_flags)
         self.tree_view.setModel(self.list_model)
-        # Set column headers
+        
         self.list_model.setHeaderData(0, Qt.Horizontal, "Name")
         self.list_model.setHeaderData(1, Qt.Horizontal, "Size")
         self.list_model.setHeaderData(2, Qt.Horizontal, "Type")
         self.list_model.setHeaderData(3, Qt.Horizontal, "Date Modified")
-        # Set column widths
+        
         self.tree_view.setColumnWidth(0, 300)
         self.tree_view.setColumnWidth(1, 100)
         self.tree_view.setColumnWidth(2, 100)
         self.tree_view.setColumnWidth(3, 150)
-        # Fix: Properly set the root index using the model's index method
+        
         root_index = self.list_model.index(self.current_path)
         if root_index.isValid():
             self.tree_view.setRootIndex(root_index)
         else:
-            # Fallback to home directory if path is invalid
             self.current_path = QDir.homePath()
             root_index = self.list_model.index(self.current_path)
             self.tree_view.setRootIndex(root_index)
+            
         self.tree_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree_view.setContextMenuPolicy(Qt.CustomContextMenu)
         layout.addWidget(self.tree_view)
-        # Connect signals
+        
         self.tree_view.doubleClicked.connect(self.tree_view_double_clicked)
         self.tree_view.customContextMenuRequested.connect(self.show_context_menu)
         self.tree_view.selectionModel().selectionChanged.connect(self.selection_changed)
+        self.tree_view.file_dropped.connect(self.file_dropped.emit)
 
     def tree_view_double_clicked(self, index):
         path = self.list_model.filePath(index)
@@ -2139,9 +2110,7 @@ class FileBrowserTab(QWidget):
             self.open_file(path)
 
     def navigate_to_path(self, path):
-        # Validate and normalize path - ensure it's a directory
         if not path or not os.path.exists(path) or not os.path.isdir(path):
-            # Path doesn't exist anymore, emit a signal to notify parent
             self.status_update.emit("Path no longer exists", path)
             return
             
@@ -2150,10 +2119,10 @@ class FileBrowserTab(QWidget):
         if root_index.isValid():
             self.tree_view.setRootIndex(root_index)
         else:
-            # If still invalid, use home directory
             self.current_path = QDir.homePath()
             root_index = self.list_model.index(self.current_path)
             self.tree_view.setRootIndex(root_index)
+            
         if self.history_index < len(self.history) - 1:
             self.history = self.history[:self.history_index + 1]
         self.history.append(self.current_path)
@@ -2180,19 +2149,17 @@ class FileBrowserTab(QWidget):
         self.navigate_to_path(home_path)
 
     def refresh(self):
-        # Update filter based on main window's show_hidden setting
         filter_flags = QDir.AllEntries | QDir.NoDotAndDotDot | QDir.AllDirs
         if self.main_window.show_hidden:
             filter_flags |= QDir.Hidden
         self.list_model.setFilter(filter_flags)
-        # Force refresh of the file system models
-        self.list_model.setRootPath("")  # Clear the current path
-        self.list_model.setRootPath(self.current_path)  # Reset to current path
-        # Update the root index
+        self.list_model.setRootPath("")
+        self.list_model.setRootPath(self.current_path)
+        
         root_index = self.list_model.index(self.current_path)
         if root_index.isValid():
             self.tree_view.setRootIndex(root_index)
-        # Update status bar
+            
         self.update_status_bar()
 
     def selection_changed(self):
@@ -2204,12 +2171,11 @@ class FileBrowserTab(QWidget):
                 items = os.listdir(self.current_path)
                 file_count = sum(1 for item in items if os.path.isfile(os.path.join(self.current_path, item)))
                 folder_count = sum(1 for item in items if os.path.isdir(os.path.join(self.current_path, item)))
-                selected_count = len(self.tree_view.selectedIndexes()) // 4  # Divide by number of columns
+                selected_count = len(self.tree_view.selectedIndexes()) // 4
                 if selected_count > 0:
                     status_text = f"{selected_count} selected - {file_count} files, {folder_count} folders"
                 else:
                     status_text = f"{file_count} files, {folder_count} folders"
-                # Emit signal to update status bar in main window
                 self.status_update.emit(status_text, self.current_path)
             else:
                 self.status_update.emit("Invalid directory", self.current_path)
@@ -2224,30 +2190,32 @@ class FileBrowserTab(QWidget):
         menu = QMenu(self)
         index = self.tree_view.indexAt(position)
         if index.isValid():
-            selected_count = len(self.tree_view.selectedIndexes()) // 4  # Divide by number of columns
+            selected_count = len(self.tree_view.selectedIndexes()) // 4
             path = self.list_model.filePath(index)
             if os.path.isdir(path):
-                # Folder context menu
                 menu.addAction(self.main_window.create_action('Open', 'document-open', 'Return', self.open_selected))
                 menu.addAction(self.main_window.create_action('Open in New Tab', 'tab-new', 'Ctrl+Return', lambda: self.main_window.open_in_new_tab(path)))
                 menu.addAction(self.main_window.create_action('Open in New Window', 'window-new', None, lambda: self.main_window.open_in_new_window(path)))
                 
-                # ADD THESE NEW OPTIONS FOR FOLDERS
                 menu.addSeparator()
                 menu.addAction(self.main_window.create_action('Open in Terminal', 'utilities-terminal', 'F4', lambda: self.main_window.open_folder_in_terminal(path)))
                 menu.addAction(self.main_window.create_action('Open as Root', 'system-software-install', None, lambda: self.main_window.open_folder_as_root(path)))
                 
             else:
-                # File context menu
                 menu.addAction(self.main_window.create_action('Open', 'document-open', 'Return', self.open_selected))
                 menu.addAction(self.main_window.create_action('Open With...', 'system-run', None, self.open_with))
-                # Add executable toggle option for files
                 if self.main_window.is_file_executable(path):
                     menu.addAction(self.main_window.create_action('Remove Executable Permission', 'application-x-executable', None, self.main_window.toggle_executable))
                 else:
                     menu.addAction(self.main_window.create_action('Make Executable', 'application-x-executable', None, self.main_window.toggle_executable))
             
             menu.addSeparator()
+            
+            hint_action = QAction("💡 Drag with Alt key to cut, drag normally to copy", self)
+            hint_action.setEnabled(False)
+            menu.addAction(hint_action)
+            menu.addSeparator()
+            
             menu.addAction(self.main_window.create_action('Cut', 'edit-cut', 'Ctrl+X', self.main_window.cut_selected))
             menu.addAction(self.main_window.create_action('Copy', 'edit-copy', 'Ctrl+C', self.main_window.copy_selected))
             if self.main_window.clipboard_paths:
@@ -2260,7 +2228,6 @@ class FileBrowserTab(QWidget):
             menu.addSeparator()
             menu.addAction(self.main_window.create_action('Properties', 'document-properties', 'Alt+Return', self.main_window.show_properties))
         else:
-            # Empty space context menu
             if self.main_window.clipboard_paths:
                 menu.addAction(self.main_window.create_action('Paste', 'edit-paste', 'Ctrl+V', self.main_window.paste_files))
                 menu.addSeparator()
@@ -2268,7 +2235,6 @@ class FileBrowserTab(QWidget):
             menu.addAction(self.main_window.create_action('Create Document', 'document-new', None, self.main_window.new_file))
             menu.addSeparator()
             
-            # ADD THESE OPTIONS FOR EMPTY SPACE TOO (current directory)
             menu.addAction(self.main_window.create_action('Open in Terminal', 'utilities-terminal', 'F4', self.main_window.open_in_terminal))
             menu.addAction(self.main_window.create_action('Open as Root', 'system-software-install', None, self.main_window.open_as_root))
             
@@ -2287,11 +2253,13 @@ class FileBrowserTab(QWidget):
 
     def open_file(self, path):
         try:
-            if sys.platform.startswith('linux'):
+            if path.lower().endswith('.appimage') and os.access(path, os.X_OK):
+                subprocess.Popen([path])
+            elif sys.platform.startswith('linux'):
                 subprocess.run(['xdg-open', path])
-            elif sys.platform == 'darwin':  # macOS
+            elif sys.platform == 'darwin':
                 subprocess.run(['open', path])
-            elif sys.platform == 'win32':  # Windows
+            elif sys.platform == 'win32':
                 os.startfile(path)
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Could not open file: {str(e)}")
@@ -2301,7 +2269,6 @@ class FileBrowserTab(QWidget):
         if indexes:
             path = self.list_model.filePath(indexes[0])
             if os.path.isfile(path):
-                # Simple dialog to choose application
                 app, ok = QInputDialog.getText(self, "Open With", "Enter application name:")
                 if ok and app:
                     try:
@@ -2309,45 +2276,79 @@ class FileBrowserTab(QWidget):
                     except Exception as e:
                         QMessageBox.warning(self, "Error", f"Could not open file with {app}: {str(e)}")
 
+    def handle_drag_cut_completion(self, file_paths):
+        reply = QMessageBox.question(
+            self,
+            "Cut Operation",
+            f"Cut operation completed. Delete {len(file_paths)} source file(s)?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        
+        if reply == QMessageBox.Yes:
+            failed_deletions = []
+            for path in file_paths:
+                try:
+                    if os.path.isdir(path):
+                        shutil.rmtree(path)
+                    else:
+                        os.remove(path)
+                except Exception as e:
+                    failed_deletions.append(f"{path}: {str(e)}")
+            
+            if failed_deletions:
+                QMessageBox.warning(
+                    self,
+                    "Some Files Could Not Be Deleted",
+                    f"Failed to delete:\n" + "\n".join(failed_deletions[:5]) +
+                    ("\n..." if len(failed_deletions) > 5 else "")
+                )
+            
+            self.refresh()
 
 
+# =============================================================================
+# CLIPBOARD MONITOR
+# =============================================================================
 
+class ClipboardMonitor:
+    def __init__(self, parent):
+        self.parent = parent
+        self.clipboard = QApplication.clipboard()
+        self.clipboard.dataChanged.connect(self.on_clipboard_changed)
+    
+    def on_clipboard_changed(self):
+        mime_data = self.clipboard.mimeData()
+        if mime_data.hasUrls():
+            pass
 
-                        
 
 # =============================================================================
 # MAIN FILE MANAGER WINDOW
 # =============================================================================
 
 class EcoFileManager(QMainWindow):
-    file_dropped = pyqtSignal(list, str, str)  # file_paths, destination, operation
+    file_dropped = pyqtSignal(list, str, str)
 
     def __init__(self, path=None):
         super().__init__()
-        # Set object name for toolbar to fix the QMainWindow::saveState() warning
         self.setObjectName("EcoFileManager")
-        # Initialize thread monitor
         self.thread_monitor = ThreadMonitor()
         self._cancel_size_calc = False
         
-        # Enhanced path validation with better debugging
         print(f"Initial path received: {path}")
         
         if path:
-            # Normalize the path
             path = os.path.abspath(path)
             print(f"Normalized path: {path}")
             
-            # Handle file paths - use parent directory
             if os.path.isfile(path):
                 self.current_path = os.path.dirname(path)
                 print(f"Path is a file, using parent directory: {self.current_path}")
-            # Handle directory paths
             elif os.path.isdir(path):
                 self.current_path = path
                 print(f"Path is a directory: {self.current_path}")
             else:
-                # Path doesn't exist, try to use parent directory
                 parent_dir = os.path.dirname(path)
                 if os.path.exists(parent_dir) and os.path.isdir(parent_dir):
                     self.current_path = parent_dir
@@ -2356,15 +2357,12 @@ class EcoFileManager(QMainWindow):
                     self.current_path = QDir.homePath()
                     print(f"Path invalid, using home: {self.current_path}")
         else:
-            # No path provided, use home directory
             self.current_path = QDir.homePath()
             print(f"No path provided, using home: {self.current_path}")
         
-        # Ensure the path is absolute and normalized (final safety check)
         self.current_path = os.path.abspath(self.current_path)
         print(f"Final current_path: {self.current_path}")
         
-        # Check if running as root (UID 0)
         self.is_root_mode = os.getuid() == 0
         print(f"Root mode: {self.is_root_mode}")
         
@@ -2374,27 +2372,84 @@ class EcoFileManager(QMainWindow):
         self.clipboard_paths = []
         self.file_operation_thread = None
         self.progress_dialog = None
-        self.icon_size = 32  # Default icon size
-        self.show_hidden = False  # Hidden files not shown by default
-        self.current_theme = "Cyberpunk"  # Default theme
+        self.icon_size = 32
+        self.show_hidden = False
+        self.current_theme = "Cyberpunk"
         self.settings_manager = SettingsManager()
-        # Initialize status labels early to prevent AttributeError
         self.status_label_left = None
         self.status_label_right = None
+        
+        self.clipboard_monitor = ClipboardMonitor(self)
+        
         self.init_ui()
         
-        # Apply root indicators if running as root
         if self.is_root_mode:
             self.apply_root_indicators()
         
-        # Load saved settings after UI is created
         self.settings_manager.load_window_state(self)
 
+    def copy_to_system_clipboard(self, paths):
+        clipboard = QApplication.clipboard()
+        mime_data = QMimeData()
+        
+        mime_data.setText('\n'.join(paths))
+        
+        urls = [QUrl.fromLocalFile(path) for path in paths]
+        mime_data.setUrls(urls)
+        
+        gnome_format = "copy\n" + '\n'.join([f"file://{path}" for path in paths])
+        mime_data.setData("x-special/gnome-copied-files", gnome_format.encode('utf-8'))
+        
+        uri_list = '\n'.join([f"file://{path}" for path in paths])
+        mime_data.setData("text/uri-list", uri_list.encode('utf-8'))
+        
+        clipboard.setMimeData(mime_data)
+
+    def cut_to_system_clipboard(self, paths):
+        clipboard = QApplication.clipboard()
+        mime_data = QMimeData()
+        
+        mime_data.setText('\n'.join(paths))
+        
+        urls = [QUrl.fromLocalFile(path) for path in paths]
+        mime_data.setUrls(urls)
+        
+        gnome_format = "cut\n" + '\n'.join([f"file://{path}" for path in paths])
+        mime_data.setData("x-special/gnome-copied-files", gnome_format.encode('utf-8'))
+        
+        uri_list = '\n'.join([f"file://{path}" for path in paths])
+        mime_data.setData("text/uri-list", uri_list.encode('utf-8'))
+        
+        clipboard.setMimeData(mime_data)
+
+    def clear_system_clipboard(self):
+        QApplication.clipboard().clear()
+
+    def paste_from_system_clipboard(self):
+        clipboard = QApplication.clipboard()
+        mime_data = clipboard.mimeData()
+        
+        if mime_data.hasUrls():
+            urls = mime_data.urls()
+            file_paths = [url.toLocalFile() for url in urls]
+            
+            current_tab = self.tab_widget.currentWidget()
+            if current_tab and file_paths:
+                if mime_data.hasFormat("x-special/gnome-copied-files"):
+                    data = mime_data.data("x-special/gnome-copied-files").data().decode('utf-8')
+                    if data.startswith("cut\n"):
+                        self.move_files(file_paths, current_tab.current_path)
+                        self.clear_system_clipboard()
+                    elif data.startswith("copy\n"):
+                        self.copy_files(file_paths, current_tab.current_path)
+                else:
+                    self.copy_files(file_paths, current_tab.current_path)
+                return True
+        return False
+
     def apply_rounded_corners(self):
-        """Apply rounded corners to the main window (Linux/KDE specific)"""
         if sys.platform.startswith('linux'):
             try:
-                # Set window flags for rounded corners (KDE/Plasma)
                 self.setAttribute(Qt.WA_TranslucentBackground)
                 self.setStyleSheet("""
                     EcoFileManager {
@@ -2405,53 +2460,41 @@ class EcoFileManager(QMainWindow):
                         border-radius: 12px;
                     }
                 """)
-                # Set an object name for the central widget
                 self.centralWidget().setObjectName("centralwidget")
             except:
-                pass  # Fallback to normal styling
+                pass
 
     def init_ui(self):
         self.setWindowTitle('Eco File Manager')
         self.setGeometry(100, 100, 1200, 800)
-        # Set window icon (favicon)
         self.setWindowIcon(self.create_favicon())
-        # Create central widget and main layout
+        
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        # Create menu bar
+        
         self.create_menu_bar()
-        # Create toolbar
         self.create_toolbar()
-        # Create main splitter (sidebar + content)
         self.create_main_splitter()
-        # Create status bar
         self.create_status_bar()
-        # Connect signals
         self.connect_signals()
-        # Load XDG folders for places
         self.load_xdg_folders()
 
     def create_favicon(self):
-        """Create a favicon for the application"""
-        # Create a simple folder icon as pixmap
         pixmap = QPixmap(64, 64)
         pixmap.fill(Qt.transparent)
-        # Create a painter to draw the icon
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
-        # Draw a folder shape
-        painter.setBrush(QColor(0, 255, 159))  # Cyberpunk green
+        painter.setBrush(QColor(0, 255, 159))
         painter.setPen(QColor(0, 200, 120))
         painter.drawRoundedRect(8, 12, 48, 40, 5, 5)
-        # Draw folder tab
         painter.drawRoundedRect(12, 8, 40, 12, 3, 3)
         painter.end()
         return QIcon(pixmap)
 
     def create_menu_bar(self):
         menubar = self.menuBar()
-        # File menu
+        
         file_menu = menubar.addMenu('File')
         file_menu.addAction(self.create_action('New Window', 'window-new', 'Ctrl+N', self.new_window))
         file_menu.addAction(self.create_action('New Tab', 'tab-new', 'Ctrl+T', self.new_tab))
@@ -2465,11 +2508,15 @@ class EcoFileManager(QMainWindow):
         file_menu.addAction(self.create_action('Move to Trash', 'user-trash', 'Delete', self.delete_selected))
         file_menu.addAction(self.create_action('Delete', 'edit-delete', 'Shift+Delete', self.permanent_delete))
         file_menu.addSeparator()
+        file_menu.addAction(self.create_action('Empty Trash', 'edit-delete-shred', 'Ctrl+Shift+Delete', self.empty_trash))
+        file_menu.addAction(self.create_action('Open Trash', 'user-trash', None, self.open_trash_folder))
+        file_menu.addAction(self.create_action('Trash Info', 'dialog-information', None, self.show_trash_info))
+        file_menu.addSeparator()
         file_menu.addAction(self.create_action('Properties', 'document-properties', 'Alt+Return', self.show_properties))
         file_menu.addSeparator()
         file_menu.addAction(self.create_action('Close Tab', 'window-close', 'Ctrl+W', self.close_current_tab))
         file_menu.addAction(self.create_action('Close Window', 'window-close', 'Ctrl+Shift+W', self.close))
-        # Edit menu
+        
         edit_menu = menubar.addMenu('Edit')
         edit_menu.addAction(self.create_action('Cut', 'edit-cut', 'Ctrl+X', self.cut_selected))
         edit_menu.addAction(self.create_action('Copy', 'edit-copy', 'Ctrl+C', self.copy_selected))
@@ -2478,7 +2525,7 @@ class EcoFileManager(QMainWindow):
         edit_menu.addAction(self.create_action('Select None', 'edit-clear', 'Ctrl+Shift+A', self.select_none))
         edit_menu.addSeparator()
         edit_menu.addAction(self.create_action('Invert Selection', 'edit-select-invert', 'Ctrl+I', self.invert_selection))
-        # View menu
+        
         view_menu = menubar.addMenu('View')
         self.view_toolbar_action = self.create_action('Toolbar', None, None, self.toggle_toolbar)
         self.view_toolbar_action.setCheckable(True)
@@ -2493,6 +2540,7 @@ class EcoFileManager(QMainWindow):
         view_menu.addAction(self.view_statusbar_action)
         view_menu.addAction(self.view_sidebar_action)
         view_menu.addSeparator()
+        
         view_mode_menu = view_menu.addMenu('View Mode')
         self.view_icons_action = self.create_action('Icons', 'view-list-icons', None, lambda: self.change_view_mode('icons'))
         self.view_icons_action.setCheckable(True)
@@ -2504,12 +2552,12 @@ class EcoFileManager(QMainWindow):
         view_mode_menu.addAction(self.view_icons_action)
         view_mode_menu.addAction(self.view_list_action)
         view_mode_menu.addAction(self.view_compact_action)
-        # Zoom menu
+        
         zoom_menu = view_menu.addMenu('Zoom')
         zoom_menu.addAction(self.create_action('Zoom In', 'zoom-in', 'Ctrl++', self.zoom_in))
         zoom_menu.addAction(self.create_action('Zoom Out', 'zoom-out', 'Ctrl+-', self.zoom_out))
         zoom_menu.addAction(self.create_action('Reset Zoom', 'zoom-original', 'Ctrl+0', self.reset_zoom))
-        # Themes menu
+        
         theme_menu = view_menu.addMenu('Color Themes')
         self.theme_actions = {}
         for theme_name in COLOR_THEMES.keys():
@@ -2518,13 +2566,13 @@ class EcoFileManager(QMainWindow):
             theme_action.setChecked(theme_name == self.current_theme)
             theme_menu.addAction(theme_action)
             self.theme_actions[theme_name] = theme_action
-        # Add Show Hidden Files action
+        
         view_menu.addSeparator()
         self.view_hidden_action = self.create_action('Show Hidden Files', 'view-hidden', 'Ctrl+H', self.toggle_hidden_files)
         self.view_hidden_action.setCheckable(True)
         self.view_hidden_action.setChecked(self.show_hidden)
         view_menu.addAction(self.view_hidden_action)
-        # Go menu
+        
         go_menu = menubar.addMenu('Go')
         go_menu.addAction(self.create_action('Back', 'go-previous', 'Alt+Left', self.go_back))
         go_menu.addAction(self.create_action('Forward', 'go-next', 'Alt+Right', self.go_forward))
@@ -2543,13 +2591,151 @@ class EcoFileManager(QMainWindow):
         go_menu.addSeparator()
         go_menu.addAction(self.create_action('Recent', 'document-open-recent', None, self.show_recent))
 
+    @staticmethod
+    def detect_launch_intent():
+        for arg in sys.argv[1:]:
+            if arg.startswith('trash:///'):
+                return 'trash:///'
+            elif arg.startswith('file://'):
+                return EcoFileManager.handle_url_scheme(arg)
+            elif os.path.isdir(arg):
+                return arg
+        
+        desktop_session = os.environ.get('DESKTOP_SESSION', '').lower()
+        xdg_current_desktop = os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
+        
+        if 'DISPLAY' in os.environ and os.environ.get('DISPLAY'):
+            print(f"Desktop launch detected: {desktop_session} / {xdg_current_desktop}")
+            return os.path.expanduser('~')
+        
+        return os.getcwd()
+    
+    @staticmethod
+    def handle_url_scheme(url):
+        if url.startswith('file://'):
+            from urllib.parse import unquote
+            path = unquote(url[7:])
+            return path
+        elif url.startswith('trash:///'):
+            return 'trash:///'
+        return None
 
+    def empty_trash(self):
+        reply = QMessageBox.question(
+            self,
+            "Empty Trash",
+            "Are you sure you want to permanently delete all items in the trash?\n\nThis action cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                trash_dirs = self.get_trash_directories()
+                if trash_dirs:
+                    success = self.permanently_empty_trash(trash_dirs)
+                    if success:
+                        QMessageBox.information(self, "Success", "Trash has been emptied.")
+                        self.refresh()
+                    else:
+                        QMessageBox.warning(self, "Error", "Failed to empty trash completely.")
+                else:
+                    QMessageBox.warning(self, "Error", "Could not find trash directory.")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to empty trash: {str(e)}")
 
+    def open_trash_folder(self):
+        trash_dirs = self.get_trash_directories()
+        if trash_dirs and os.path.exists(trash_dirs['files']):
+            self.new_tab(trash_dirs['files'])
+        else:
+            QMessageBox.information(self, "Info", "Trash folder is empty or not accessible.")
 
+    def show_trash_info(self):
+        trash_dirs = self.get_trash_directories()
+        if not trash_dirs:
+            QMessageBox.information(self, "Trash Info", "Trash directory not found.")
+            return
+        
+        files_dir = trash_dirs['files']
+        
+        if not os.path.exists(files_dir) or not os.listdir(files_dir):
+            QMessageBox.information(self, "Trash Info", "Trash is empty.")
+            return
+        
+        total_size = 0
+        item_count = 0
+        
+        try:
+            for item in os.listdir(files_dir):
+                item_path = os.path.join(files_dir, item)
+                if os.path.exists(item_path):
+                    item_count += 1
+                    if os.path.isdir(item_path):
+                        size = self.calculate_directory_size(item_path)
+                    else:
+                        size = os.path.getsize(item_path)
+                    total_size += size
+        except Exception as e:
+            print(f"Error calculating trash size: {e}")
+        
+        info_text = f"Items in trash: {item_count}\nTotal size: {self.format_size(total_size)}"
+        QMessageBox.information(self, "Trash Information", info_text)
 
+    def permanently_empty_trash(self, trash_dirs):
+        try:
+            files_dir = trash_dirs['files']
+            info_dir = trash_dirs['info']
+            
+            deleted_count = 0
+            error_count = 0
+            
+            if os.path.exists(files_dir):
+                for item in os.listdir(files_dir):
+                    item_path = os.path.join(files_dir, item)
+                    try:
+                        if os.path.isdir(item_path):
+                            shutil.rmtree(item_path)
+                        else:
+                            os.remove(item_path)
+                        deleted_count += 1
+                    except Exception as e:
+                        print(f"Error deleting {item_path}: {e}")
+                        error_count += 1
+            
+            if os.path.exists(info_dir):
+                for info_file in os.listdir(info_dir):
+                    if info_file.endswith('.trashinfo'):
+                        info_path = os.path.join(info_dir, info_file)
+                        try:
+                            os.remove(info_path)
+                        except Exception as e:
+                            print(f"Error deleting info file {info_path}: {e}")
+                            error_count += 1
+            
+            print(f"Trash emptied: {deleted_count} items deleted, {error_count} errors")
+            return error_count == 0
+            
+        except Exception as e:
+            print(f"Error emptying trash: {e}")
+            return False
+
+    def get_trash_directories(self):
+        xdg_data_home = os.environ.get('XDG_DATA_HOME', os.path.expanduser('~/.local/share'))
+        trash_top_dir = os.path.join(xdg_data_home, 'Trash')
+        
+        files_dir = os.path.join(trash_top_dir, 'files')
+        info_dir = os.path.join(trash_top_dir, 'info')
+        
+        try:
+            os.makedirs(files_dir, exist_ok=True)
+            os.makedirs(info_dir, exist_ok=True)
+            return {'files': files_dir, 'info': info_dir}
+        except Exception as e:
+            print(f"Error creating trash directories: {e}")
+            return None
 
     def open_folder_in_terminal(self, folder_path):
-        """Open specific folder in terminal - FIXED VERSION with term5 as preferred"""
         if not folder_path or not os.path.exists(folder_path) or not os.path.isdir(folder_path):
             QMessageBox.warning(self, "Error", f"Invalid folder: {folder_path}")
             return
@@ -2560,29 +2746,25 @@ class EcoFileManager(QMainWindow):
             if sys.platform.startswith('linux'):
                 terminal_commands = []
                 
-                # Build list of terminal commands to try, in order of preference
-                # TERM5 IS NOW THE PREFERRED TERMINAL
                 if self.is_root_mode:
-                    # Root mode - prefer terminals that work well with root
                     terminal_commands = [
-                        'term5',           # YOUR PREFERRED TERMINAL - FIRST CHOICE
-                        'gnome-terminal',  # GNOME terminal
-                        'konsole',         # KDE terminal  
-                        'xfce4-terminal',  # XFCE terminal
-                        'lxterminal',      # LXDE terminal
-                        'mate-terminal',   # MATE terminal
-                        'tilix',           # Tilix terminal
-                        'terminator',      # Terminator
-                        'xterm',           # Basic X terminal (usually always available)
-                        'uxterm'           # Unicode X terminal
-                    ]
-                else:
-                    # Normal user mode - TERM5 FIRST
-                    terminal_commands = [
-                        'term5',           # YOUR PREFERRED TERMINAL - FIRST CHOICE
+                        'term5',
                         'gnome-terminal',
                         'konsole',
-                        'xfce4-terminal', 
+                        'xfce4-terminal',
+                        'lxterminal',
+                        'mate-terminal',
+                        'tilix',
+                        'terminator',
+                        'xterm',
+                        'uxterm'
+                    ]
+                else:
+                    terminal_commands = [
+                        'term5',
+                        'gnome-terminal',
+                        'konsole',
+                        'xfce4-terminal',
                         'lxterminal',
                         'mate-terminal',
                         'tilix',
@@ -2591,13 +2773,11 @@ class EcoFileManager(QMainWindow):
                         'uxterm'
                     ]
                 
-                # Try each terminal command until one works
                 terminal_found = False
                 for term in terminal_commands:
                     if shutil.which(term):
                         try:
                             if term == 'term5':
-                                # term5 has no flags - just open it and it will inherit current directory
                                 subprocess.Popen(['term5'], cwd=folder_path)
                                 print(f"✅ Opened term5 in {folder_path}")
                                 
@@ -2616,8 +2796,6 @@ class EcoFileManager(QMainWindow):
                             elif term == 'mate-terminal':
                                 subprocess.Popen(['mate-terminal', '--working-directory', folder_path])
                             else:
-                                # For terminals that don't have specific working directory flags
-                                # Use shell command to change directory
                                 subprocess.Popen([term, '-e', f'bash -c "cd \\"{folder_path}\\" && exec bash"'])
                             
                             terminal_found = True
@@ -2629,7 +2807,6 @@ class EcoFileManager(QMainWindow):
                             continue
                 
                 if not terminal_found:
-                    # Last resort: try x-terminal-emulator (system default)
                     try:
                         subprocess.Popen(['x-terminal-emulator', '-e', f'bash -c "cd \\"{folder_path}\\" && exec bash"'])
                         print("✅ Opened system default terminal (x-terminal-emulator)")
@@ -2638,7 +2815,6 @@ class EcoFileManager(QMainWindow):
                         print(f"❌ x-terminal-emulator failed: {e}")
                 
                 if not terminal_found:
-                    # Final fallback - try with basic shell command
                     try:
                         subprocess.Popen(['xterm', '-e', f'bash -c "cd \\"{folder_path}\\" && exec bash"'])
                         print("✅ Opened xterm as final fallback")
@@ -2656,9 +2832,8 @@ class EcoFileManager(QMainWindow):
                             "Or set your preferred terminal in system settings."
                         )
                     
-            elif sys.platform == 'darwin':  # macOS
+            elif sys.platform == 'darwin':
                 try:
-                    # Use AppleScript to open Terminal at specific path
                     applescript = f'''
                     tell application "Terminal"
                         activate
@@ -2669,23 +2844,19 @@ class EcoFileManager(QMainWindow):
                     print(f"✅ Opened Terminal on macOS in {folder_path}")
                 except Exception as mac_error:
                     print(f"❌ AppleScript method failed: {mac_error}")
-                    # Fallback method for macOS
                     try:
                         subprocess.run(['open', '-a', 'Terminal', folder_path])
                     except Exception as mac_error2:
                         QMessageBox.warning(self, "Error", f"Could not open Terminal on macOS: {str(mac_error2)}")
                         
-            elif sys.platform == 'win32':  # Windows
+            elif sys.platform == 'win32':
                 try:
-                    # Use PowerShell for better directory handling
                     powershell_cmd = f'Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd {folder_path}"'
                     subprocess.run(['powershell', '-Command', powershell_cmd], shell=True)
                     print(f"✅ Opened PowerShell on Windows in {folder_path}")
                 except Exception as win_error:
                     print(f"❌ PowerShell method failed: {win_error}")
-                    # Fallback to cmd
                     try:
-                        # Convert path to Windows format and use cmd
                         win_path = folder_path.replace('/', '\\')
                         subprocess.run(['cmd', '/c', 'start', 'cmd', '/k', f'cd /d "{win_path}"'], shell=True)
                     except Exception as win_error2:
@@ -2699,42 +2870,19 @@ class EcoFileManager(QMainWindow):
             QMessageBox.warning(self, "Error", f"Could not open terminal: {str(e)}")
             print(f"❌ Terminal opening failed: {e}")
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     def open_folder_as_root(self, folder_path):
-        """Open specific folder as root using this file manager - FIXED VERSION"""
         try:
             if sys.platform.startswith('linux'):
-                # Validate path exists
                 if not os.path.exists(folder_path):
                     QMessageBox.warning(self, "Invalid Path", f"The path '{folder_path}' does not exist.")
                     return
                 
-                # Get the path to the current script/executable
                 if getattr(sys, 'frozen', False):
-                    # If the application is frozen (packaged)
                     application_path = sys.executable
                 else:
-                    # If running as a script, use the current Python interpreter and script
                     application_path = sys.executable
                     script_path = os.path.abspath(__file__)
                 
-                # Ask for confirmation
                 reply = QMessageBox.question(
                     self,
                     "Open as Root",
@@ -2747,18 +2895,15 @@ class EcoFileManager(QMainWindow):
                 
                 if reply == QMessageBox.Yes:
                     try:
-                        # Preserve display and session environment
                         env = os.environ.copy()
                         
                         if getattr(sys, 'frozen', False):
-                            # Packaged application - pass folder path as argument
                             cmd = ['pkexec', 'env', 
                                   f"DISPLAY={env.get('DISPLAY', '')}", 
                                   f"XAUTHORITY={env.get('XAUTHORITY', '')}",
                                   f"DBUS_SESSION_BUS_ADDRESS={env.get('DBUS_SESSION_BUS_ADDRESS', '')}",
                                   application_path, folder_path]
                         else:
-                            # Running as script - pass folder path as argument
                             cmd = ['pkexec', 'env', 
                                   f"DISPLAY={env.get('DISPLAY', '')}", 
                                   f"XAUTHORITY={env.get('XAUTHORITY', '')}",
@@ -2767,22 +2912,18 @@ class EcoFileManager(QMainWindow):
                         
                         print(f"Attempting to run: {' '.join(cmd)}")
                         
-                        # Launch as root with proper environment and folder path
                         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                         
-                        # Check if process started successfully
-                        time.sleep(2)  # Give it more time to start
+                        time.sleep(2)
                         return_code = process.poll()
                         
                         if return_code is not None and return_code != 0:
-                            # Process failed, try alternative methods
                             stdout, stderr = process.communicate()
                             print(f"pkexec failed with return code {return_code}")
                             print(f"stderr: {stderr.decode()}")
                             self.open_folder_as_root_fallback(folder_path)
                         else:
                             print(f"Root file manager launched successfully for folder: {folder_path}")
-                            # Don't show success message as it might be annoying
                             
                     except FileNotFoundError:
                         print("pkexec not found, trying fallback methods")
@@ -2797,8 +2938,6 @@ class EcoFileManager(QMainWindow):
             QMessageBox.critical(self, "Error", f"Could not open as root: {str(e)}")
 
     def open_folder_as_root_fallback(self, folder_path):
-        """Fallback method if pkexec is not available for specific folder"""
-        # Try different privilege escalation methods
         methods = [
             ('gksu', ['gksu']),
             ('kdesu', ['kdesu']),
@@ -2820,15 +2959,14 @@ class EcoFileManager(QMainWindow):
                     try:
                         if getattr(sys, 'frozen', False):
                             application_path = sys.executable
-                            cmd = base_cmd + [application_path, folder_path]  # Pass folder path
+                            cmd = base_cmd + [application_path, folder_path]
                         else:
                             application_path = sys.executable
                             script_path = os.path.abspath(__file__)
                             if base_cmd[0] in ['gksu', 'kdesu']:
-                                # gksu/kdesu might need the command as a single string
                                 cmd = base_cmd + [f"{application_path} {script_path} {folder_path}"]
                             else:
-                                cmd = base_cmd + [application_path, script_path, folder_path]  # Pass folder path
+                                cmd = base_cmd + [application_path, script_path, folder_path]
                         
                         print(f"Trying {method_name} with command: {' '.join(cmd)}")
                         subprocess.Popen(cmd)
@@ -2845,7 +2983,6 @@ class EcoFileManager(QMainWindow):
                         print(f"{method_name} failed: {e}")
                         continue
         
-        # If no method worked
         QMessageBox.critical(
             self,
             "Error",
@@ -2860,20 +2997,11 @@ class EcoFileManager(QMainWindow):
             "sudo apt install gksu"
         )
 
-
-
-
-
-
-
-
-
     def create_action(self, text, icon_name, shortcut, slot=None):
         action = QAction(text, self)
         if icon_name:
             icon = QIcon.fromTheme(icon_name)
             if icon.isNull():
-                # Fallback icons for common actions
                 icon_fallbacks = {
                     'go-previous': self.style().standardIcon(self.style().SP_ArrowBack),
                     'go-next': self.style().standardIcon(self.style().SP_ArrowForward),
@@ -2916,80 +3044,81 @@ class EcoFileManager(QMainWindow):
         return action
 
     def create_toolbar(self):
-        # Create main toolbar
         self.toolbar = QToolBar()
-        self.toolbar.setObjectName("main_toolbar")  # Fix for saveState warning
+        self.toolbar.setObjectName("main_toolbar")
         self.toolbar.setIconSize(QSize(16, 16))
         self.toolbar.setMovable(False)
         self.addToolBar(self.toolbar)
-        # Create a widget to hold the navigation buttons
+        
         nav_widget = QWidget()
         nav_layout = QHBoxLayout(nav_widget)
         nav_layout.setContentsMargins(0, 0, 0, 0)
         nav_layout.setSpacing(2)
-        # Navigation actions
+        
         self.back_action = self.create_action('Back', 'go-previous', 'Alt+Left', self.go_back)
         self.forward_action = self.create_action('Forward', 'go-next', 'Alt+Right', self.go_forward)
         self.up_action = self.create_action('Up', 'go-up', 'Alt+Up', self.go_up)
         self.home_action = self.create_action('Home', 'go-home', 'Alt+Home', self.go_home)
         self.refresh_action = self.create_action('Refresh', 'view-refresh', 'F5', self.refresh)
-        # Add navigation buttons to the nav layout
+        
         back_btn = QToolButton()
         back_btn.setDefaultAction(self.back_action)
         nav_layout.addWidget(back_btn)
+        
         forward_btn = QToolButton()
         forward_btn.setDefaultAction(self.forward_action)
         nav_layout.addWidget(forward_btn)
+        
         up_btn = QToolButton()
         up_btn.setDefaultAction(self.up_action)
         nav_layout.addWidget(up_btn)
+        
         home_btn = QToolButton()
         home_btn.setDefaultAction(self.home_action)
         nav_layout.addWidget(home_btn)
+        
         refresh_btn = QToolButton()
         refresh_btn.setDefaultAction(self.refresh_action)
         nav_layout.addWidget(refresh_btn)
-        # Add the navigation widget to the toolbar
+        
         self.toolbar.addWidget(nav_widget)
-        # Add a separator
         self.toolbar.addSeparator()
-        # Add "Open in Terminal" button to main toolbar
+        
         terminal_action = self.create_action('Open in Terminal', 'utilities-terminal', 'F4', self.open_in_terminal)
         terminal_btn = QToolButton()
         terminal_btn.setDefaultAction(terminal_action)
         self.toolbar.addWidget(terminal_btn)
-        # Add another separator
+        
         self.toolbar.addSeparator()
-        # Create a container widget for the address bar
+        
         address_container = QWidget()
         address_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         address_layout = QHBoxLayout(address_container)
         address_layout.setContentsMargins(5, 0, 5, 0)
         address_layout.setSpacing(5)
-        # Location label
+        
         location_label = QLabel("Location:")
         location_label.setStyleSheet("color: #00ff9f; padding: 0 5px;")
         address_layout.addWidget(location_label)
-        # Location combo box (address bar)
+        
         self.location_combo = QComboBox()
         self.location_combo.setEditable(True)
         self.location_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.location_combo.setInsertPolicy(QComboBox.NoInsert)
         self.location_combo.setMinimumWidth(300)
         address_layout.addWidget(self.location_combo)
-        # Add the address container to the toolbar
+        
         self.toolbar.addWidget(address_container)
-        # Make the address container expand to fill available space
-        self.toolbar.addWidget(QWidget())  # Spacer
+        self.toolbar.addWidget(QWidget())
 
     def create_main_splitter(self):
         main_splitter = QSplitter(Qt.Horizontal)
         main_layout = self.centralWidget().layout()
         main_layout.addWidget(main_splitter, 1)
-        # Create sidebar (places, tree, and devices)
+        
         self.create_sidebar(main_splitter)
-        # Create content area with tabbed browsing
         self.create_content_area(main_splitter)
+        
         main_splitter.setSizes([250, 750])
 
     def create_sidebar(self, parent_splitter):
@@ -2997,22 +3126,23 @@ class EcoFileManager(QMainWindow):
         sidebar_layout = QVBoxLayout(sidebar_widget)
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
         sidebar_layout.setSpacing(0)
-        # Create a vertical splitter for the sidebar components
+        
         sidebar_splitter = QSplitter(Qt.Vertical)
-        # Places list
+        
         places_group = QGroupBox("Places")
         places_layout = QVBoxLayout(places_group)
         self.places_list = QListWidget()
         self.places_list.setContextMenuPolicy(Qt.CustomContextMenu)
         places_layout.addWidget(self.places_list)
         sidebar_splitter.addWidget(places_group)
-        # Tree view
+        
         tree_group = QGroupBox("Tree")
         tree_layout = QVBoxLayout(tree_group)
-        # Set filter for tree model based on show_hidden setting
+        
         filter_flags = QDir.AllEntries | QDir.NoDotAndDotDot | QDir.AllDirs
         if self.show_hidden:
             filter_flags |= QDir.Hidden
+            
         self.tree_view = QTreeView()
         self.tree_model = QFileSystemModel()
         self.tree_model.setRootPath("")
@@ -3027,15 +3157,15 @@ class EcoFileManager(QMainWindow):
         self.tree_view.hideColumn(3)
         tree_layout.addWidget(self.tree_view)
         sidebar_splitter.addWidget(tree_group)
-        # Devices pane
+        
         devices_group = QGroupBox("Devices")
         devices_layout = QVBoxLayout(devices_group)
-        self.devices_pane = DevicesPane(self)  # Pass self as parent
+        self.devices_pane = DevicesPane(self)
         self.devices_pane.device_clicked.connect(self.navigate_to_path)
         self.devices_pane.device_context_menu.connect(self.open_in_new_tab)
         devices_layout.addWidget(self.devices_pane)
         sidebar_splitter.addWidget(devices_group)
-        # Set initial sizes for the sidebar components
+        
         sidebar_splitter.setSizes([100, 200, 150])
         sidebar_layout.addWidget(sidebar_splitter)
         parent_splitter.addWidget(sidebar_widget)
@@ -3045,27 +3175,22 @@ class EcoFileManager(QMainWindow):
         content_layout = QVBoxLayout(content_widget)
         content_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Create a toolbar for the file view area
         file_toolbar = QToolBar()
         file_toolbar.setObjectName("file_toolbar")
         file_toolbar.setIconSize(QSize(16, 16))
         file_toolbar.setMovable(False)
         
-        # Add "Open in Terminal" button
         terminal_action = self.create_action('Open in Terminal', 'utilities-terminal', 'F4', self.open_in_terminal)
         terminal_btn = QToolButton()
         terminal_btn.setDefaultAction(terminal_action)
         file_toolbar.addWidget(terminal_btn)
         
-        # Add a spacer
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         file_toolbar.addWidget(spacer)
         
-        # Add view mode buttons
         view_mode_group = QButtonGroup(self)
         
-        # Icons view button
         icons_btn = QToolButton()
         icons_btn.setCheckable(True)
         icons_btn.setIcon(QIcon.fromTheme('view-list-icons'))
@@ -3075,7 +3200,6 @@ class EcoFileManager(QMainWindow):
         view_mode_group.addButton(icons_btn)
         file_toolbar.addWidget(icons_btn)
         
-        # List view button
         list_btn = QToolButton()
         list_btn.setCheckable(True)
         list_btn.setIcon(QIcon.fromTheme('view-list-details'))
@@ -3085,7 +3209,6 @@ class EcoFileManager(QMainWindow):
         view_mode_group.addButton(list_btn)
         file_toolbar.addWidget(list_btn)
         
-        # Compact view button
         compact_btn = QToolButton()
         compact_btn.setCheckable(True)
         compact_btn.setIcon(QIcon.fromTheme('view-list-text'))
@@ -3095,15 +3218,13 @@ class EcoFileManager(QMainWindow):
         view_mode_group.addButton(compact_btn)
         file_toolbar.addWidget(compact_btn)
         
-        # Add the toolbar to the layout
         content_layout.addWidget(file_toolbar)
         
-        # Create tab widget
         self.tab_widget = QTabWidget()
         self.tab_widget.setTabsClosable(True)
         self.tab_widget.tabCloseRequested.connect(self.close_tab)
         self.tab_widget.currentChanged.connect(self.tab_changed)
-        # Create initial tab
+        
         self.new_tab(self.current_path)
         content_layout.addWidget(self.tab_widget)
         parent_splitter.addWidget(content_widget)
@@ -3111,36 +3232,33 @@ class EcoFileManager(QMainWindow):
     def create_status_bar(self):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        # Create a container widget for status bar content
+        
         status_widget = QWidget()
         status_layout = QHBoxLayout(status_widget)
         status_layout.setContentsMargins(0, 0, 0, 0)
         status_layout.setSpacing(10)
-        # Initialize status labels as instance variables
+        
         self.status_label_left = QLabel()
         self.status_label_right = QLabel()
-        # Add left status label
+        
         status_layout.addWidget(self.status_label_left)
-        # Add stretch to push zoom controls to the right
         status_layout.addStretch()
-        # Add zoom controls to status bar
+        
         self.create_zoom_controls(status_layout)
-        # Add right status label
+        
         status_layout.addWidget(self.status_label_right)
-        # Set the status widget as the permanent widget
+        
         self.status_bar.addPermanentWidget(status_widget, 1)
-        # Initialize status bar with default text
+        
         self.status_label_left.setText("Ready")
         self.status_label_right.setText(self.current_path)
 
     def create_zoom_controls(self, parent_layout):
-        """Create zoom controls and add them to the parent layout"""
-        # Zoom out button
         zoom_out_btn = QToolButton()
         zoom_out_btn.setDefaultAction(self.create_action('Zoom Out', 'zoom-out', 'Ctrl+-', self.zoom_out))
         zoom_out_btn.setFixedSize(24, 24)
         parent_layout.addWidget(zoom_out_btn)
-        # Zoom slider
+        
         self.zoom_slider = QSlider(Qt.Horizontal)
         self.zoom_slider.setMinimum(16)
         self.zoom_slider.setMaximum(128)
@@ -3150,12 +3268,12 @@ class EcoFileManager(QMainWindow):
         self.zoom_slider.setFixedHeight(20)
         self.zoom_slider.valueChanged.connect(self.on_zoom_changed)
         parent_layout.addWidget(self.zoom_slider)
-        # Zoom in button
+        
         zoom_in_btn = QToolButton()
         zoom_in_btn.setDefaultAction(self.create_action('Zoom In', 'zoom-in', 'Ctrl++', self.zoom_in))
         zoom_in_btn.setFixedSize(24, 24)
         parent_layout.addWidget(zoom_in_btn)
-        # Reset zoom button
+        
         reset_zoom_btn = QToolButton()
         reset_zoom_btn.setDefaultAction(self.create_action('Reset Zoom', 'zoom-original', 'Ctrl+0', self.reset_zoom))
         reset_zoom_btn.setFixedSize(24, 24)
@@ -3170,15 +3288,11 @@ class EcoFileManager(QMainWindow):
         self.update_location_combo()
 
     def apply_root_indicators(self):
-        """Apply visual indicators that this is running as root"""
-        # Modify window title
         current_title = self.windowTitle()
         if "(Root)" not in current_title:
             self.setWindowTitle(current_title + " (Root) - [ADMINISTRATOR PRIVILEGES]")
         
-        # Apply special styling for root mode
         root_stylesheet = """
-            /* Red border and warning colors for root mode */
             QMainWindow {
                 border: 3px solid #ff4444;
                 border-radius: 8px;
@@ -3197,11 +3311,9 @@ class EcoFileManager(QMainWindow):
             }
         """
         
-        # Combine with existing stylesheet
         current_stylesheet = self.styleSheet()
         self.setStyleSheet(current_stylesheet + root_stylesheet)
         
-        # Update status bar with warning
         if hasattr(self, 'status_label_left') and self.status_label_left is not None:
             self.status_label_left.setText("⚠️ RUNNING AS ROOT - BE CAREFUL!")
             self.status_label_left.setStyleSheet("color: #ff4444; font-weight: bold; background-color: #330000; padding: 4px; border-radius: 3px;")
@@ -3210,28 +3322,21 @@ class EcoFileManager(QMainWindow):
             self.status_label_right.setText("ROOT PRIVILEGES")
             self.status_label_right.setStyleSheet("color: #ff8888; font-weight: bold; background-color: #220000; padding: 4px; border-radius: 3px;")
         
-        # Change the window icon to red warning version
         self.setWindowIcon(self.create_root_favicon())
-        
-        # Add a warning to the menu bar
         self.add_root_warning_to_menu()
 
     def create_root_favicon(self):
-        """Create a red favicon for root mode"""
         pixmap = QPixmap(64, 64)
         pixmap.fill(Qt.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
         
-        # Draw a red folder for root mode
-        painter.setBrush(QColor(255, 68, 68))  # Red color
+        painter.setBrush(QColor(255, 68, 68))
         painter.setPen(QColor(200, 40, 40))
         painter.drawRoundedRect(8, 12, 48, 40, 5, 5)
         
-        # Draw folder tab
         painter.drawRoundedRect(12, 8, 40, 12, 3, 3)
         
-        # Add warning symbol
         painter.setPen(QColor(255, 255, 255))
         painter.setFont(QFont("Arial", 24, QFont.Bold))
         painter.drawText(28, 45, "!")
@@ -3240,19 +3345,15 @@ class EcoFileManager(QMainWindow):
         return QIcon(pixmap)
 
     def add_root_warning_to_menu(self):
-        """Add a warning item to the menu bar when running as root"""
         menubar = self.menuBar()
         
-        # Create a warning action
         warning_action = QAction("⚠️ RUNNING AS ROOT", self)
         warning_action.setEnabled(False)
         warning_action.setIcon(self.create_root_favicon())
         
-        # Insert at the beginning of the menu bar
         menubar.insertAction(menubar.actions()[0] if menubar.actions() else None, warning_action)
 
     def new_window(self, path=None):
-        """Create a new file manager window"""
         if path is None:
             path = self.current_path
         new_win = EcoFileManager(path)
@@ -3263,7 +3364,6 @@ class EcoFileManager(QMainWindow):
         if path is None:
             path = self.current_path
         
-        # Enhanced path validation for tabs
         print(f"new_tab received path: {path}")
         
         if not path:
@@ -3271,7 +3371,6 @@ class EcoFileManager(QMainWindow):
         elif os.path.isfile(path):
             path = os.path.dirname(path)
         elif not os.path.exists(path) or not os.path.isdir(path):
-            # Try to find a valid parent directory
             parent = os.path.dirname(path)
             while parent and parent != '/' and not os.path.isdir(parent):
                 parent = os.path.dirname(parent)
@@ -3280,32 +3379,27 @@ class EcoFileManager(QMainWindow):
             else:
                 path = QDir.homePath()
         
-        # Ensure path is absolute
         path = os.path.abspath(path)
         print(f"new_tab using path: {path}")
         
         try:
-            # Create new tab - pass self (main window) as the second parameter
-            tab = FileBrowserTab(path, self)  # Pass main window reference
+            tab = FileBrowserTab(path, self)
             tab.file_dropped.connect(self.handle_file_drop)
             tab.status_update.connect(self.update_status_bar_from_tab)
-            # Add tab to widget
+            
             tab_name = os.path.basename(path) or path
             index = self.tab_widget.addTab(tab, tab_name)
             self.tab_widget.setCurrentIndex(index)
-            # Update current path
+            
             self.current_path = path
-            # Update window title
             self.setWindowTitle(f"Eco File Manager - {path}")
         except Exception as e:
             print(f"Error creating tab: {e}")
-            # Enhanced fallback with better error reporting
             fallback_path = QDir.homePath()
             print(f"Falling back to: {fallback_path}")
             self.new_tab(fallback_path)
 
     def close_tab(self, index):
-        # Don't close the last tab
         if self.tab_widget.count() <= 1:
             return
         self.tab_widget.removeTab(index)
@@ -3318,30 +3412,26 @@ class EcoFileManager(QMainWindow):
         if index >= 0:
             current_tab = self.tab_widget.currentWidget()
             if current_tab:
-                # Check if the tab's path still exists
                 if not os.path.exists(current_tab.current_path):
-                    # Path doesn't exist anymore, close the tab
                     self.close_tab(index)
                     return
                     
                 self.current_path = current_tab.current_path
-                # Update location bar
                 self.location_combo.setEditText(self.current_path)
-                # Update tree view selection
+                
                 tree_index = self.tree_model.index(self.current_path)
                 if tree_index.isValid():
                     self.tree_view.setCurrentIndex(tree_index)
                     self.tree_view.setExpanded(tree_index, True)
-                # Update window title
+                    
                 self.setWindowTitle(f"Eco File Manager - {self.current_path}")
-                # Update status bar
+                
                 try:
                     current_tab.update_status_bar()
                 except Exception as e:
                     print(f"Error updating status bar: {e}")
 
     def update_status_bar_from_tab(self, left_text, right_text):
-        """Safely update status bar from tab - with proper attribute checking"""
         try:
             if hasattr(self, 'status_label_left') and self.status_label_left is not None:
                 self.status_label_left.setText(left_text)
@@ -3349,20 +3439,16 @@ class EcoFileManager(QMainWindow):
                 self.status_label_right.setText(right_text)
         except AttributeError as e:
             print(f"Status bar update error: {e}")
-            # Fallback to basic status bar update
             self.statusBar().showMessage(f"{left_text} - {right_text}")
 
     def is_file_executable(self, file_path):
-        """Check if a file is executable"""
         try:
             file_stat = os.stat(file_path)
-            # Check if any execute bit is set (user, group, or other)
             return (file_stat.st_mode & stat.S_IXUSR) or (file_stat.st_mode & stat.S_IXGRP) or (file_stat.st_mode & stat.S_IXOTH)
         except OSError:
             return False
 
     def toggle_executable(self):
-        """Toggle executable permission for selected files"""
         current_tab = self.tab_widget.currentWidget()
         if not current_tab:
             return
@@ -3371,17 +3457,16 @@ class EcoFileManager(QMainWindow):
             return
         files_to_process = []
         for index in indexes:
-            if index.column() == 0:  # Only process first column
+            if index.column() == 0:
                 path = current_tab.list_model.filePath(index)
-                if os.path.isfile(path):  # Only process files, not directories
+                if os.path.isfile(path):
                     files_to_process.append(path)
         if not files_to_process:
             QMessageBox.information(self, "Info", "No files selected. Only files can be made executable.")
             return
-        # Check if any files are executable
+            
         executable_files = [f for f in files_to_process if self.is_file_executable(f)]
         if executable_files:
-            # Some files are executable, ask if user wants to remove executable permission
             reply = QMessageBox.question(
                 self, 
                 "Remove Executable Permission",
@@ -3393,7 +3478,6 @@ class EcoFileManager(QMainWindow):
             if reply == QMessageBox.Yes:
                 self.remove_executable_permission(files_to_process)
         else:
-            # No files are executable, ask if user wants to add executable permission
             reply = QMessageBox.question(
                 self,
                 "Make Files Executable",
@@ -3405,13 +3489,11 @@ class EcoFileManager(QMainWindow):
                 self.add_executable_permission(files_to_process)
 
     def add_executable_permission(self, file_paths):
-        """Add executable permission to files WITHOUT using sudo - FIXED VERSION"""
         try:
-            # Show progress dialog but don't block
             progress = QProgressDialog("Making files executable...", "Cancel", 0, len(file_paths), self)
             progress.setWindowTitle("Processing")
             progress.setWindowModality(Qt.WindowModal)
-            progress.setMinimumDuration(0)  # Show immediately
+            progress.setMinimumDuration(0)
             progress.show()
             
             failed_files = []
@@ -3423,18 +3505,13 @@ class EcoFileManager(QMainWindow):
                     
                 progress.setValue(i)
                 progress.setLabelText(f"Processing: {os.path.basename(file_path)}")
-                
-                # Process events to keep UI responsive and check for cancellation
                 QApplication.processEvents()
                 
                 try:
-                    # Get current file permissions
                     current_mode = os.stat(file_path).st_mode
-                    # Add executable permission for user, group, and others
                     new_mode = current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
-                    # Change permissions - NO SUDO!
                     os.chmod(file_path, new_mode)
-                    # Verify the change worked
+                    
                     if self.is_file_executable(file_path):
                         successful_count += 1
                     else:
@@ -3444,7 +3521,6 @@ class EcoFileManager(QMainWindow):
             
             progress.close()
             
-            # Show results
             if failed_files:
                 QMessageBox.warning(
                     self,
@@ -3459,20 +3535,17 @@ class EcoFileManager(QMainWindow):
                     "Complete",
                     f"Successfully made {successful_count} file(s) executable."
                 )
-            # Refresh the view
             self.refresh()
         except Exception as e:
             progress.close()
             QMessageBox.critical(self, "Error", f"Failed to make files executable: {str(e)}")
 
     def remove_executable_permission(self, file_paths):
-        """Remove executable permission from files WITHOUT using sudo - FIXED VERSION"""
         try:
-            # Show progress dialog but don't block
             progress = QProgressDialog("Removing executable permission...", "Cancel", 0, len(file_paths), self)
             progress.setWindowTitle("Processing")
             progress.setWindowModality(Qt.WindowModal)
-            progress.setMinimumDuration(0)  # Show immediately
+            progress.setMinimumDuration(0)
             progress.show()
             
             failed_files = []
@@ -3484,18 +3557,13 @@ class EcoFileManager(QMainWindow):
                     
                 progress.setValue(i)
                 progress.setLabelText(f"Processing: {os.path.basename(file_path)}")
-                
-                # Process events to keep UI responsive and check for cancellation
                 QApplication.processEvents()
                 
                 try:
-                    # Get current file permissions
                     current_mode = os.stat(file_path).st_mode
-                    # Remove executable permission for user, group, and others
                     new_mode = current_mode & ~stat.S_IXUSR & ~stat.S_IXGRP & ~stat.S_IXOTH
-                    # Change permissions - NO SUDO!
                     os.chmod(file_path, new_mode)
-                    # Verify the change worked
+                    
                     if not self.is_file_executable(file_path):
                         successful_count += 1
                     else:
@@ -3505,7 +3573,6 @@ class EcoFileManager(QMainWindow):
             
             progress.close()
             
-            # Show results
             if failed_files:
                 QMessageBox.warning(
                     self,
@@ -3520,22 +3587,18 @@ class EcoFileManager(QMainWindow):
                     "Complete",
                     f"Successfully removed executable permission from {successful_count} file(s)."
                 )
-            # Refresh the view
             self.refresh()
         except Exception as e:
             progress.close()
             QMessageBox.critical(self, "Error", f"Failed to remove executable permission: {str(e)}")
 
     def open_in_terminal(self):
-        """Open current directory in terminal - FIXED VERSION with term5 as preferred"""
-        # Get the current tab's path
         current_tab = self.tab_widget.currentWidget()
         if current_tab:
             path = current_tab.current_path
         else:
             path = self.current_path
         
-        # Validate the path exists and is accessible
         if not os.path.exists(path) or not os.path.isdir(path):
             QMessageBox.warning(self, "Error", f"Cannot open terminal: Path '{path}' does not exist or is not a directory")
             return
@@ -3546,29 +3609,25 @@ class EcoFileManager(QMainWindow):
             if sys.platform.startswith('linux'):
                 terminal_commands = []
                 
-                # Build list of terminal commands to try, in order of preference
-                # TERM5 IS NOW THE PREFERRED TERMINAL
                 if self.is_root_mode:
-                    # Root mode - prefer terminals that work well with root
                     terminal_commands = [
-                        'term5',           # YOUR PREFERRED TERMINAL - FIRST CHOICE
-                        'gnome-terminal',  # GNOME terminal
-                        'konsole',         # KDE terminal  
-                        'xfce4-terminal',  # XFCE terminal
-                        'lxterminal',      # LXDE terminal
-                        'mate-terminal',   # MATE terminal
-                        'tilix',           # Tilix terminal
-                        'terminator',      # Terminator
-                        'xterm',           # Basic X terminal (usually always available)
-                        'uxterm'           # Unicode X terminal
-                    ]
-                else:
-                    # Normal user mode - TERM5 FIRST
-                    terminal_commands = [
-                        'term5',           # YOUR PREFERRED TERMINAL - FIRST CHOICE
+                        'term5',
                         'gnome-terminal',
                         'konsole',
-                        'xfce4-terminal', 
+                        'xfce4-terminal',
+                        'lxterminal',
+                        'mate-terminal',
+                        'tilix',
+                        'terminator',
+                        'xterm',
+                        'uxterm'
+                    ]
+                else:
+                    terminal_commands = [
+                        'term5',
+                        'gnome-terminal',
+                        'konsole',
+                        'xfce4-terminal',
                         'lxterminal',
                         'mate-terminal',
                         'tilix',
@@ -3577,13 +3636,11 @@ class EcoFileManager(QMainWindow):
                         'uxterm'
                     ]
                 
-                # Try each terminal command until one works
                 terminal_found = False
                 for term in terminal_commands:
                     if shutil.which(term):
                         try:
                             if term == 'term5':
-                                # term5 has no flags - just open it and it will inherit current directory
                                 subprocess.Popen(['term5'], cwd=path)
                                 print(f"✅ Opened term5 in {path}")
                                 
@@ -3602,8 +3659,6 @@ class EcoFileManager(QMainWindow):
                             elif term == 'mate-terminal':
                                 subprocess.Popen(['mate-terminal', '--working-directory', path])
                             else:
-                                # For terminals that don't have specific working directory flags
-                                # Use shell command to change directory
                                 subprocess.Popen([term, '-e', f'bash -c "cd \\"{path}\\" && exec bash"'])
                             
                             terminal_found = True
@@ -3615,7 +3670,6 @@ class EcoFileManager(QMainWindow):
                             continue
                 
                 if not terminal_found:
-                    # Last resort: try x-terminal-emulator (system default)
                     try:
                         subprocess.Popen(['x-terminal-emulator', '-e', f'bash -c "cd \\"{path}\\" && exec bash"'])
                         print("✅ Opened system default terminal (x-terminal-emulator)")
@@ -3624,7 +3678,6 @@ class EcoFileManager(QMainWindow):
                         print(f"❌ x-terminal-emulator failed: {e}")
                 
                 if not terminal_found:
-                    # Final fallback - try with basic shell command
                     try:
                         subprocess.Popen(['xterm', '-e', f'bash -c "cd \\"{path}\\" && exec bash"'])
                         print("✅ Opened xterm as final fallback")
@@ -3642,9 +3695,8 @@ class EcoFileManager(QMainWindow):
                             "Or set your preferred terminal in system settings."
                         )
                     
-            elif sys.platform == 'darwin':  # macOS
+            elif sys.platform == 'darwin':
                 try:
-                    # Use AppleScript to open Terminal at specific path
                     applescript = f'''
                     tell application "Terminal"
                         activate
@@ -3655,23 +3707,19 @@ class EcoFileManager(QMainWindow):
                     print(f"✅ Opened Terminal on macOS in {path}")
                 except Exception as mac_error:
                     print(f"❌ AppleScript method failed: {mac_error}")
-                    # Fallback method for macOS
                     try:
                         subprocess.run(['open', '-a', 'Terminal', path])
                     except Exception as mac_error2:
                         QMessageBox.warning(self, "Error", f"Could not open Terminal on macOS: {str(mac_error2)}")
                         
-            elif sys.platform == 'win32':  # Windows
+            elif sys.platform == 'win32':
                 try:
-                    # Use PowerShell for better directory handling
                     powershell_cmd = f'Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd {path}"'
                     subprocess.run(['powershell', '-Command', powershell_cmd], shell=True)
                     print(f"✅ Opened PowerShell on Windows in {path}")
                 except Exception as win_error:
                     print(f"❌ PowerShell method failed: {win_error}")
-                    # Fallback to cmd
                     try:
-                        # Convert path to Windows format and use cmd
                         win_path = path.replace('/', '\\')
                         subprocess.run(['cmd', '/c', 'start', 'cmd', '/k', f'cd /d "{win_path}"'], shell=True)
                     except Exception as win_error2:
@@ -3685,41 +3733,25 @@ class EcoFileManager(QMainWindow):
             QMessageBox.warning(self, "Error", f"Could not open terminal: {str(e)}")
             print(f"❌ Terminal opening failed: {e}")
 
-
-
-
-
-
-
-
-        
-
     def open_as_root(self):
-        """Open current directory as root using this file manager"""
         try:
             if sys.platform.startswith('linux'):
-                # Get the current path
                 current_tab = self.tab_widget.currentWidget()
                 if current_tab:
                     path = current_tab.current_path
                 else:
                     path = self.current_path
                 
-                # Validate path exists
                 if not os.path.exists(path):
                     QMessageBox.warning(self, "Invalid Path", f"The path '{path}' does not exist.")
                     return
                 
-                # Get the path to the current script/executable
                 if getattr(sys, 'frozen', False):
-                    # If the application is frozen (packaged)
                     application_path = sys.executable
                 else:
-                    # If running as a script, use the current Python interpreter and script
                     application_path = sys.executable
                     script_path = os.path.abspath(__file__)
                 
-                # Ask for confirmation
                 reply = QMessageBox.question(
                     self,
                     "Open as Root",
@@ -3733,23 +3765,18 @@ class EcoFileManager(QMainWindow):
                 if reply == QMessageBox.Yes:
                     try:
                         if getattr(sys, 'frozen', False):
-                            # Packaged application
                             cmd = ['pkexec', application_path, path]
                         else:
-                            # Running as script
                             cmd = ['pkexec', application_path, script_path, path]
                         
                         print(f"Attempting to run: {' '.join(cmd)}")
                         
-                        # Launch as root
                         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                         
-                        # Check if process started successfully
-                        time.sleep(1)  # Give it a moment to start
+                        time.sleep(1)
                         return_code = process.poll()
                         
                         if return_code is not None and return_code != 0:
-                            # Process failed, try alternative methods
                             stdout, stderr = process.communicate()
                             print(f"pkexec failed with return code {return_code}")
                             print(f"stderr: {stderr.decode()}")
@@ -3775,8 +3802,6 @@ class EcoFileManager(QMainWindow):
             QMessageBox.critical(self, "Error", f"Could not open as root: {str(e)}")
 
     def open_as_root_fallback(self, path):
-        """Fallback method if pkexec is not available"""
-        # Try different privilege escalation methods
         methods = [
             ('gksu', ['gksu']),
             ('kdesu', ['kdesu']),
@@ -3803,7 +3828,6 @@ class EcoFileManager(QMainWindow):
                             application_path = sys.executable
                             script_path = os.path.abspath(__file__)
                             if base_cmd[0] in ['gksu', 'kdesu']:
-                                # gksu/kdesu might need the command as a single string
                                 cmd = base_cmd + [f"{application_path} {script_path} {path}"]
                             else:
                                 cmd = base_cmd + [application_path, script_path, path]
@@ -3823,7 +3847,6 @@ class EcoFileManager(QMainWindow):
                         print(f"{method_name} failed: {e}")
                         continue
         
-        # If no method worked
         QMessageBox.critical(
             self,
             "Error",
@@ -3839,83 +3862,73 @@ class EcoFileManager(QMainWindow):
         )
 
     def toggle_hidden_files(self):
-        """Toggle display of hidden files (starting with .)"""
         self.show_hidden = not self.show_hidden
-        # Update filter for all file system models
+        
         filter_flags = QDir.AllEntries | QDir.NoDotAndDotDot | QDir.AllDirs
         if self.show_hidden:
             filter_flags |= QDir.Hidden
-        # Update main tree model (sidebar)
+            
         self.tree_model.setFilter(filter_flags)
-        # Update all tab models
+        
         for i in range(self.tab_widget.count()):
             tab = self.tab_widget.widget(i)
             if tab:
                 tab.list_model.setFilter(filter_flags)
-        # Update menu action check state
+                
         self.view_hidden_action.setChecked(self.show_hidden)
-        # Save the setting
         self.settings_manager.settings.setValue("showHidden", self.show_hidden)
-        # Refresh all views
         self.refresh()
 
     def update_icon_size(self, size):
-        """Update icon size for all views, respecting current view mode"""
         self.icon_size = size
-        # Update icon size for tree view
+        
         current_tab = self.tab_widget.currentWidget()
         if current_tab:
             current_tab.tree_view.setIconSize(QSize(size, size))
-        # Always update these
+            
         self.places_list.setIconSize(QSize(size // 2, size // 2))
         self.devices_pane.devices_list.setIconSize(QSize(size // 2, size // 2))
         self.tree_view.setIconSize(QSize(size // 2, size // 2))
-        # Update zoom slider position
+        
         if hasattr(self, 'zoom_slider'):
             self.zoom_slider.blockSignals(True)
             self.zoom_slider.setValue(size)
             self.zoom_slider.blockSignals(False)
-        # Save the setting
+            
         self.settings_manager.settings.setValue("iconSize", size)
 
     def get_current_view_mode(self):
-        """Get the current view mode"""
         if self.view_icons_action.isChecked():
             return 'icons'
         elif self.view_list_action.isChecked():
             return 'list'
         elif self.view_compact_action.isChecked():
             return 'compact'
-        return 'list'  # default
+        return 'list'
 
     def on_zoom_changed(self, value):
-        """Handle zoom slider change"""
         self.update_icon_size(value)
 
     def zoom_in(self):
-        """Increase icon size"""
         new_size = min(self.icon_size + 16, 128)
         self.update_icon_size(new_size)
 
     def zoom_out(self):
-        """Decrease icon size"""
         new_size = max(self.icon_size - 16, 16)
         self.update_icon_size(new_size)
 
     def reset_zoom(self):
-        """Reset icon size to default"""
         self.update_icon_size(32)
 
     def apply_theme(self, theme_name):
-        """Apply a color theme"""
         if theme_name not in COLOR_THEMES:
             return
         self.current_theme = theme_name
         theme = COLOR_THEMES[theme_name]
-        # Update theme menu check states
+        
         for action_name, action in self.theme_actions.items():
             action.setChecked(action_name == theme_name)
-        # Create palette
+            
         palette = QPalette()
         palette.setColor(QPalette.Window, QColor(theme['bg']))
         palette.setColor(QPalette.WindowText, QColor(theme['fg']))
@@ -3932,18 +3945,15 @@ class EcoFileManager(QMainWindow):
         palette.setColor(QPalette.HighlightedText, QColor(theme['bg']))
         palette.setColor(QPalette.Disabled, QPalette.Text, QColor(theme['text_secondary']))
         palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(theme['text_secondary']))
+        
         self.setPalette(palette)
         QApplication.setPalette(palette)
-        # Apply stylesheet
         self.setStyleSheet(self.generate_stylesheet(theme))
-        # Save theme preference
         self.settings_manager.settings.setValue("theme", theme_name)
 
     def apply_rounded_corners(self):
-        """Apply rounded corners to the main window (Linux/KDE specific)"""
         if sys.platform.startswith('linux'):
             try:
-                # Set window flags for rounded corners (KDE/Plasma)
                 self.setAttribute(Qt.WA_TranslucentBackground)
                 self.setStyleSheet("""
                     EcoFileManager {
@@ -3955,22 +3965,18 @@ class EcoFileManager(QMainWindow):
                     }
                 """)
             except:
-                pass  # Fallback to normal styling
+                pass
 
     def generate_stylesheet(self, theme):
-        """Generate stylesheet for the current theme with rounded corners"""
         return f"""
-            /* Main window and background */
             QMainWindow {{
                 background-color: {theme['bg']};
                 color: {theme['fg']};
             }}
-            /* Central widget */
             QWidget {{
                 background-color: {theme['bg']};
                 color: {theme['fg']};
             }}
-            /* Menu bar with rounded top corners */
             QMenuBar {{
                 background-color: {theme['bg']};
                 color: {theme['fg']};
@@ -3988,7 +3994,6 @@ class EcoFileManager(QMainWindow):
                 background-color: {theme['accent']};
                 color: {theme['bg']};
             }}
-            /* Toolbar */
             QToolBar {{
                 background-color: {theme['bg']};
                 border: none;
@@ -4013,7 +4018,6 @@ class EcoFileManager(QMainWindow):
                 background-color: {theme['accent']};
                 color: {theme['bg']};
             }}
-            /* Tree views and lists - FIXED SELECTION AND HOVER */
             QTreeView, QListView, QListWidget {{
                 background-color: {theme['bg']};
                 color: {theme['text_primary']};
@@ -4030,27 +4034,23 @@ class EcoFileManager(QMainWindow):
                 background-color: transparent;
                 color: {theme['text_primary']};
             }}
-            /* FIXED: Selection style - ensure text is visible */
             QTreeView::item:selected, QListView::item:selected, QListWidget::item:selected {{
                 background-color: {theme['accent']};
                 color: {theme['bg']};
                 border-radius: 4px;
                 border: 1px solid {theme['accent_hover']};
             }}
-            /* FIXED: Hover style - don't change text color */
             QTreeView::item:hover, QListView::item:hover, QListWidget::item:hover {{
                 background-color: {theme['surface']};
                 border: 1px solid {theme['accent_hover']};
                 border-radius: 4px;
                 color: {theme['text_primary']};
             }}
-            /* FIXED: Hover + Selected combination */
             QTreeView::item:selected:hover, QListView::item:selected:hover, QListWidget::item:selected:hover {{
                 background-color: {theme['accent_hover']};
                 color: {theme['bg']};
                 border: 1px solid {theme['accent']};
             }}
-            /* Headers */
             QHeaderView::section {{
                 background-color: {theme['surface']};
                 color: {theme['text_primary']};
@@ -4059,7 +4059,6 @@ class EcoFileManager(QMainWindow):
                 border-radius: 4px;
                 margin: 1px;
             }}
-            /* Status bar with rounded bottom corners */
             QStatusBar {{
                 background-color: {theme['bg']};
                 color: {theme['text_primary']};
@@ -4067,7 +4066,6 @@ class EcoFileManager(QMainWindow):
                 border-bottom-left-radius: 8px;
                 border-bottom-right-radius: 8px;
             }}
-            /* Combo boxes */
             QComboBox {{
                 background-color: {theme['surface']};
                 color: {theme['text_primary']};
@@ -4094,7 +4092,6 @@ class EcoFileManager(QMainWindow):
                 selection-color: {theme['bg']};
                 border-radius: 6px;
             }}
-            /* Sliders */
             QSlider::groove:horizontal {{
                 border: 1px solid {theme['border']};
                 height: 6px;
@@ -4111,7 +4108,6 @@ class EcoFileManager(QMainWindow):
             QSlider::handle:horizontal:hover {{
                 background: {theme['accent_hover']};
             }}
-            /* Menus */
             QMenu {{
                 background-color: {theme['surface']};
                 color: {theme['text_primary']};
@@ -4128,7 +4124,6 @@ class EcoFileManager(QMainWindow):
                 color: {theme['bg']};
                 border-radius: 4px;
             }}
-            /* Group boxes */
             QGroupBox {{
                 font-weight: bold;
                 color: {theme['text_primary']};
@@ -4144,7 +4139,6 @@ class EcoFileManager(QMainWindow):
                 color: {theme['text_primary']};
                 background-color: {theme['bg']};
             }}
-            /* Progress bars */
             QProgressBar {{
                 border: 1px solid {theme['border']};
                 border-radius: 4px;
@@ -4156,7 +4150,6 @@ class EcoFileManager(QMainWindow):
                 background-color: {theme['accent']};
                 border-radius: 3px;
             }}
-            /* Scrollbars */
             QScrollBar:vertical {{
                 background-color: {theme['surface']};
                 width: 12px;
@@ -4187,7 +4180,6 @@ class EcoFileManager(QMainWindow):
             QScrollBar::handle:horizontal:hover {{
                 background-color: {theme['accent_hover']};
             }}
-            /* Tab widgets */
             QTabWidget::pane {{
                 border: 1px solid {theme['border']};
                 background-color: {theme['bg']};
@@ -4210,7 +4202,6 @@ class EcoFileManager(QMainWindow):
                 background-color: {theme['secondary']};
                 color: {theme['text_primary']};
             }}
-            /* Dock widgets */
             QDockWidget {{
                 background-color: {theme['bg']};
                 color: {theme['text_primary']};
@@ -4222,12 +4213,10 @@ class EcoFileManager(QMainWindow):
                 padding: 6px;
                 border: none;
             }}
-            /* Labels */
             QLabel {{
                 color: {theme['text_primary']};
                 background-color: transparent;
             }}
-            /* Buttons */
             QPushButton {{
                 background-color: {theme['surface']};
                 color: {theme['text_primary']};
@@ -4243,7 +4232,6 @@ class EcoFileManager(QMainWindow):
                 background-color: {theme['accent']};
                 color: {theme['bg']};
             }}
-            /* Line edits */
             QLineEdit {{
                 background-color: {theme['surface']};
                 color: {theme['text_primary']};
@@ -4251,13 +4239,11 @@ class EcoFileManager(QMainWindow):
                 border-radius: 4px;
                 padding: 4px 8px;
             }}
-            /* FIXED: Ensure text is always visible in selected items */
             QAbstractItemView {{
                 selection-background-color: {theme['accent']};
                 selection-color: {theme['bg']};
                 alternate-background-color: {theme['surface']};
             }}
-            /* FIXED: Make sure the text contrast is good */
             QTreeView::item:!selected, QListView::item:!selected, QListWidget::item:!selected {{
                 color: {theme['text_primary']};
             }}
@@ -4279,6 +4265,7 @@ class EcoFileManager(QMainWindow):
         ]
         xdg_folders.append(('File System', '/', 'drive-harddisk'))
         xdg_folders.append(('Network', '/net', 'network-workgroup'))
+        
         for name, path, icon_name in xdg_folders:
             if path and os.path.exists(path) and os.path.isdir(path):
                 item = QListWidgetItem(name)
@@ -4305,6 +4292,7 @@ class EcoFileManager(QMainWindow):
                 return path
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass
+            
         config_file = os.path.expanduser('~/.config/user-dirs.dirs')
         if os.path.exists(config_file):
             try:
@@ -4317,6 +4305,7 @@ class EcoFileManager(QMainWindow):
                                 return path
             except Exception:
                 pass
+                
         fallback_paths = {
             'HOME': os.path.expanduser('~'),
             'DESKTOP': os.path.expanduser('~/Desktop'),
@@ -4331,10 +4320,10 @@ class EcoFileManager(QMainWindow):
         return fallback_paths.get(folder_type, os.path.expanduser('~'))
 
     def update_location_combo(self):
-        # Only update the dropdown suggestions, not the current text
         current_text = self.location_combo.currentText()
         self.location_combo.clear()
         self.location_combo.addItem(self.current_path)
+        
         common_paths = [
             self.get_xdg_folder('HOME'),
             self.get_xdg_folder('DESKTOP'),
@@ -4346,10 +4335,11 @@ class EcoFileManager(QMainWindow):
             '/',
             '/tmp'
         ]
+        
         for path in common_paths:
             if path != self.current_path and path and os.path.exists(path) and os.path.isdir(path):
                 self.location_combo.addItem(path)
-        # Restore the current path in the edit field
+                
         self.location_combo.setEditText(self.current_path)
 
     def tree_view_clicked(self, index):
@@ -4363,32 +4353,27 @@ class EcoFileManager(QMainWindow):
             self.navigate_to_path(path)
 
     def navigate_to_path(self, path):
-        # Validate and normalize path - ensure it's a directory
         if not path or not os.path.exists(path) or not os.path.isdir(path):
             path = QDir.homePath()
-        # Ensure path is absolute
+            
         path = os.path.abspath(path)
         self.current_path = path
-        # Update current tab
+        
         current_tab = self.tab_widget.currentWidget()
         if current_tab:
             current_tab.navigate_to_path(path)
-            # Update tab title
             index = self.tab_widget.currentIndex()
             tab_name = os.path.basename(path) or path
             self.tab_widget.setTabText(index, tab_name)
-        # Update tree view
+            
         tree_index = self.tree_model.index(path)
         if tree_index.isValid():
             self.tree_view.setExpanded(tree_index, True)
             self.tree_view.setCurrentIndex(tree_index)
-        # Update window title
+            
         self.setWindowTitle(f"Eco File Manager - {path}")
-        # Update location combo
         self.update_location_combo()
-        # Force the location bar to show the current path
         self.location_combo.setEditText(path)
-        # Update status bar
         self.update_status_bar()
 
     def location_combo_activated(self, index):
@@ -4433,14 +4418,13 @@ class EcoFileManager(QMainWindow):
         self.navigate_to_path(self.get_xdg_folder('HOME'))
 
     def refresh(self):
-        # Refresh current tab
         current_tab = self.tab_widget.currentWidget()
         if current_tab:
             current_tab.refresh()
-        # Refresh tree view
+            
         self.tree_model.setRootPath("")
         self.tree_model.setRootPath(self.current_path)
-        # Refresh devices pane
+        
         self.devices_pane.refresh_devices()
 
     def update_status_bar(self):
@@ -4450,28 +4434,25 @@ class EcoFileManager(QMainWindow):
 
     def open_in_new_tab(self, path=None):
         if path is None:
-            # Get selected item
             current_tab = self.tab_widget.currentWidget()
             if current_tab:
                 indexes = current_tab.tree_view.selectedIndexes()
                 if indexes:
                     path = current_tab.list_model.filePath(indexes[0])
                     if not os.path.isdir(path):
-                        return  # Only open directories in new tabs
+                        return
         if path and os.path.isdir(path):
             self.new_tab(path)
 
     def open_in_new_window(self, path=None):
-        """Open selected directory in a new window"""
         if path is None:
-            # Get selected item
             current_tab = self.tab_widget.currentWidget()
             if current_tab:
                 indexes = current_tab.tree_view.selectedIndexes()
                 if indexes:
                     path = current_tab.list_model.filePath(indexes[0])
                     if not os.path.isdir(path):
-                        return  # Only open directories in new windows
+                        return
         if path and os.path.isdir(path):
             self.new_window(path)
 
@@ -4487,6 +4468,7 @@ class EcoFileManager(QMainWindow):
             if indexes:
                 self.clipboard_paths = [current_tab.list_model.filePath(index) for index in indexes if index.column() == 0]
                 self.clipboard_operation = 'cut'
+                self.cut_to_system_clipboard(self.clipboard_paths)
 
     def copy_selected(self):
         current_tab = self.tab_widget.currentWidget()
@@ -4495,24 +4477,43 @@ class EcoFileManager(QMainWindow):
             if indexes:
                 self.clipboard_paths = [current_tab.list_model.filePath(index) for index in indexes if index.column() == 0]
                 self.clipboard_operation = 'copy'
+                self.copy_to_system_clipboard(self.clipboard_paths)
 
     def paste_files(self):
-        if not self.clipboard_paths:
-            return
-        current_tab = self.tab_widget.currentWidget()
-        if current_tab:
-            if self.clipboard_operation == 'copy':
-                self.copy_files(self.clipboard_paths, current_tab.current_path)
-            elif self.clipboard_operation == 'cut':
-                self.move_files(self.clipboard_paths, current_tab.current_path)
-            self.clipboard_paths = []
-            self.clipboard_operation = None
+        if not self.paste_from_system_clipboard():
+            if not self.clipboard_paths:
+                return
+            current_tab = self.tab_widget.currentWidget()
+            if current_tab:
+                if self.clipboard_operation == 'copy':
+                    self.copy_files(self.clipboard_paths, current_tab.current_path)
+                elif self.clipboard_operation == 'cut':
+                    self.move_files(self.clipboard_paths, current_tab.current_path)
+                self.clipboard_paths = []
+                self.clipboard_operation = None
 
     def copy_files(self, source_paths, destination_dir):
         self.start_file_operation('copy', source_paths, destination_dir)
 
     def move_files(self, source_paths, destination_dir):
-        self.start_file_operation('move', source_paths, destination_dir)
+        print(f"\n=== DEBUG move_files ===")
+        print(f"destination_dir='{destination_dir}'")
+        print(f"source_paths={source_paths}")
+        
+        valid_paths = []
+        for path in source_paths:
+            if os.path.exists(path):
+                valid_paths.append(path)
+            else:
+                print(f"Warning: Source path does not exist: {path}")
+        
+        if not valid_paths:
+            print(f"ERROR: No valid files to move")
+            QMessageBox.warning(self, "No Valid Files", "No valid files to move.")
+            return
+        
+        print(f"Starting file operation with {len(valid_paths)} files")
+        self.start_file_operation('move', valid_paths, destination_dir)
 
     def start_file_operation(self, operation_type, source_paths, destination_dir):
         self.progress_dialog = EnhancedProgressDialog(f"{operation_type.capitalize()} Files", self)
@@ -4526,7 +4527,7 @@ class EcoFileManager(QMainWindow):
         self.file_operation_thread.cancelled_signal.connect(self.on_file_operation_cancelled)
         self.file_operation_thread.finished.connect(self.progress_dialog.accept)
         self.progress_dialog.rejected.connect(self.file_operation_thread.cancel)
-        # Register thread for monitoring
+        
         self.thread_monitor.register_thread(self.file_operation_thread, f"FileOperation_{operation_type}")
         self.file_operation_thread.start()
 
@@ -4542,37 +4543,64 @@ class EcoFileManager(QMainWindow):
     def on_file_operation_cancelled(self):
         QMessageBox.information(self, "Cancelled", "File operation was cancelled.")
         self.thread_monitor.unregister_thread(self.file_operation_thread)
-
+        
     def handle_file_drop(self, file_paths, destination_dir, operation):
-        """Handle file drop with conflict resolution"""
         if not file_paths:
             return
-            
-        # Check for file conflicts
+
+        destination_abs = os.path.abspath(destination_dir)
+        if not os.path.isdir(destination_abs):
+            QMessageBox.warning(self, "Invalid Destination", "Destination is not a valid directory.")
+            return
+
+        filtered_paths = []
+        for src in file_paths:
+            if not os.path.exists(src):
+                continue
+            src_abs = os.path.abspath(src)
+            dest_path = os.path.join(destination_abs, os.path.basename(src_abs))
+
+            if operation == 'move' and src_abs == os.path.abspath(dest_path):
+                print(f"Skipped self-move: {src}")
+                continue
+
+            if operation == 'move' and os.path.isdir(src_abs):
+                src_norm = os.path.normpath(src_abs)
+                dest_norm = os.path.normpath(destination_abs)
+                if dest_norm.startswith(src_norm + os.sep):
+                    QMessageBox.warning(
+                        self,
+                        "Invalid Move",
+                        f"Cannot move '{os.path.basename(src)}' into itself."
+                    )
+                    continue
+
+            filtered_paths.append(src)
+
+        if not filtered_paths:
+            QMessageBox.information(self, "Move Skipped", "All selected items were skipped (e.g., self-moves).")
+            return
+
         conflicts = []
-        for file_path in file_paths:
-            dest_path = os.path.join(destination_dir, os.path.basename(file_path))
+        for src in filtered_paths:
+            dest_path = os.path.join(destination_abs, os.path.basename(os.path.abspath(src)))
             if os.path.exists(dest_path):
-                conflicts.append((file_path, dest_path))
-        
+                conflicts.append((src, dest_path))
+
         if conflicts:
-            # Handle conflicts
-            self.resolve_file_conflicts(conflicts, destination_dir, operation)
+            self.resolve_file_conflicts(conflicts, destination_abs, operation)
         else:
-            # No conflicts, proceed normally
             if operation == 'copy':
-                self.copy_files(file_paths, destination_dir)
+                self.copy_files(filtered_paths, destination_abs)
             elif operation == 'move':
-                self.move_files(file_paths, destination_dir)
+                self.move_files(filtered_paths, destination_abs)
 
     def resolve_file_conflicts(self, conflicts, destination_dir, operation):
-        """Resolve file conflicts with user interaction"""
         global_decision = None
         apply_to_all = False
         
         for source_file, target_file in conflicts:
             if not apply_to_all:
-                # Show conflict resolution dialog
                 dialog = FileConflictDialog(source_file, target_file, self)
                 if dialog.exec_() == QDialog.Accepted:
                     decision = dialog.get_decision()
@@ -4581,14 +4609,11 @@ class EcoFileManager(QMainWindow):
                     if apply_to_all:
                         global_decision = decision
                 else:
-                    # User cancelled
                     return
             else:
                 decision = global_decision
             
-            # Apply the decision
             if decision == "replace":
-                # Remove existing file and proceed
                 try:
                     if os.path.isdir(target_file):
                         shutil.rmtree(target_file)
@@ -4599,7 +4624,6 @@ class EcoFileManager(QMainWindow):
                     continue
                     
             elif decision == "rename":
-                # Generate new name
                 base, ext = os.path.splitext(target_file)
                 counter = 1
                 new_target = f"{base} ({counter}){ext}"
@@ -4611,7 +4635,6 @@ class EcoFileManager(QMainWindow):
             elif decision == "skip":
                 continue
             
-            # Perform the operation for this file
             if operation == 'copy':
                 try:
                     if os.path.isdir(source_file):
@@ -4626,7 +4649,6 @@ class EcoFileManager(QMainWindow):
                 except Exception as e:
                     QMessageBox.warning(self, "Error", f"Could not move {source_file}: {str(e)}")
         
-        # Refresh after handling all conflicts
         self.refresh()
 
     def new_folder(self):
@@ -4653,7 +4675,7 @@ class EcoFileManager(QMainWindow):
             file_path = os.path.join(current_tab.current_path, name)
             try:
                 with open(file_path, 'w') as f:
-                    pass  # Create empty file
+                    pass
                 self.refresh()
             except FileExistsError:
                 QMessageBox.warning(self, "Error", "A file with this name already exists.")
@@ -4702,16 +4724,14 @@ class EcoFileManager(QMainWindow):
         
         item_count = len(indexes)
         
-        # Safety checks
         total_size = 0
         for index in indexes:
             path = current_tab.list_model.filePath(index)
             if os.path.isfile(path):
                 total_size += os.path.getsize(path)
         
-        # Enhanced warning message
         warning_msg = f"Permanently delete {item_count} item(s)?\nThis action cannot be undone."
-        if total_size > 1024*1024:  # More than 1MB
+        if total_size > 1024*1024:
             warning_msg += f"\nTotal size: {total_size/(1024*1024):.1f} MB"
         
         reply = QMessageBox.question(
@@ -4725,7 +4745,6 @@ class EcoFileManager(QMainWindow):
         if reply != QMessageBox.Yes:
             return
         
-        # Perform deletion with progress feedback for large operations
         failed_deletions = []
         successful_count = 0
         
@@ -4743,7 +4762,6 @@ class EcoFileManager(QMainWindow):
             
             path = current_tab.list_model.filePath(index)
             try:
-                # Double-check before deleting
                 if not os.path.exists(path):
                     failed_deletions.append((path, "File no longer exists"))
                     continue
@@ -4759,7 +4777,6 @@ class EcoFileManager(QMainWindow):
         if item_count > 10:
             progress.close()
         
-        # Show results
         if successful_count and not failed_deletions:
             QMessageBox.information(self, "Success", 
                                   f"Successfully deleted {successful_count} item(s)")
@@ -4774,11 +4791,9 @@ class EcoFileManager(QMainWindow):
         self.refresh()
 
     def move_to_trash(self, file_paths):
-        """Move files to trash using multiple methods"""
         if not file_paths:
             return
         try:
-            # Method 1: Try gio.Trash (Python 3.4+)
             try:
                 import gi
                 gi.require_version('Gio', '2.0')
@@ -4791,7 +4806,7 @@ class EcoFileManager(QMainWindow):
                 return
             except (ImportError, AttributeError, Exception):
                 pass
-            # Method 2: Try trash-cli if available
+                
             if shutil.which('trash'):
                 try:
                     for path in file_paths:
@@ -4800,15 +4815,13 @@ class EcoFileManager(QMainWindow):
                     return
                 except Exception:
                     pass
-            # Method 3: Manual trash directory creation and move
+                    
             self.manual_move_to_trash(file_paths)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to move files to trash: {str(e)}")
 
     def manual_move_to_trash(self, file_paths):
-        """Manually move files to trash directory following FreeDesktop.org Trash Specification"""
         try:
-            # Get the appropriate trash directory based on filesystem
             trash_dirs = self.get_trash_directories()
             if not trash_dirs:
                 QMessageBox.critical(self, "Error", "Could not find or create trash directories")
@@ -4830,7 +4843,6 @@ class EcoFileManager(QMainWindow):
                     print(f"Error moving {file_path} to trash: {e}")
                     failed_moves.append(file_path)
             
-            # Show results
             if successful_moves and not failed_moves:
                 QMessageBox.information(self, "Success", 
                                       f"Moved {len(successful_moves)} item(s) to trash")
@@ -4849,52 +4861,29 @@ class EcoFileManager(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to move files to trash: {str(e)}")
             return False
 
-    def get_trash_directories(self):
-        """Get trash directories according to FreeDesktop.org specification"""
-        # Try $XDG_DATA_HOME/Trash first
-        xdg_data_home = os.environ.get('XDG_DATA_HOME', os.path.expanduser('~/.local/share'))
-        trash_top_dir = os.path.join(xdg_data_home, 'Trash')
-        
-        files_dir = os.path.join(trash_top_dir, 'files')
-        info_dir = os.path.join(trash_top_dir, 'info')
-        
-        try:
-            os.makedirs(files_dir, exist_ok=True)
-            os.makedirs(info_dir, exist_ok=True)
-            return {'files': files_dir, 'info': info_dir}
-        except Exception as e:
-            print(f"Error creating trash directories: {e}")
-            return None
-
     def move_single_file_to_trash(self, original_path, files_dir, info_dir):
-        """Move a single file to trash with proper naming collision handling"""
         if not os.path.exists(original_path):
             raise FileNotFoundError(f"Source file does not exist: {original_path}")
         
         original_path = os.path.abspath(original_path)
         base_name = os.path.basename(original_path)
         
-        # Generate unique names for files and info files to avoid overwrites
         trash_name = self.generate_unique_filename(files_dir, base_name)
         info_filename = f"{os.path.basename(trash_name)}.trashinfo"
         info_path = os.path.join(info_dir, info_filename)
         
-        # Create proper trashinfo file content
         info_content = self.create_trashinfo_content(original_path)
         
         try:
-            # Write info file first
             with open(info_path, 'w', encoding='utf-8') as f:
                 f.write(info_content)
             
-            # Then move the file
             trash_path = os.path.join(files_dir, trash_name)
             shutil.move(original_path, trash_path)
             
             return True
             
         except Exception as e:
-            # Clean up info file if move failed
             if os.path.exists(info_path):
                 try:
                     os.remove(info_path)
@@ -4903,11 +4892,7 @@ class EcoFileManager(QMainWindow):
             raise e
 
     def create_trashinfo_content(self, original_path):
-        """Create properly formatted .trashinfo file content"""
-        # URL encode the path as required by specification
         encoded_path = urllib.parse.quote(original_path, safe='')
-        
-        # Format deletion date according to spec (YYYY-MM-DDThh:mm:ss)
         deletion_date = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         
         return f"""[Trash Info]
@@ -4916,7 +4901,6 @@ DeletionDate={deletion_date}
 """
 
     def generate_unique_filename(self, directory, base_name):
-        """Generate a unique filename in target directory to avoid overwrites"""
         name, ext = os.path.splitext(base_name)
         counter = 1
         new_name = base_name
@@ -4924,9 +4908,7 @@ DeletionDate={deletion_date}
         while os.path.exists(os.path.join(directory, new_name)):
             new_name = f"{name}.{counter}{ext}"
             counter += 1
-            # Safety limit
             if counter > 1000:
-                # Use timestamp as fallback
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                 new_name = f"{name}.{timestamp}{ext}"
                 break
@@ -4934,7 +4916,6 @@ DeletionDate={deletion_date}
         return new_name
 
     def calculate_directory_size(self, path):
-        """Calculate directory size in a non-blocking way"""
         self._cancel_size_calc = False
         total_size = 0
         try:
@@ -4947,7 +4928,6 @@ DeletionDate={deletion_date}
                     fp = os.path.join(dirpath, f)
                     if os.path.exists(fp):
                         total_size += os.path.getsize(fp)
-                # Yield to keep UI responsive every 100 files
                 if len(filenames) > 100:
                     QApplication.processEvents()
         except (PermissionError, OSError):
@@ -4955,7 +4935,6 @@ DeletionDate={deletion_date}
         return total_size
 
     def cancel_operations(self):
-        """Cancel long-running operations"""
         self._cancel_size_calc = True
         if hasattr(self, 'file_operation_thread') and self.file_operation_thread:
             self.file_operation_thread.cancel()
@@ -4970,31 +4949,29 @@ DeletionDate={deletion_date}
     def show_properties(self):
         current_tab = self.tab_widget.currentWidget()
         if not current_tab:
-            # Show properties for current directory
             path = self.current_path
         else:
             indexes = current_tab.tree_view.selectedIndexes()
             if not indexes:
-                # Show properties for current directory
                 path = current_tab.current_path
             else:
                 path = current_tab.list_model.filePath(indexes[0])
-        # Create properties dialog
+                
         dialog = QDialog(self)
         dialog.setWindowTitle("Properties")
         dialog.resize(400, 300)
         layout = QFormLayout(dialog)
-        # Basic info
+        
         name = os.path.basename(path)
         layout.addRow("Name:", QLabel(name))
-        # Type
+        
         if os.path.isdir(path):
             file_type = "Directory"
         else:
             ext = os.path.splitext(path)[1]
             file_type = f"File ({ext})" if ext else "File"
         layout.addRow("Type:", QLabel(file_type))
-        # Size
+        
         if os.path.isdir(path):
             size = self.calculate_directory_size(path)
             size_text = self.format_size(size)
@@ -5002,26 +4979,26 @@ DeletionDate={deletion_date}
             size = os.path.getsize(path)
             size_text = self.format_size(size)
         layout.addRow("Size:", QLabel(size_text))
-        # Path
+        
         layout.addRow("Path:", QLabel(path))
-        # Modified time
+        
         mtime = os.path.getmtime(path)
         mtime_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
         layout.addRow("Modified:", QLabel(mtime_str))
-        # Permissions
+        
         if os.path.isfile(path):
             try:
                 file_stat = os.stat(path)
                 permissions = oct(file_stat.st_mode)[-3:]
                 layout.addRow("Permissions:", QLabel(permissions))
-                # Executable status
+                
                 if self.is_file_executable(path):
                     layout.addRow("Executable:", QLabel("Yes"))
                 else:
                     layout.addRow("Executable:", QLabel("No"))
             except:
                 pass
-        # Buttons
+                
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(dialog.reject)
         layout.addRow(buttons)
@@ -5043,7 +5020,7 @@ DeletionDate={deletion_date}
             return
         model = current_tab.tree_view.model()
         selection = current_tab.tree_view.selectionModel()
-        # Get all items
+        
         root_index = current_tab.tree_view.rootIndex()
         for row in range(model.rowCount(root_index)):
             index = model.index(row, 0, root_index)
@@ -5053,31 +5030,26 @@ DeletionDate={deletion_date}
                 selection.select(index, QItemSelectionModel.Select)
 
     def change_view_mode(self, mode):
-        # Apply view mode to all tabs
         for i in range(self.tab_widget.count()):
             tab = self.tab_widget.widget(i)
             if tab:
                 if mode == 'icons':
-                    # For icon view, we would need to switch to QListView
-                    # This is a simplified version - in practice you might want a more complex solution
                     tab.tree_view.setColumnHidden(1, True)
                     tab.tree_view.setColumnHidden(2, True)
                     tab.tree_view.setColumnHidden(3, True)
                 elif mode == 'list':
-                    # Show all columns for detailed view
                     tab.tree_view.setColumnHidden(1, False)
                     tab.tree_view.setColumnHidden(2, False)
                     tab.tree_view.setColumnHidden(3, False)
                 elif mode == 'compact':
-                    # Compact view - show only name and size
                     tab.tree_view.setColumnHidden(1, False)
                     tab.tree_view.setColumnHidden(2, True)
                     tab.tree_view.setColumnHidden(3, True)
-        # Update menu actions
+                    
         self.view_icons_action.setChecked(mode == 'icons')
         self.view_list_action.setChecked(mode == 'list')
         self.view_compact_action.setChecked(mode == 'compact')
-        # Refresh the view
+        
         self.refresh()
 
     def toggle_toolbar(self):
@@ -5093,99 +5065,68 @@ DeletionDate={deletion_date}
             sidebar.setVisible(self.view_sidebar_action.isChecked())
 
     def show_recent(self):
-        # Placeholder for recent files functionality
         QMessageBox.information(self, "Not Implemented", "Recent files functionality will be added in a future version.")
 
     def closeEvent(self, event):
-        # Enhanced thread cleanup
         try:
-            # Cancel any ongoing operations
             self.cancel_operations()
-            # Clean up USB monitor
+            
             if hasattr(self, 'devices_pane') and hasattr(self.devices_pane, 'usb_monitor'):
                 self.devices_pane.usb_monitor.stop()
-                self.devices_pane.usb_monitor.wait(3000)  # 3 second timeout
+                self.devices_pane.usb_monitor.wait(3000)
                 if self.devices_pane.usb_monitor.isRunning():
                     self.devices_pane.usb_monitor.terminate()
                     self.devices_pane.usb_monitor.wait(2000)
-            # Clean up auto mounter
+                    
             if (hasattr(self, 'devices_pane') and hasattr(self.devices_pane, 'usb_monitor') and
                 hasattr(self.devices_pane.usb_monitor, 'auto_mounter')):
                 self.devices_pane.usb_monitor.auto_mounter.stop()
                 self.devices_pane.usb_monitor.auto_mounter.wait(3000)
-            # Clean up file operation threads
+                
             if hasattr(self, 'file_operation_thread') and self.file_operation_thread:
                 self.file_operation_thread.cancel()
                 self.file_operation_thread.wait(2000)
-            # Clean up thread monitor
+                
             self.thread_monitor.cleanup_stale_threads()
         except Exception as e:
             print(f"Cleanup error: {e}")
-        # Save window state before closing
+            
         self.settings_manager.save_window_state(self)
         super().closeEvent(event)
 
+
 def excepthook(exc_type, exc_value, exc_traceback):
-    """Global exception handler"""
     print(f"Uncaught exception: {exc_type.__name__}: {exc_value}")
-    # Log to file for debugging
     import traceback
     traceback.print_exception(exc_type, exc_value, exc_traceback)
 
-# Set global exception handler
 sys.excepthook = excepthook
 
 def handle_url_scheme(url):
-    """Handle file:// URLs and other schemes from browsers"""
     if url.startswith('file://'):
-        # Convert file URL to local path
         from urllib.parse import unquote
-        path = unquote(url[7:])  # Remove 'file://' prefix
+        path = unquote(url[7:])
         return path
     return None
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     
-    # Check dependencies before creating the main window
     check_mount_dependencies()
     
-    # Set application-wide properties
     app.setApplicationName("Eco File Manager")
     app.setApplicationVersion("1.0")
     app.setOrganizationName("Eco")
     
-    # Enhanced command line argument parsing
-    start_path = None
+    start_path = detect_launch_intent()
+    print(f"Detected launch intent: {start_path}")
     
-    # Try to get path from command line arguments
-    if len(sys.argv) > 1:
-        start_path = sys.argv[1]
-        print(f"Command line argument: {start_path}")
-        
-        # Handle URL schemes
-        if start_path.startswith('file://'):
-            start_path = handle_url_scheme(start_path)
-            print(f"Converted URL to path: {start_path}")
-    
-    # If no valid path from command line, try current directory
-    if not start_path or not os.path.exists(start_path):
-        start_path = os.getcwd()
-        print(f"Using current directory: {start_path}")
-    
-    # Special case: handle file paths - use parent directory
-    if start_path and os.path.isfile(start_path):
-        start_path = os.path.dirname(start_path)
-        print(f"File provided, using parent directory: {start_path}")
-    
-    # Final validation and fallback
-    if not start_path or not os.path.exists(start_path) or not os.path.isdir(start_path):
+    if not start_path:
         start_path = os.path.expanduser('~')
-        print(f"Fallback to home directory: {start_path}")
+        print("No path detected, using home directory")
     
     print(f"Final starting path: {start_path}")
     
-    # Create and show the main window with the validated path
     window = EcoFileManager(start_path)
     window.show()
     sys.exit(app.exec_())
