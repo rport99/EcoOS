@@ -185,6 +185,7 @@ fi
 if [ -d "$BIN_DIR" ]; then
     find "$BIN_DIR" -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
     find "$BIN_DIR" -name "*.AppImage" -exec chmod +x {} \; 2>/dev/null || true
+    find "$BIN_DIR" -name "*.*" -exec chmod +x {} \; 2>/dev/null || true
     echo "✓ Set execute permissions"
 fi
 

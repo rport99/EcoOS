@@ -3,7 +3,7 @@
 
 iso_name="EcoOS"
 iso_label="Eco_Release"
-iso_publisher="StormOS"
+iso_publisher="EcoOS"
 iso_application="StormOS Install Media"
 iso_version="v1"
 install_dir="arch"
@@ -40,4 +40,7 @@ file_permissions=(
   ["/usr/local/bin/launcher"]="0:0:755"
   ["/usr/local/bin/hyper9"]="0:0:755"
   ["/usr/local/bin/autoi"]="0:0:755"
+  ["/usr/local/bin/rustdesk"]="0:0:755"
+  ["/usr/local/bin/onlyoffice"]="0:0:755"
+  ["/usr/local/bin/eco_rec"]="0:0:755"
 )

@@ -1,0 +1,3294 @@
+#!/usr/bin/env python3
+"""
+EcoOS Screen Recorder - Enhanced Version (SSR9 with SSR10 improvements)
+A feature-rich screen recording application with modern UI and improved functionality.
+"""
+import sys
+import os
+import subprocess
+import signal
+import logging
+import time
+import json
+import threading
+import psutil
+import hashlib
+import math
+import random
+from pathlib import Path
+from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple, Any
+from enum import Enum
+
+# PyQt imports
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
+    QLabel, QComboBox, QSpinBox, QCheckBox, QGroupBox, QMessageBox, QSystemTrayIcon,
+    QMenu, QAction, QActionGroup, QStyle, QLineEdit, QFileDialog, QTextEdit, QSplitter,
+    QRadioButton, QButtonGroup, QTabWidget, QDialog, QFrame, QProgressBar, QSlider,
+    QSizePolicy, QStyleFactory, QFormLayout, QInputDialog, QDialogButtonBox, QTimeEdit,
+    QGridLayout, QScrollArea, QProgressDialog
+)
+from PyQt5.QtCore import (
+    Qt, QRect, QTimer, pyqtSignal, QPoint, QSettings, QSize, QThread, QProcess, 
+    QTime, QEvent, QCoreApplication, QMutex, QMutexLocker, QWaitCondition
+)
+from PyQt5.QtGui import (
+    QIcon, QPainter, QPen, QColor, QPixmap, QBrush, QScreen, QFont, QImage, QGuiApplication,
+    QTextCursor, QCursor
+)
+
+from PyQt5.QtCore import QLineF, QPointF
+
+
+# Setup logging with rotation
+from logging.handlers import RotatingFileHandler
+
+log_file = Path.home() / ".screen_recorder.log"
+handler = RotatingFileHandler(
+    log_file, 
+    maxBytes=1024*1024,  # 1MB
+    backupCount=5,
+    delay=True
+)
+handler.setFormatter(logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+))
+
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[
+        handler,
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Constants
+APP_NAME = "EcoOS Screen Recorder"
+VERSION = "2.1.0"
+DEFAULT_OUTPUT_DIR = Path.home() / "Videos"
+DEFAULT_SETTINGS_GROUP = "ScreenRecorder"
+MAX_CPU_USAGE = 80  # Maximum CPU usage percentage
+MAX_MEMORY_USAGE = 80  # Maximum memory usage percentage
+
+class RecordingState(Enum):
+    """Recording states for better state management"""
+    IDLE = "idle"
+    INITIALIZING = "initializing"
+    RECORDING = "recording"
+    PAUSED = "paused"
+    STOPPING = "stopping"
+    ERROR = "error"
+
+class RecordingQuality(Enum):
+    """Recording quality presets"""
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    ULTRA = "ultra"
+
+@dataclass
+class SystemResources:
+    """System resource monitoring"""
+    cpu_percent: float = 0.0
+    memory_percent: float = 0.0
+    disk_free_gb: float = 0.0
+    network_usage_mbps: float = 0.0
+
+@dataclass
+class RecordingProfile:
+    """Recording profile with optimized settings"""
+    name: str
+    video_bitrate: str
+    audio_bitrate: str
+    framerate: int
+    preset: str
+    cpu_usage: str  # low, medium, high
+    resolution: Optional[Tuple[int, int]] = None
+    
+    def get_ffmpeg_preset(self) -> str:
+        """Get FFmpeg preset based on CPU usage preference"""
+        presets = {
+            "low": "ultrafast",
+            "medium": "fast",
+            "high": "medium"
+        }
+        return presets.get(self.cpu_usage, "fast")
+
+# Modern Dark Theme with better contrast and visual hierarchy
+DARK_THEME = """
+    QMainWindow, QDialog, QWidget {
+        background-color: #1E1E2E;
+        color: #CDD6F4;
+        border: none;
+        font-family: 'Segoe UI', 'Noto Sans', sans-serif;
+        font-size: 12px;
+    }
+    QTabWidget::pane {
+        border: 1px solid #313244;
+        background-color: #181825;
+        border-radius: 6px;
+        margin: 2px;
+    }
+    QTabBar::tab {
+        background-color: #1E1E2E;
+        color: #A6ADC8;
+        padding: 8px 16px;
+        border-top-left-radius: 6px;
+        border-top-right-radius: 6px;
+        margin-right: 2px;
+        border: 1px solid #313244;
+        border-bottom: none;
+        font-size: 11px;
+    }
+    QTabBar::tab:selected {
+        background-color: #89B4FA;
+        color: #1E1E2E;
+        font-weight: bold;
+    }
+    QTabBar::tab:hover:!selected {
+        background-color: #313244;
+    }
+    QGroupBox {
+        font-weight: bold;
+        border: 1px solid #313244;
+        border-radius: 6px;
+        margin-top: 12px;
+        padding-top: 10px;
+        background-color: #181825;
+        font-size: 11px;
+    }
+    QGroupBox::title {
+        subcontrol-origin: margin;
+        left: 10px;
+        padding: 0 5px 0 5px;
+        color: #89B4FA;
+        background-color: #181825;
+    }
+    QPushButton {
+        background-color: #89B4FA;
+        color: #1E1E2E;
+        border: none;
+        padding: 6px 12px;
+        border-radius: 4px;
+        font-weight: 500;
+        min-height: 28px;
+        font-size: 11px;
+    }
+    QPushButton:hover {
+        background-color: #74C7EC;
+    }
+    QPushButton:pressed {
+        background-color: #6697B9;
+    }
+    QPushButton:disabled {
+        background-color: #45475A;
+        color: #6C7086;
+    }
+    QPushButton#recordButton {
+        background-color: #F38BA8;
+        font-weight: bold;
+        color: #1E1E2E;
+    }
+    QPushButton#recordButton:hover {
+        background-color: #FAB3C6;
+    }
+    QPushButton#recordButton:disabled {
+        background-color: #585B70;
+        color: #6C7086;
+    }
+    QPushButton#pauseButton {
+        background-color: #F9E2AF;
+        color: #1E1E2E;
+        font-weight: 500;
+    }
+    QPushButton#pauseButton:hover {
+        background-color: #FAC898;
+    }
+    QPushButton#pauseButton:disabled {
+        background-color: #585B70;
+        color: #6C7086;
+    }
+    /* Input fields */
+    QComboBox, QSpinBox, QLineEdit, QTextEdit, QTimeEdit {
+        background-color: #313244;
+        color: #CDD6F4;
+        border: 1px solid #45475A;
+        border-radius: 4px;
+        padding: 4px 6px;
+        min-height: 28px;
+        font-size: 11px;
+    }
+    QComboBox::drop-down {
+        border: none;
+        width: 25px;
+    }
+    QComboBox::down-arrow {
+        image: none;
+        border-left: 5px solid transparent;
+        border-right: 5px solid transparent;
+        border-top: 5px solid #CDD6F4;
+    }
+    QComboBox QAbstractItemView {
+        background-color: #313244;
+        color: #CDD6F4;
+        selection-background-color: #89B4FA;
+        selection-color: #1E1E2E;
+        border: 1px solid #45475A;
+        border-radius: 4px;
+        padding: 4px;
+        font-size: 11px;
+    }
+    QScrollBar:vertical {
+        background-color: #181825;
+        width: 10px;
+        border-radius: 4px;
+        margin: 0px;
+    }
+    QScrollBar::handle:vertical {
+        background-color: #45475A;
+        border-radius: 4px;
+        min-height: 20px;
+    }
+    QScrollBar::handle:vertical:hover {
+        background-color: #585B70;
+    }
+    /* Progress bars */
+    QProgressBar {
+        border: 1px solid #313244;
+        border-radius: 3px;
+        text-align: center;
+        background-color: #313244;
+        height: 10px;
+        font-size: 10px;
+    }
+    QProgressBar::chunk {
+        background-color: #89B4FA;
+        border-radius: 2px;
+    }
+    /* Tooltips */
+    QToolTip {
+        background-color: #45475A;
+        color: #CDD6F4;
+        border: 1px solid #6C7086;
+        border-radius: 3px;
+        padding: 3px 6px;
+        font-size: 11px;
+    }
+    QLabel {
+        font-size: 11px;
+    }
+    QCheckBox {
+        font-size: 11px;
+        spacing: 4px;
+    }
+    QCheckBox::indicator {
+        width: 14px;
+        height: 14px;
+    }
+    /* Status indicators */
+    .status-indicator {
+        border-radius: 3px;
+        padding: 2px 6px;
+        font-size: 10px;
+        font-weight: bold;
+    }
+    .status-idle {
+        background-color: #313244;
+        color: #A6ADC8;
+    }
+    .status-recording {
+        background-color: #F38BA8;
+        color: #1E1E2E;
+    }
+    .status-paused {
+        background-color: #F9E2AF;
+        color: #1E1E2E;
+    }
+    .status-error {
+        background-color: #F38BA8;
+        color: #1E1E2E;
+    }
+    /* Resource indicators */
+    .resource-low {
+        color: #A6E3A1;
+    }
+    .resource-medium {
+        color: #F9E2AF;
+    }
+    .resource-high {
+        color: #F38BA8;
+    }
+"""
+
+class ResourceMonitor(QThread):
+    """Thread for monitoring system resources with low CPU usage"""
+    resources_updated = pyqtSignal(SystemResources)
+    resource_warning = pyqtSignal(str, str)  # level, message
+    
+    def __init__(self):
+        super().__init__()
+        self.running = False
+        self.interval = 3  # Reduced frequency for lower CPU usage
+        self.network_start = self._get_network_bytes()
+        self.last_update = time.time()
+        self.cpu_samples = []
+        self.memory_samples = []
+        self.sample_window = 5
+        
+    def run(self):
+        self.running = True
+        while self.running:
+            try:
+                resources = self._get_resources()
+                self.resources_updated.emit(resources)
+                
+                # Check for warnings less frequently
+                current_time = time.time()
+                if int(current_time) % 10 == 0:  # Check every 10 seconds
+                    if resources.cpu_percent > MAX_CPU_USAGE:
+                        self.resource_warning.emit(
+                            "high",
+                            f"High CPU usage: {resources.cpu_percent:.1f}%"
+                        )
+                    if resources.memory_percent > MAX_MEMORY_USAGE:
+                        self.resource_warning.emit(
+                            "high",
+                            f"High memory usage: {resources.memory_percent:.1f}%"
+                        )
+                    if resources.disk_free_gb < 5:
+                        self.resource_warning.emit(
+                            "critical",
+                            f"Low disk space: {resources.disk_free_gb:.1f}GB free"
+                        )
+                
+                time.sleep(self.interval)
+            except Exception as e:
+                logger.error(f"Error in resource monitor: {e}")
+                time.sleep(self.interval)
+    
+    def _get_resources(self):
+        """Get current system resources with averaging to reduce spikes"""
+        # Get CPU with shorter interval
+        cpu_percent = psutil.cpu_percent(interval=0.05)
+        
+        # Average CPU over samples to smooth readings
+        self.cpu_samples.append(cpu_percent)
+        if len(self.cpu_samples) > self.sample_window:
+            self.cpu_samples.pop(0)
+        cpu_avg = sum(self.cpu_samples) / len(self.cpu_samples)
+        
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage(str(Path.home()))
+        
+        # Calculate network usage less frequently
+        current_time = time.time()
+        time_diff = current_time - self.last_update
+        
+        if time_diff > 1:
+            network_current = self._get_network_bytes()
+            if time_diff > 0:
+                bytes_diff = network_current - self.network_start
+                mbps = (bytes_diff * 8) / (time_diff * 1_000_000)
+            else:
+                mbps = 0
+            
+            self.network_start = network_current
+            self.last_update = current_time
+        else:
+            mbps = 0
+        
+        return SystemResources(
+            cpu_percent=cpu_avg,
+            memory_percent=memory.percent,
+            disk_free_gb=disk.free / (1024**3),
+            network_usage_mbps=mbps
+        )
+    
+    def _get_network_bytes(self):
+        """Get total network bytes sent/received"""
+        net_io = psutil.net_io_counters()
+        return net_io.bytes_sent + net_io.bytes_recv
+    
+    def stop(self):
+        self.running = False
+        self.wait(3000)
+
+class AutoRecoveryManager:
+    """Manager for automatic recovery from failures"""
+    
+    def __init__(self, max_retries=3, retry_delay=2):
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+        self.retry_count = 0
+        self.last_failure = None
+        self.recovery_enabled = True
+    
+    def attempt_recovery(self, operation, *args, **kwargs):
+        """Attempt to recover from a failed operation"""
+        for attempt in range(self.max_retries):
+            try:
+                result = operation(*args, **kwargs)
+                self.retry_count = 0
+                self.last_failure = None
+                return result
+            except Exception as e:
+                self.retry_count += 1
+                self.last_failure = e
+                logger.warning(f"Recovery attempt {attempt + 1}/{self.max_retries} failed: {e}")
+                
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (attempt + 1))
+                else:
+                    logger.error(f"All recovery attempts failed for operation: {operation.__name__}")
+                    raise
+    
+    def should_recover(self, error_type):
+        """Determine if recovery should be attempted based on error type"""
+        recoverable_errors = [
+            "ConnectionError",
+            "TimeoutError",
+            "ResourceError",
+            "FFmpegError"
+        ]
+        return any(error in str(type(error_type)) for error in recoverable_errors)
+    
+    def reset(self):
+        """Reset recovery state"""
+        self.retry_count = 0
+        self.last_failure = None
+
+class SmartRecordingOptimizer:
+    """Optimizer for 1:1 perfect capture quality"""
+    
+    def __init__(self):
+        self.profiles = self._create_profiles()
+        self.current_profile = self.profiles[RecordingQuality.ULTRA]  # Start with ultra
+        self.system_resources = SystemResources()
+        self.performance_mode = "balanced"  # ADD THIS LINE - initialize performance_mode
+    
+    def _create_profiles(self):
+        """Create optimization profiles for 1:1 quality"""
+        return {
+            RecordingQuality.LOW: RecordingProfile(
+                name="Low",
+                video_bitrate="5000k",  # High bitrate for quality
+                audio_bitrate="192k",
+                framerate=30,
+                preset="medium",
+                cpu_usage="high"
+            ),
+            RecordingQuality.MEDIUM: RecordingProfile(
+                name="Medium",
+                video_bitrate="10000k",  # Very high bitrate
+                audio_bitrate="256k",
+                framerate=30,
+                preset="slow",
+                cpu_usage="high"
+            ),
+            RecordingQuality.HIGH: RecordingProfile(
+                name="High",
+                video_bitrate="20000k",  # Extremely high bitrate
+                audio_bitrate="320k",
+                framerate=60,
+                preset="veryslow",
+                cpu_usage="high"
+            ),
+            RecordingQuality.ULTRA: RecordingProfile(
+                name="Ultra",
+                video_bitrate="40000k",  # Near-lossless bitrate
+                audio_bitrate="320k",
+                framerate=60,
+                preset="veryslow",
+                cpu_usage="high"
+            )
+        }
+    
+    def get_lossless_profile(self, resolution: Tuple[int, int]):
+        """Get near-lossless profile for 1:1 quality"""
+        # Calculate bitrate based on resolution for true 1:1 quality
+        pixels = resolution[0] * resolution[1]
+        
+        if pixels <= 1920 * 1080:  # 1080p or less
+            bitrate = "20000k"
+        elif pixels <= 2560 * 1440:  # 1440p
+            bitrate = "40000k"
+        elif pixels <= 3840 * 2160:  # 4K
+            bitrate = "80000k"
+        else:  # > 4K
+            bitrate = "120000k"
+        
+        return RecordingProfile(
+            name="Lossless",
+            video_bitrate=bitrate,
+            audio_bitrate="320k",
+            framerate=60,
+            preset="veryslow",
+            cpu_usage="high",
+            resolution=resolution
+        )
+    
+    def set_performance_mode(self, mode):
+        """Set performance mode"""
+        self.performance_mode = mode  # This now updates the initialized attribute
+        if mode == "low_power":
+            for profile in self.profiles.values():
+                profile.framerate = max(10, profile.framerate - 5)
+                bitrate_num = int(profile.video_bitrate.replace('k', ''))
+                profile.video_bitrate = f"{int(bitrate_num * 0.7)}k"
+    
+    def optimize_settings(self, resources: SystemResources, resolution: Tuple[int, int]):
+        """Optimize recording settings based on system resources"""
+        # First check performance mode
+        if self.performance_mode == "low_power":
+            if self.current_profile.name != "Low":
+                self.current_profile = self.profiles[RecordingQuality.LOW]
+        elif resources.cpu_percent > 60 or resources.memory_percent > 70:
+            if self.current_profile.name != "Low":
+                logger.info("System under load, switching to Low quality")
+                self.current_profile = self.profiles[RecordingQuality.LOW]
+        elif resources.cpu_percent < 20 and resources.memory_percent < 40:
+            if self.current_profile.name == "Low":
+                logger.info("System resources available, switching to Medium quality")
+                self.current_profile = self.profiles[RecordingQuality.MEDIUM]
+        
+        if resolution[0] * resolution[1] > 1920 * 1080:
+            self.current_profile.framerate = min(self.current_profile.framerate, 20)
+        
+        return self.current_profile
+    
+    def get_adaptive_bitrate(self, initial_bitrate: str, resources: SystemResources) -> str:
+        """Adapt bitrate based on current system load"""
+        try:
+            base_bitrate = int(initial_bitrate.replace('k', ''))
+            
+            if resources.cpu_percent > 70:
+                reduction = 0.6
+            elif resources.cpu_percent > 50:
+                reduction = 0.8
+            else:
+                reduction = 1.0
+            
+            adapted_bitrate = int(base_bitrate * reduction)
+            return f"{max(300, adapted_bitrate)}k"  # Minimum 300k
+        except:
+            return initial_bitrate
+
+class TimerDialog(QDialog):
+    """Enhanced dialog for setting custom recording time with better UX"""
+    def __init__(self, parent=None, current_time=QTime(0, 10, 0)):
+        super().__init__(parent)
+        self.setWindowTitle("Set Recording Duration")
+        self.setMinimumWidth(350)
+        self.setWindowFlags(
+            self.windowFlags() & 
+            ~Qt.WindowContextHelpButtonHint |
+            Qt.WindowStaysOnTopHint
+        )
+        self.setStyleSheet(DARK_THEME)
+        self.setup_ui(current_time)
+    
+    def setup_ui(self, current_time):
+        """Setup the dialog UI"""
+        layout = QVBoxLayout(self)
+        
+        # Title and description
+        title_label = QLabel("Set Recording Duration")
+        title_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #89B4FA;")
+        layout.addWidget(title_label)
+        
+        desc_label = QLabel("Choose a preset duration or set a custom time")
+        desc_label.setStyleSheet("color: #A6ADC8; margin-bottom: 12px;")
+        layout.addWidget(desc_label)
+        
+        # Time input
+        time_layout = QHBoxLayout()
+        time_layout.addWidget(QLabel("Duration:"))
+        self.time_edit = QTimeEdit()
+        self.time_edit.setDisplayFormat("HH:mm:ss")
+        self.time_edit.setMinimumTime(QTime(0, 0, 1))
+        self.time_edit.setMaximumTime(QTime(23, 59, 59))
+        self.time_edit.setTime(current_time)
+        time_layout.addWidget(self.time_edit)
+        layout.addLayout(time_layout)
+        
+        # Preset buttons in a grid
+        preset_group = QGroupBox("Quick Presets")
+        preset_layout = QGridLayout(preset_group)
+        
+        presets = [
+            ("30 sec", QTime(0, 0, 30)),
+            ("1 min", QTime(0, 1, 0)),
+            ("5 min", QTime(0, 5, 0)),
+            ("10 min", QTime(0, 10, 0)),
+            ("15 min", QTime(0, 15, 0)),
+            ("30 min", QTime(0, 30, 0)),
+            ("1 hour", QTime(1, 0, 0)),
+            ("2 hours", QTime(2, 0, 0))
+        ]
+        
+        for i, (text, time_val) in enumerate(presets):
+            row = i // 4
+            col = i % 4
+            btn = QPushButton(text)
+            btn.setMaximumWidth(70)
+            btn.clicked.connect(lambda checked, t=time_val: self.time_edit.setTime(t))
+            preset_layout.addWidget(btn, row, col)
+        
+        layout.addWidget(preset_group)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def get_time(self):
+        return self.time_edit.time()
+
+class PreviewWorker(QThread):
+    """Optimized worker thread for handling preview frames with raw video for high FPS"""
+    frame_ready = pyqtSignal(QImage)
+    error_occurred = pyqtSignal(str)
+    stats_updated = pyqtSignal(dict)
+    
+    def __init__(self, region, max_fps=30):
+        super().__init__()
+        self.region = region
+        self.max_fps = max_fps
+        self.running = False
+        self.process = None
+        self.frame_count = 0
+        self.dropped_frames = 0
+        self.start_time = time.time()
+        # The one_to_one flag is no longer needed to change the FFmpeg command.
+        # Scaling is now handled more efficiently by the main UI if needed.
+        
+    def run(self):
+        self.running = True
+        self.start_time = time.time()
+        display = os.environ.get('DISPLAY', ':0')
+        
+        width = self.region.width()
+        height = self.region.height()
+        
+        # Calculate the size of one raw RGB24 frame in bytes
+        # 3 bytes per pixel (R, G, B)
+        frame_size = width * height * 3
+
+        # Build a highly optimized FFmpeg command using raw video
+        cmd = [
+            'ffmpeg',
+            '-f', 'x11grab',
+            '-video_size', f'{width}x{height}',
+            '-framerate', str(self.max_fps), # Request frames at this rate
+            '-i', f'{display}+{self.region.x()},{self.region.y()}',
+            # Output raw, uncompressed video data
+            '-f', 'rawvideo',
+            '-pix_fmt', 'rgb24', # 3 bytes per pixel, perfect for QImage
+            '-loglevel', 'quiet',
+            '-' # Output to stdout
+        ]
+        
+        try:
+            self.process = subprocess.Popen(
+                cmd, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE,
+                # Use a larger buffer for better performance
+                bufsize=frame_size * 2 
+            )
+            
+            while self.running and self.process.poll() is None:
+                # Read exactly one frame's worth of data.
+                # This is a blocking call, so it waits for data.
+                raw_frame_data = self.process.stdout.read(frame_size)
+                
+                if len(raw_frame_data) != frame_size:
+                    # If we don't get a full frame, something is wrong.
+                    # Could be end of stream or an error.
+                    if len(raw_frame_data) > 0:
+                        logger.warning(f"Incomplete frame read: got {len(raw_frame_data)} bytes, expected {frame_size}")
+                    break
+                
+                # Create QImage directly from the raw RGB data.
+                # This is MUCH faster than parsing PNG.
+                # The bytes per line (stride) is width * 3.
+                image = QImage(raw_frame_data, width, height, width * 3, QImage.Format_RGB888)
+                
+                if not image.isNull():
+                    self.frame_ready.emit(image)
+                    self.frame_count += 1
+                    
+                    # Emit stats less frequently to avoid signal overhead
+                    if self.frame_count % 15 == 0:
+                        elapsed = time.time() - self.start_time
+                        if elapsed > 0:
+                            stats = {
+                                'fps': self.frame_count / elapsed,
+                                'dropped_frames': self.dropped_frames,
+                                'resolution': f'{width}x{height}'
+                            }
+                            self.stats_updated.emit(stats)
+                else:
+                    self.dropped_frames += 1
+
+        except Exception as e:
+            # Check if FFmpeg process had an error on stderr
+            if self.process and self.process.stderr:
+                stderr_output = self.process.stderr.read().decode('utf-8', errors='ignore')
+                logger.error(f"FFmpeg stderr: {stderr_output}")
+            self.error_occurred.emit(f"Preview error: {str(e)}")
+        finally:
+            self.cleanup()
+    
+    def stop(self):
+        """Stop the preview worker"""
+        if self.running:
+            self.running = False
+            self.cleanup()
+            if not self.wait(2000):
+                self.terminate()
+    
+    def cleanup(self):
+        if self.process:
+            try:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait()
+            except Exception as e:
+                logger.error(f"Error during preview cleanup: {str(e)}")
+            finally:
+                self.process = None
+
+class VolumeMeter(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(25, 80)
+        self.level = 0
+        self.peak = 0
+        self.peak_timer = 0
+        self.clipping = False
+        self.clip_count = 0
+    
+    def set_level(self, level):
+        self.level = min(max(level, 0), 100)
+        if level > self.peak:
+            self.peak = level
+            self.peak_timer = 10
+        if level >= 98:
+            self.clipping = True
+            self.clip_count = min(self.clip_count + 1, 10)
+        elif level < 95:
+            self.clipping = False
+            self.clip_count = max(0, self.clip_count - 1)
+        self.update()
+    
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # Draw background
+        painter.fillRect(self.rect(), QColor(40, 40, 40, 200))
+        
+        # Draw meter outline
+        meter_rect = self.rect().adjusted(5, 5, -5, -5)
+        painter.setBrush(QColor(60, 60, 60, 150))
+        painter.setPen(QPen(QColor(100, 100, 100), 1))
+        painter.drawRect(meter_rect)
+        
+        # Calculate level height
+        level_height = int(meter_rect.height() * (self.level / 100.0))
+        level_rect = QRect(
+            meter_rect.left(),
+            meter_rect.bottom() - level_height,
+            meter_rect.width(),
+            level_height
+        )
+        
+        # Draw level with gradient based on value
+        if self.level > 90:
+            # Red for very high levels (clipping)
+            gradient = QColor(255, 50, 50, 200)
+        elif self.level > 70:
+            # Yellow for high levels
+            gradient = QColor(255, 200, 50, 180)
+        elif self.level > 40:
+            # Green for moderate levels
+            gradient = QColor(50, 200, 50, 160)
+        else:
+            # Blue for low levels
+            gradient = QColor(50, 150, 255, 140)
+        
+        painter.setBrush(gradient)
+        painter.setPen(Qt.NoPen)
+        painter.drawRect(level_rect)
+        
+        # Draw peak indicator
+        if self.peak > 0:
+            peak_y = meter_rect.bottom() - int(meter_rect.height() * (self.peak / 100.0))
+            painter.setPen(QPen(QColor(255, 255, 255, 200), 2))
+            painter.drawLine(meter_rect.left(), peak_y, meter_rect.right(), peak_y)
+        
+        # Draw level markers
+        painter.setPen(QPen(QColor(150, 150, 150, 100), 1))
+        for i in range(0, 101, 10):
+            y_pos = meter_rect.bottom() - int(meter_rect.height() * (i / 100.0))
+            painter.drawLine(meter_rect.left(), y_pos, meter_rect.right(), y_pos)
+        
+        # Draw clipping indicator
+        if self.clipping:
+            painter.setBrush(QColor(255, 0, 0, 200))
+            painter.setPen(QPen(QColor(255, 255, 255), 1))
+            clip_size = 8
+            clip_rect = QRect(
+                meter_rect.left() + (meter_rect.width() - clip_size) // 2,
+                meter_rect.top() + 2,
+                clip_size,
+                clip_size
+            )
+            painter.drawEllipse(clip_rect)
+        
+        # Decrease peak over time
+        if self.peak_timer > 0:
+            self.peak_timer -= 1
+        else:
+            self.peak = max(0, self.peak - 0.5)
+            self.update()
+
+class PreviewWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(320, 180)
+        self.image = None
+        self.setStyleSheet("background-color: black; border: 1px solid #3E3E42;")
+        self.stats = {}
+        self.show_stats = True  # Add a state variable for showing stats
+    
+    def set_image(self, image):
+        self.image = image
+        self.update()
+    
+    def set_stats(self, stats):
+        self.stats = stats
+        self.update()
+    
+    def set_show_stats(self, show):
+        """Public method to toggle stats visibility"""
+        self.show_stats = show
+        self.update()  # Redraw the widget to apply the change
+    
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        
+        # Draw background
+        painter.fillRect(self.rect(), QColor(0, 0, 0))
+        
+        if self.image and not self.image.isNull():
+            # Scale image maintaining aspect ratio
+            pixmap = QPixmap.fromImage(self.image)
+            pixmap = pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            
+            # Center the image
+            x = (self.width() - pixmap.width()) // 2
+            y = (self.height() - pixmap.height()) // 2
+            painter.drawPixmap(x, y, pixmap)
+            
+            # Draw stats overlay ONLY if show_stats is True
+            if self.show_stats and self.stats:
+                overlay_rect = QRect(10, 10, 150, 60)
+                painter.fillRect(overlay_rect, QColor(0, 0, 0, 180))
+                painter.setPen(QColor(255, 255, 255))
+                painter.setFont(QFont("Monospace", 9))
+                
+                fps = self.stats.get('fps', 0)
+                dropped = self.stats.get('dropped_frames', 0)
+                painter.drawText(overlay_rect, Qt.AlignLeft, f"FPS: {fps:.1f}\nDropped: {dropped}")
+        else:
+            # Draw placeholder
+            painter.setPen(QColor(150, 150, 150))
+            painter.setFont(QFont("Arial", 12))
+            painter.drawText(self.rect(), Qt.AlignCenter, "Preview will appear here")
+
+class DetachablePreviewWindow(QMainWindow):
+    """A detachable window for high-quality preview"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Preview Window")
+        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
+        
+        # Create central widget with preview
+        self.preview_widget = PreviewWidget()
+        self.preview_widget.setMinimumSize(640, 480)
+        
+        # Create toolbar with controls
+        toolbar = self.addToolBar("Preview Controls")
+        
+        # FPS control
+        self.fps_label = QLabel("FPS:")
+        toolbar.addWidget(self.fps_label)
+        
+        self.fps_slider = QSlider(Qt.Horizontal)
+        self.fps_slider.setRange(1, 60)
+        self.fps_slider.setValue(30)
+        self.fps_slider.setMaximumWidth(120)
+        toolbar.addWidget(self.fps_slider)
+        
+        self.fps_value = QLabel("30")
+        toolbar.addWidget(self.fps_value)
+        
+        # NOTE: The "1:1 Ratio" checkbox is now obsolete because the new
+        # raw video method is inherently high-performance and doesn't need scaling.
+        # The FPS slider is now the primary control for performance.
+        
+        # Connect signals
+        self.fps_slider.valueChanged.connect(self.on_fps_changed)
+        
+        # Set central widget
+        central_widget = QWidget()
+        layout = QVBoxLayout(central_widget)
+        layout.addWidget(self.preview_widget)
+        self.setCentralWidget(central_widget)
+        
+        # Initialize with default size
+        self.resize(800, 600)
+        
+        # Store reference to worker
+        self.preview_worker = None
+        
+    def on_fps_changed(self, value):
+        """Handle FPS change"""
+        self.fps_value.setText(str(value))
+        if self.preview_worker:
+            self.preview_worker.max_fps = value
+    
+    def start_preview(self, region, fps=30):
+        """Start preview with specified region and FPS"""
+        if self.preview_worker:
+            self.stop_preview()
+        
+        # The new optimized PreviewWorker no longer needs a 'one_to_one' setting.
+        self.preview_worker = PreviewWorker(region, fps)
+        self.preview_worker.frame_ready.connect(self.preview_widget.set_image)
+        self.preview_worker.stats_updated.connect(self.preview_widget.set_stats)
+        self.preview_worker.error_occurred.connect(self.on_preview_error)
+        self.preview_worker.start()
+    
+    def stop_preview(self):
+        """Stop preview"""
+        if self.preview_worker:
+            self.preview_worker.stop()
+            self.preview_worker = None
+            self.preview_widget.set_image(None)
+            self.preview_widget.update()
+    
+    def on_preview_error(self, error_msg):
+        """Handle preview errors"""
+        QMessageBox.critical(self, "Preview Error", f"Preview failed: {error_msg}")
+        self.stop_preview()
+    
+    def closeEvent(self, event):
+        """Handle window close event"""
+        self.stop_preview()
+        super().closeEvent(event)
+
+class MonitorSelector(QWidget):
+    monitor_selected = pyqtSignal(QScreen, QRect)
+    
+    def __init__(self):
+        super().__init__()
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        
+        self.screens = QApplication.screens()
+        self.virtual_rect = QRect()
+        for screen in self.screens:  # FIXED: Removed enumerate()
+            self.virtual_rect = self.virtual_rect.united(screen.geometry())
+        
+        self.setGeometry(self.virtual_rect)
+        self.setMouseTracking(True)
+        self.hovered_screen = None
+        self.click_through_enabled = False
+        
+        # Create instruction label
+        self.instruction_label = QLabel("Click on the monitor you want to record", self)
+        self.instruction_label.setStyleSheet("""
+            color: white; 
+            background-color: rgba(0, 0, 0, 180); 
+            padding: 8px; 
+            font-size: 14px; 
+            font-weight: bold;
+            border-radius: 4px;
+        """)
+        self.instruction_label.setAlignment(Qt.AlignCenter)
+        self.instruction_label.setGeometry(40, 40, 300, 40)
+        
+        logger.debug("MonitorSelector initialized")
+    
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # Draw semi-transparent overlay
+        painter.setBrush(QColor(0, 0, 0, 180))
+        painter.setPen(Qt.NoPen)
+        painter.drawRect(self.rect())
+        
+        # Draw monitor outlines
+        for i, screen in enumerate(self.screens):
+            geom = screen.geometry()
+            screen_rect = geom.translated(-self.virtual_rect.topLeft())
+            
+            # Draw monitor background
+            painter.setBrush(QColor(30, 30, 30, 200))
+            painter.setPen(QPen(QColor(100, 100, 100), 1))
+            painter.drawRect(screen_rect)
+            
+            # Highlight hovered screen
+            if screen == self.hovered_screen:
+                painter.setPen(QPen(QColor(0, 120, 215), 3))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(screen_rect.adjusted(-1, -1, 1, 1))
+            
+            # Draw monitor info
+            monitor_name = screen.name() if screen.name() else f"Monitor {i+1}"
+            if screen == QApplication.primaryScreen():
+                monitor_name += " (Primary)"
+            
+            # Draw monitor label
+            label_rect = QRect(screen_rect.topLeft() + QPoint(10, 10), 
+                             screen_rect.topLeft() + QPoint(200, 80))
+            painter.fillRect(label_rect, QColor(0, 0, 0, 200))
+            painter.setPen(Qt.white)
+            font = painter.font()
+            font.setPointSize(10)
+            font.setBold(True)
+            painter.setFont(font)
+            
+            info_text = f"{monitor_name}\n{geom.width()}×{geom.height()}"
+            painter.drawText(label_rect, Qt.AlignLeft | Qt.TextWordWrap, info_text)
+            
+            # Draw monitor number
+            number_size = 24
+            number_rect = QRect(screen_rect.topLeft() + QPoint(10, 10), 
+                              screen_rect.topLeft() + QPoint(number_size + 10, number_size + 10))
+            painter.setBrush(QBrush(QColor(0, 120, 215, 200)))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(number_rect)
+            painter.setPen(Qt.white)
+            painter.drawText(number_rect, Qt.AlignCenter, str(i + 1))
+    
+    def mouseMoveEvent(self, event):
+        pos = event.pos() + self.virtual_rect.topLeft()
+        self.hovered_screen = None
+        for screen in self.screens:
+            if screen.geometry().contains(pos):
+                self.hovered_screen = screen
+                break
+        self.update()
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            pos = event.pos() + self.virtual_rect.topLeft()
+            for i, screen in enumerate(self.screens):
+                if screen.geometry().contains(pos):
+                    logger.debug(f"Monitor selected: {screen.name()}")
+                    self.monitor_selected.emit(screen, screen.geometry())
+                    self.close()
+                    break
+    
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            logger.debug("Escape pressed, closing monitor selector")
+            self.close()
+        event.accept()
+    
+    def closeEvent(self, event):
+        logger.debug("MonitorSelector closing")
+        super().closeEvent(event)
+
+class RegionSelector(QWidget):
+    """High-precision region selector with better visibility"""
+    region_selected = pyqtSignal(QRect)
+    
+    def __init__(self, screen=None):
+        super().__init__()
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        
+        self.screens = QApplication.screens()
+        
+        # Calculate virtual desktop rectangle (all screens combined)
+        self.virtual_rect = QRect()
+        for screen in self.screens:
+            self.virtual_rect = self.virtual_rect.united(screen.geometry())
+        
+        # Set window to cover all screens
+        self.setGeometry(self.virtual_rect)
+        
+        # Selection variables
+        self.start_point = QPoint()
+        self.end_point = QPoint()
+        self.current_rect = QRect()
+        self.is_selecting = False
+        
+        # UI elements
+        self.setMouseTracking(True)
+        self.show_crosshair = True
+        
+        # Create instruction label with better visibility
+        self.instruction_label = QLabel("Click and drag to select recording region", self)
+        self.instruction_label.setStyleSheet("""
+            color: white; 
+            background-color: rgba(0, 0, 0, 150);  /* Less opaque */
+            padding: 10px; 
+            font-size: 14px; 
+            font-weight: bold;
+            border-radius: 6px;
+            border: 2px solid rgba(255, 255, 255, 100);
+        """)
+        self.instruction_label.setAlignment(Qt.AlignCenter)
+        self.instruction_label.adjustSize()
+        self.instruction_label.move(20, 20)
+        
+        # Size info label
+        self.size_label = QLabel("", self)
+        self.size_label.setStyleSheet("""
+            color: white; 
+            background-color: rgba(0, 0, 0, 150); 
+            padding: 6px 10px; 
+            font-size: 12px; 
+            font-weight: bold;
+            border-radius: 4px;
+        """)
+        self.size_label.setAlignment(Qt.AlignCenter)
+        self.size_label.hide()
+        
+        logger.debug(f"RegionSelector initialized. Virtual desktop: {self.virtual_rect}")
+    
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        # Draw semi-transparent overlay - MUCH LIGHTER FOR BETTER VISIBILITY
+        painter.setBrush(QColor(0, 0, 0, 60))  # Reduced from 120 to 60 (more transparent)
+        painter.setPen(Qt.NoPen)
+        painter.drawRect(self.rect())
+        # Draw monitor outlines with subtle highlighting
+        for i, screen in enumerate(self.screens):
+            geom = screen.geometry()
+            # Translate screen geometry to widget coordinates
+            screen_rect = geom.translated(-self.virtual_rect.topLeft())
+            # Draw monitor background (very light, almost transparent)
+            painter.setBrush(QColor(30, 30, 30, 80))  # Very transparent
+            painter.setPen(QPen(QColor(100, 100, 100, 120), 1))  # Subtle borders
+            painter.drawRect(screen_rect)
+            # Draw monitor label with better visibility
+            painter.setPen(QColor(255, 255, 255, 200))
+            font = painter.font()
+            font.setPointSize(10)
+            font.setBold(True)
+            painter.setFont(font)
+            monitor_name = screen.name() if screen.name() else f"Monitor {i+1}"
+            if screen == QApplication.primaryScreen():
+                monitor_name += " (Primary)"
+            # Draw label background
+            label_bg = QRect(screen_rect.topLeft() + QPoint(5, 5), 
+                             screen_rect.topLeft() + QPoint(220, 60))
+            painter.setBrush(QColor(0, 0, 0, 150))
+            painter.setPen(Qt.NoPen)
+            painter.drawRect(label_bg)
+            # Draw monitor info
+            info_text = f"{monitor_name}\n{geom.width()}×{geom.height()}"
+            painter.drawText(label_bg, Qt.AlignLeft | Qt.TextWordWrap, info_text)
+            # Draw monitor number with highlight
+            number_size = 24
+            number_rect = QRect(screen_rect.topLeft() + QPoint(10, 10), 
+                                screen_rect.topLeft() + QPoint(number_size + 10, number_size + 10))
+            painter.setBrush(QBrush(QColor(0, 120, 215, 180)))
+            painter.setPen(QPen(QColor(255, 255, 255), 1))
+            painter.drawEllipse(number_rect)
+            painter.setPen(Qt.white)
+            painter.drawText(number_rect, Qt.AlignCenter, str(i + 1))
+        # Draw selection rectangle if active
+        if not self.current_rect.isNull():
+            # Convert to widget coordinates
+            widget_rect = self.current_rect.translated(-self.virtual_rect.topLeft())
+            # Draw selection with high visibility
+            painter.setBrush(QColor(0, 120, 215, 30))  # Very light blue fill
+            painter.setPen(QPen(QColor(0, 200, 255), 3))  # Bright blue border
+            painter.drawRect(widget_rect)
+            # Draw grid lines inside selection (subtle)
+            painter.setPen(QPen(QColor(255, 255, 255, 80), 1, Qt.DashLine))
+            # Draw grid for better precision (3x3 grid)
+            grid_lines = 3
+            cell_width = widget_rect.width() / grid_lines
+            cell_height = widget_rect.height() / grid_lines
+            for i in range(1, grid_lines):
+                # Vertical lines — FIXED: cast float to int
+                x = int(widget_rect.left() + i * cell_width)
+                painter.drawLine(x, widget_rect.top(), x, widget_rect.bottom())
+                # Horizontal lines — FIXED: cast float to int
+                y = int(widget_rect.top() + i * cell_height)
+                painter.drawLine(widget_rect.left(), y, widget_rect.right(), y)
+            # Draw corner handles with high visibility
+            handle_size = 10
+            handle_color = QColor(255, 255, 255)
+            handle_outline = QColor(0, 120, 215)
+            handles = [
+                widget_rect.topLeft(),
+                widget_rect.topRight(),
+                widget_rect.bottomLeft(),
+                widget_rect.bottomRight(),
+                widget_rect.topLeft() + QPoint(widget_rect.width() // 2, 0),  # Top middle
+                widget_rect.bottomLeft() + QPoint(widget_rect.width() // 2, 0),  # Bottom middle
+                widget_rect.topLeft() + QPoint(0, widget_rect.height() // 2),  # Left middle
+                widget_rect.topRight() + QPoint(0, widget_rect.height() // 2),  # Right middle
+            ]
+            for handle in handles:
+                # Draw handle outline
+                painter.setBrush(handle_outline)
+                painter.setPen(QPen(handle_outline, 2))
+                painter.drawEllipse(handle.x() - handle_size // 2,
+                                   handle.y() - handle_size // 2,
+                                   handle_size, handle_size)
+                # Draw handle center
+                painter.setBrush(handle_color)
+                painter.setPen(Qt.NoPen)
+                painter.drawEllipse(
+                    handle.x() - handle_size // 3,
+                    handle.y() - handle_size // 3,
+                    int(handle_size // 1.5),
+                    int(handle_size // 1.5)
+                )
+        # Draw crosshair with high visibility
+        if self.show_crosshair and not self.is_selecting:
+            cursor_pos = self.mapFromGlobal(QCursor.pos())
+            # Draw crosshair with bright color
+            painter.setPen(QPen(QColor(255, 100, 100, 200), 2))  # Bright red crosshair
+            # Horizontal line — FIXED: use int
+            painter.drawLine(int(cursor_pos.x()), 0, int(cursor_pos.x()), self.height())
+            # Vertical line — FIXED: use int
+            painter.drawLine(0, int(cursor_pos.y()), self.width(), int(cursor_pos.y()))
+            # Draw crosshair center circle
+            painter.setBrush(QColor(255, 50, 50, 180))
+            painter.setPen(QPen(QColor(255, 255, 255), 2))
+            painter.drawEllipse(cursor_pos.x() - 8, cursor_pos.y() - 8, 16, 16)
+            # Show coordinates with background for readability
+            global_pos = cursor_pos + self.virtual_rect.topLeft()
+            coord_text = f"X: {global_pos.x()}, Y: {global_pos.y()}"
+            # Draw coordinate background
+            text_rect = QRect(cursor_pos + QPoint(15, -25),
+                              cursor_pos + QPoint(120, 5))
+            painter.setBrush(QColor(0, 0, 0, 180))
+            painter.setPen(Qt.NoPen)
+            painter.drawRect(text_rect)
+            # Draw coordinate text
+            painter.setPen(QColor(255, 255, 255))
+            painter.setFont(QFont("Monospace", 10, QFont.Bold))
+            painter.drawText(text_rect, Qt.AlignLeft, coord_text)
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.is_selecting = True
+            self.start_point = event.pos() + self.virtual_rect.topLeft()
+            self.end_point = self.start_point
+            self.current_rect = QRect(self.start_point, self.end_point)
+            self.instruction_label.hide()
+            self.show_crosshair = False
+            logger.debug(f"Mouse press at widget: {event.pos()}, global: {self.start_point}")
+            self.update()
+    
+    def mouseMoveEvent(self, event):
+        if self.is_selecting:
+            self.end_point = event.pos() + self.virtual_rect.topLeft()
+            # Ensure rectangle is normalized (positive width/height)
+            self.current_rect = QRect(
+                min(self.start_point.x(), self.end_point.x()),
+                min(self.start_point.y(), self.end_point.y()),
+                abs(self.end_point.x() - self.start_point.x()),
+                abs(self.end_point.y() - self.start_point.y())
+            )
+            
+            # Update size label with better positioning
+            if self.current_rect.width() > 0 and self.current_rect.height() > 0:
+                size_text = f"{self.current_rect.width()} × {self.current_rect.height()}"
+                pos_text = f"X: {self.current_rect.x()}, Y: {self.current_rect.y()}"
+                
+                # Position label near cursor
+                cursor_pos = event.pos()
+                label_pos = cursor_pos + QPoint(20, 20)
+                self.size_label.setText(f"{size_text}\n{pos_text}")
+                self.size_label.adjustSize()
+                self.size_label.move(label_pos)
+                self.size_label.show()
+                self.size_label.setStyleSheet("""
+                    color: #00D4FF; 
+                    background-color: rgba(0, 0, 0, 200); 
+                    padding: 6px 10px; 
+                    font-size: 12px; 
+                    font-weight: bold;
+                    border-radius: 4px;
+                    border: 1px solid rgba(0, 212, 255, 100);
+                """)
+            
+            self.update()
+        else:
+            # Update crosshair position
+            self.update()
+    
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.is_selecting:
+            self.is_selecting = False
+            self.end_point = event.pos() + self.virtual_rect.topLeft()
+            
+            # Create final rectangle
+            final_rect = QRect(
+                min(self.start_point.x(), self.end_point.x()),
+                min(self.start_point.y(), self.end_point.y()),
+                abs(self.end_point.x() - self.start_point.x()),
+                abs(self.end_point.y() - self.start_point.y())
+            )
+            
+            # Validate selection
+            if final_rect.width() >= 50 and final_rect.height() >= 50:
+                logger.debug(f"Region selected: {final_rect}")
+                logger.debug(f"Size: {final_rect.width()}x{final_rect.height()}")
+                logger.debug(f"Position: X={final_rect.x()}, Y={final_rect.y()}")
+                self.region_selected.emit(final_rect)
+                self.close()
+            else:
+                logger.debug(f"Region too small: {final_rect.width()}x{final_rect.height()}")
+                self.size_label.setText("Region too small!\nMinimum: 50×50 pixels")
+                self.size_label.adjustSize()
+                self.size_label.setStyleSheet("""
+                    color: #FF6B6B; 
+                    background-color: rgba(0, 0, 0, 200); 
+                    padding: 8px 12px; 
+                    font-size: 12px; 
+                    font-weight: bold;
+                    border-radius: 4px;
+                    border: 2px solid rgba(255, 107, 107, 150);
+                """)
+                # Center the warning label
+                label_rect = self.size_label.rect()
+                label_rect.moveCenter(self.rect().center())
+                self.size_label.move(label_rect.topLeft())
+                self.size_label.show()
+                
+                # Reset after delay
+                QTimer.singleShot(2000, self.reset_selection)
+    
+    def reset_selection(self):
+        """Reset selection state"""
+        self.is_selecting = False
+        self.start_point = QPoint()
+        self.end_point = QPoint()
+        self.current_rect = QRect()
+        self.show_crosshair = True
+        self.instruction_label.show()
+        self.size_label.hide()
+        self.update()
+    
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            logger.debug("Escape pressed, closing region selector")
+            self.close()
+        elif event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
+            if not self.current_rect.isNull() and self.current_rect.width() >= 50 and self.current_rect.height() >= 50:
+                logger.debug("Enter pressed, confirming selection")
+                self.region_selected.emit(self.current_rect)
+                self.close()
+        elif event.key() == Qt.Key_Space:
+            # Spacebar to toggle grid visibility (optional feature)
+            self.update()
+        event.accept()
+    
+    def closeEvent(self, event):
+        logger.debug("RegionSelector closing")
+        self.reset_selection()
+        super().closeEvent(event)
+
+@dataclass
+class MonitorInfo:
+    name: str
+    geometry: QRect
+    is_primary: bool = False
+    custom_name: str = None
+    dpi: int = 96
+    
+    def get_display_name(self):
+        if self.custom_name:
+            return self.custom_name
+        primary_text = " (Primary)" if self.is_primary else ""
+        return f"{self.name}{primary_text} - {self.geometry.width()}×{self.geometry.height()}"
+    
+    def get_unique_id(self):
+        return f"{self.name}_{self.geometry.width()}_{self.geometry.height()}_{self.dpi}"
+
+class ScreenRecorder(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(APP_NAME)
+        self.setGeometry(100, 100, 900, 600)
+        self.setMinimumSize(800, 500)
+        self.setStyleSheet(DARK_THEME)
+        
+        # Initialize managers
+        self.resource_monitor = ResourceMonitor()
+        self.auto_recovery = AutoRecoveryManager()
+        self.optimizer = SmartRecordingOptimizer()
+        
+        # Recording state
+        self.recording_state = RecordingState.IDLE
+        self.ffmpeg_process = None
+        self.output_file = ""
+        self.region = None
+        self.selected_monitor = None
+        self.recording_time = 0
+        self.custom_output_file = False
+        self.last_error = None
+        
+        # Preview state
+        self.preview_worker = None
+        self.preview_active = False
+        
+        # Timer variables
+        self.timer_enabled = False
+        self.timer_duration = QTime(0, 10, 0)
+        self.timer_remaining = 0
+        self.countdown_timer = QTimer(self)
+        self.countdown_timer.timeout.connect(self.update_countdown)
+        self.countdown_timer.setInterval(1000)
+        
+        # Audio sources
+        self.audio_sources = self.get_audio_sources()
+        
+        # Settings
+        self.settings = QSettings("ScreenRecorder", DEFAULT_SETTINGS_GROUP)
+        self.last_region = self.load_last_region()
+        self.monitor_names = self.load_monitor_names()
+        
+        # UI update timer with reduced frequency
+        self.ui_timer = QTimer(self)
+        self.ui_timer.timeout.connect(self.update_ui)
+        self.ui_timer.start(2000)  # Update UI every 2 seconds instead of 1
+        
+        # Resource monitoring
+        self.resource_monitor.resources_updated.connect(self.on_resources_updated)
+        self.resource_monitor.resource_warning.connect(self.on_resource_warning)
+        
+        # Components
+        self.region_selector = None
+        self.monitor_selector = None
+        
+        # Performance tracking
+        self.recording_stats = {
+            'start_time': 0,
+            'frames_captured': 0,
+            'audio_levels': {'mic': 0, 'system': 0},
+            'bitrate_adjustments': 0
+        }
+        
+        # Initialize UI
+        self.setup_ui()
+        
+
+        # Connect the new checkbox AFTER setup_ui is called
+        self.show_stats_check.stateChanged.connect(self.preview_widget.set_show_stats)
+
+
+        # Check dependencies
+        self.check_dependencies()
+        
+        # Initialize output file
+        self.set_default_output_file()
+        
+        # Start resource monitoring
+        self.resource_monitor.start()
+        
+        # Initialize with smart defaults
+        self.initialize_smart_defaults()
+        
+        # Add reference to detachable preview window
+        self.detachable_preview = None
+        
+        logger.info(f"{APP_NAME} v{VERSION} initialized")
+    
+    def setup_ui(self):
+        """Setup the main UI components with enhanced layout and tabbed controls"""
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(5, 5, 5, 5)
+        main_layout.setSpacing(5)
+        
+        # Main tab widget for all controls
+        self.main_tab_widget = QTabWidget()
+        self.main_tab_widget.setMinimumHeight(400)
+        main_layout.addWidget(self.main_tab_widget, 1)
+        
+        # Create tabs
+        self.create_recording_tab()
+        self.create_settings_tab()
+        self.create_advanced_tab()
+        
+        # Create status bar
+        self.create_status_bar()
+        
+        # Create control bar
+        control_bar = self.create_control_bar()
+        main_layout.addWidget(control_bar, 0)
+
+    def create_recording_tab(self):
+        """Create the recording tab with all controls"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        # Preview group - make it scrollable for small screens
+        preview_group = QGroupBox("Preview")
+        preview_layout = QVBoxLayout(preview_group)
+        
+        self.preview_widget = PreviewWidget()
+        self.preview_widget.setMinimumSize(480, 270)  # Smaller default preview
+        self.preview_widget.setMaximumHeight(400)  # Limit maximum height
+        preview_layout.addWidget(self.preview_widget)
+        
+        # Preview controls
+        preview_controls = QHBoxLayout()
+        self.preview_btn = QPushButton("Start Preview")
+        self.preview_btn.clicked.connect(self.toggle_preview)
+        preview_controls.addWidget(self.preview_btn)
+        
+        # Add detachable preview button
+        self.detach_preview_btn = QPushButton("Detach Preview")
+        self.detach_preview_btn.clicked.connect(self.toggle_detachable_preview)
+        preview_controls.addWidget(self.detach_preview_btn)
+        
+        self.fps_label = QLabel("FPS:")
+        preview_controls.addWidget(self.fps_label)
+        
+        self.fps_slider = QSlider(Qt.Horizontal)
+        self.fps_slider.setRange(10, 30)  # Reduced range for preview
+        self.fps_slider.setValue(15)  # Lower default for preview
+        self.fps_slider.valueChanged.connect(self.on_fps_changed)
+        self.fps_slider.setMaximumWidth(120)
+        preview_controls.addWidget(self.fps_slider)
+        
+        self.fps_value = QLabel("15")
+        preview_controls.addWidget(self.fps_value)
+        
+        # --- FIX ---
+        # Add a visual separator using a QFrame
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine) # Set it to be a horizontal line
+        line.setFrameShadow(QFrame.Sunken)
+        preview_controls.addWidget(line)
+        # --- END FIX ---
+
+        # Add a checkbox to toggle FPS/stats overlay
+        self.show_stats_check = QCheckBox("Show FPS")
+        self.show_stats_check.setChecked(True)  # Default to checked
+        preview_controls.addWidget(self.show_stats_check)
+        
+        preview_controls.addStretch()
+        preview_layout.addLayout(preview_controls)
+        
+        layout.addWidget(preview_group)
+        
+        # Recording settings group
+        settings_group = QGroupBox("Recording Settings")
+        settings_layout = QVBoxLayout(settings_group)
+        
+        # Source selection
+        source_layout = QHBoxLayout()
+        source_layout.addWidget(QLabel("Source:"))
+        self.source_combo = QComboBox()
+        self.source_combo.addItems(["Full Screen", "Region", "Monitor"])
+        self.source_combo.currentTextChanged.connect(self.on_source_changed)
+        self.source_combo.setMaximumWidth(120)
+        source_layout.addWidget(self.source_combo)
+        
+        self.monitor_combo = QComboBox()
+        self.populate_monitor_combo()
+        self.monitor_combo.currentIndexChanged.connect(self.on_monitor_selected)
+        self.monitor_combo.setMaximumWidth(150)
+        source_layout.addWidget(self.monitor_combo)
+        
+        self.region_btn = QPushButton("Select Region")
+        self.region_btn.clicked.connect(self.select_region)
+        self.region_btn.setMaximumWidth(100)
+        source_layout.addWidget(self.region_btn)
+        
+        source_layout.addStretch()
+        settings_layout.addLayout(source_layout)
+        
+        # Audio selection - Modified for mutual exclusivity
+        audio_layout = QHBoxLayout()
+        audio_layout.addWidget(QLabel("Audio:"))
+        self.mic_check = QCheckBox("Microphone")
+        self.mic_check.setChecked(False)
+        self.mic_check.stateChanged.connect(self.on_audio_toggled)
+        audio_layout.addWidget(self.mic_check)
+        self.speakers_check = QCheckBox("System Audio")
+        self.speakers_check.setChecked(True)
+        self.speakers_check.stateChanged.connect(self.on_audio_toggled)
+        audio_layout.addWidget(self.speakers_check)
+        audio_layout.addStretch()
+        settings_layout.addLayout(audio_layout)
+        
+        # Audio device selection
+        audio_device_layout = QHBoxLayout()
+        audio_device_layout.addWidget(QLabel("Microphone:"))
+        self.mic_device_combo = QComboBox()
+        self.populate_mic_devices()
+        self.mic_device_combo.setMaximumWidth(200)
+        audio_device_layout.addWidget(self.mic_device_combo)
+        
+        audio_device_layout.addWidget(QLabel("System:"))
+        self.speaker_device_combo = QComboBox()
+        self.populate_speaker_devices()
+        self.speaker_device_combo.setMaximumWidth(200)
+        audio_device_layout.addWidget(self.speaker_device_combo)
+        
+        audio_device_layout.addStretch()
+        settings_layout.addLayout(audio_device_layout)
+        
+        # Audio levels
+        audio_level_layout = QHBoxLayout()
+        audio_level_layout.addWidget(QLabel("Audio Levels:"))
+        self.mic_meter = VolumeMeter()
+        audio_level_layout.addWidget(QLabel("Mic:"))
+        audio_level_layout.addWidget(self.mic_meter)
+        self.speakers_meter = VolumeMeter()
+        audio_level_layout.addWidget(QLabel("System:"))
+        audio_level_layout.addWidget(self.speakers_meter)
+        audio_level_layout.addStretch()
+        settings_layout.addLayout(audio_level_layout)
+        
+        # Format and quality
+        format_layout = QHBoxLayout()
+        format_layout.addWidget(QLabel("Format:"))
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(["mp4", "mkv", "webm"])
+        self.format_combo.currentTextChanged.connect(self.on_format_changed)
+        self.format_combo.setMaximumWidth(80)
+        format_layout.addWidget(self.format_combo)
+        
+        format_layout.addWidget(QLabel("Quality:"))
+        self.quality_combo = QComboBox()
+        self.quality_combo.addItems(["Low", "Medium", "High", "Ultra", "Lossless"])
+        self.quality_combo.setCurrentText("Medium")
+        self.quality_combo.currentTextChanged.connect(self.on_quality_changed)
+        self.quality_combo.setMaximumWidth(80)
+        format_layout.addWidget(self.quality_combo)
+        
+        format_layout.addStretch()
+        settings_layout.addLayout(format_layout)
+        
+        # Output file
+        output_layout = QHBoxLayout()
+        output_layout.addWidget(QLabel("Output:"))
+        self.output_edit = QLineEdit()
+        self.output_edit.textChanged.connect(self.on_output_changed)
+        output_layout.addWidget(self.output_edit)
+        
+        self.browse_btn = QPushButton("Browse...")
+        self.browse_btn.clicked.connect(self.browse_output)
+        self.browse_btn.setMaximumWidth(80)
+        output_layout.addWidget(self.browse_btn)
+        settings_layout.addLayout(output_layout)
+        
+        layout.addWidget(settings_group)
+        
+        # Control buttons
+        control_layout = QHBoxLayout()
+        self.record_btn = QPushButton("Start Recording")
+        self.record_btn.setObjectName("recordButton")
+        self.record_btn.clicked.connect(self.toggle_recording)
+        control_layout.addWidget(self.record_btn)
+        
+        self.pause_btn = QPushButton("Pause")
+        self.pause_btn.setObjectName("pauseButton")
+        self.pause_btn.setEnabled(False)
+        self.pause_btn.clicked.connect(self.toggle_pause)
+        control_layout.addWidget(self.pause_btn)
+        
+        control_layout.addStretch()
+        
+        # Timer controls
+        timer_layout = QHBoxLayout()
+        timer_layout.addWidget(QLabel("Timer:"))
+        self.timer_check = QCheckBox("Enable")
+        self.timer_check.stateChanged.connect(self.on_timer_changed)
+        timer_layout.addWidget(self.timer_check)
+        
+        timer_layout.addWidget(QLabel("Duration:"))
+        self.timer_time_edit = QTimeEdit()
+        self.timer_time_edit.setDisplayFormat("HH:mm:ss")
+        self.timer_time_edit.setMinimumTime(QTime(0, 0, 1))
+        self.timer_time_edit.setMaximumTime(QTime(23, 59, 59))
+        self.timer_time_edit.setTime(QTime(0, 10, 0))
+        self.timer_time_edit.setEnabled(False)
+        self.timer_time_edit.setMaximumWidth(80)
+        timer_layout.addWidget(self.timer_time_edit)
+        
+        self.set_custom_timer_btn = QPushButton("Set Custom")
+        self.set_custom_timer_btn.setEnabled(False)
+        self.set_custom_timer_btn.clicked.connect(self.set_custom_timer)
+        self.set_custom_timer_btn.setMaximumWidth(90)
+        timer_layout.addWidget(self.set_custom_timer_btn)
+        
+        self.timer_label = QLabel("00:00:00")
+        self.timer_label.setAlignment(Qt.AlignCenter)
+        self.timer_label.setMinimumWidth(70)
+        timer_layout.addWidget(self.timer_label)
+        
+        timer_layout.addStretch()
+        control_layout.addLayout(timer_layout)
+        
+        layout.addLayout(control_layout)
+        self.main_tab_widget.addTab(tab, "🎥 Recording")
+
+    def create_settings_tab(self):
+        """Tab 2: Recording Settings"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(5)
+        
+        # Quality and format settings
+        quality_group = QGroupBox("Quality Settings")
+        quality_layout = QFormLayout(quality_group)
+        quality_layout.setVerticalSpacing(3)
+        
+        # Add perfect quality checkbox FIRST
+        self.perfect_quality_check = QCheckBox("1:1 Perfect Quality")
+        self.perfect_quality_check.setToolTip("Enable lossless/near-lossless recording")
+        self.perfect_quality_check.stateChanged.connect(self.on_perfect_quality_changed)
+        quality_layout.addRow("", self.perfect_quality_check)  # Empty label for the first column
+        
+        self.quality_combo_settings = QComboBox()
+        self.quality_combo_settings.addItems(["Low", "Medium", "High", "Ultra", "Lossless"])
+        self.quality_combo_settings.currentTextChanged.connect(self.on_quality_changed)
+        quality_layout.addRow("Quality Preset:", self.quality_combo_settings)
+        
+        self.format_combo_settings = QComboBox()
+        self.format_combo_settings.addItems(["mp4", "mkv", "webm", "avi"])
+        self.format_combo_settings.currentTextChanged.connect(self.on_format_changed)
+        quality_layout.addRow("Output Format:", self.format_combo_settings)
+        
+        self.framerate_spin = QSpinBox()
+        self.framerate_spin.setRange(10, 30)  # Reduced max framerate
+        self.framerate_spin.setValue(30)      # Lower default
+        self.framerate_spin.setSuffix(" FPS")
+        self.framerate_spin.setMaximumWidth(80)
+        quality_layout.addRow("Frame Rate:", self.framerate_spin)
+        
+        # Add CRF setting for lossless quality
+        self.crf_spin = QSpinBox()
+        self.crf_spin.setRange(0, 51)
+        self.crf_spin.setValue(18)
+        self.crf_spin.setSuffix(" CRF")
+        self.crf_spin.setMaximumWidth(80)
+        self.crf_spin.setToolTip("Lower = Higher Quality (0 = lossless, 18 = high quality, 23 = default, 51 = worst)")
+        quality_layout.addRow("Quality (CRF):", self.crf_spin)
+        
+        layout.addWidget(quality_group)
+        
+        # Video settings
+        video_group = QGroupBox("Video Settings")
+        video_layout = QFormLayout(video_group)
+        video_layout.setVerticalSpacing(3)
+        
+        self.video_codec_combo = QComboBox()
+        self.video_codec_combo.addItems(["libx264", "libx265", "h264_nvenc", "h264_vaapi", "prores", "ffv1", "huffyuv"])
+        self.video_codec_combo.setCurrentText("libx264")
+        video_layout.addRow("Video Codec:", self.video_codec_combo)
+        
+        self.video_bitrate_combo = QComboBox()
+        self.video_bitrate_combo.addItems(["500k", "1000k", "2000k", "4000k", "10000k", "20000k", "Custom"])
+        self.video_bitrate_combo.setCurrentText("1000k")
+        video_layout.addRow("Video Bitrate:", self.video_bitrate_combo)
+        
+        layout.addWidget(video_group)
+        
+        # Performance settings
+        perf_group = QGroupBox("Performance")
+        perf_layout = QVBoxLayout(perf_group)
+        
+        self.adaptive_quality_check = QCheckBox("Adaptive quality")
+        self.adaptive_quality_check.setChecked(True)
+        self.adaptive_quality_check.setToolTip("Adjusts quality based on system load")
+        perf_layout.addWidget(self.adaptive_quality_check)
+        
+        self.low_power_mode_check = QCheckBox("Low power mode")
+        self.low_power_mode_check.setToolTip("Reduces CPU usage significantly")
+        self.low_power_mode_check.stateChanged.connect(self.on_low_power_changed)
+        perf_layout.addWidget(self.low_power_mode_check)
+        
+        # CPU usage slider
+        cpu_layout = QHBoxLayout()
+        cpu_layout.addWidget(QLabel("CPU Limit:"))
+        self.cpu_limit_slider = QSlider(Qt.Horizontal)
+        self.cpu_limit_slider.setRange(10, 100)
+        self.cpu_limit_slider.setValue(70)
+        self.cpu_limit_slider.setMaximumWidth(150)
+        self.cpu_limit_slider.valueChanged.connect(self.on_cpu_limit_changed)
+        cpu_layout.addWidget(self.cpu_limit_slider)
+        
+        self.cpu_limit_label = QLabel("70%")
+        cpu_layout.addWidget(self.cpu_limit_label)
+        cpu_layout.addStretch()
+        perf_layout.addLayout(cpu_layout)
+        
+        perf_layout.addStretch()
+        layout.addWidget(perf_group)
+        
+        layout.addStretch()
+        self.main_tab_widget.addTab(tab, "⚙️ Settings")
+
+    def create_advanced_tab(self):
+        """Create the advanced settings tab with scroll area"""
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        # FFmpeg settings
+        ffmpeg_group = QGroupBox("FFmpeg Settings")
+        ffmpeg_layout = QVBoxLayout(ffmpeg_group)
+        
+        self.audio_codec_combo = QComboBox()
+        self.audio_codec_combo.addItems(["aac", "libvorbis", "libopus", "mp3"])
+        self.audio_codec_combo.setCurrentText("aac")
+        ffmpeg_layout.addWidget(QLabel("Audio Codec:"))
+        ffmpeg_layout.addWidget(self.audio_codec_combo)
+        
+        self.audio_bitrate_combo = QComboBox()
+        self.audio_bitrate_combo.addItems(["64k", "96k", "128k", "192k"])
+        self.audio_bitrate_combo.setCurrentText("128k")
+        ffmpeg_layout.addWidget(QLabel("Audio Bitrate:"))
+        ffmpeg_layout.addWidget(self.audio_bitrate_combo)
+        
+        self.custom_params_edit = QTextEdit()
+        self.custom_params_edit.setPlaceholderText("Enter custom FFmpeg parameters here...")
+        self.custom_params_edit.setMaximumHeight(80)
+        ffmpeg_layout.addWidget(self.custom_params_edit)
+        
+        layout.addWidget(ffmpeg_group)
+        
+        # Recovery settings
+        recovery_group = QGroupBox("Recovery")
+        recovery_layout = QVBoxLayout(recovery_group)
+        
+        self.auto_recovery_check = QCheckBox("Auto-recovery")
+        self.auto_recovery_check.setChecked(True)
+        recovery_layout.addWidget(self.auto_recovery_check)
+        
+        retry_layout = QHBoxLayout()
+        retry_layout.addWidget(QLabel("Max retries:"))
+        self.max_retries_spin = QSpinBox()
+        self.max_retries_spin.setRange(1, 10)
+        self.max_retries_spin.setValue(3)
+        self.max_retries_spin.setMaximumWidth(60)
+        retry_layout.addWidget(self.max_retries_spin)
+        retry_layout.addStretch()
+        recovery_layout.addLayout(retry_layout)
+        
+        recovery_layout.addStretch()
+        layout.addWidget(recovery_group)
+        
+        # Advanced options
+        advanced_group = QGroupBox("Options")
+        advanced_layout = QVBoxLayout(advanced_group)
+        
+        self.mouse_clicks_check = QCheckBox("Record mouse clicks")
+        advanced_layout.addWidget(self.mouse_clicks_check)
+        
+        self.cursor_check = QCheckBox("Record cursor")
+        self.cursor_check.setChecked(True)
+        advanced_layout.addWidget(self.cursor_check)
+        
+        self.multi_thread_check = QCheckBox("Multi-threading")
+        self.multi_thread_check.setChecked(True)
+        advanced_layout.addWidget(self.multi_thread_check)
+        
+        self.hide_on_timer_start_check = QCheckBox("Hide window when starting recording with timer")
+        self.hide_on_timer_start_check.setChecked(True)
+        advanced_layout.addWidget(self.hide_on_timer_start_check)
+        
+        self.show_notification_check = QCheckBox("Show notification when recording completes")
+        self.show_notification_check.setChecked(True)
+        advanced_layout.addWidget(self.show_notification_check)
+        
+        advanced_layout.addStretch()
+        layout.addWidget(advanced_group)
+        
+        # Log
+        log_group = QGroupBox("Log")
+        log_layout = QVBoxLayout(log_group)
+        
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setMaximumHeight(150)
+        log_layout.addWidget(self.log_text)
+        
+        clear_log_btn = QPushButton("Clear Log")
+        clear_log_btn.clicked.connect(self.clear_log)
+        log_layout.addWidget(clear_log_btn)
+        
+        layout.addWidget(log_group)
+        layout.addStretch()
+        
+        scroll_area.setWidget(tab)
+        self.main_tab_widget.addTab(scroll_area, "🔧 Advanced")
+
+    def create_control_bar(self):
+        """Create the main control bar at the bottom"""
+        control_bar = QWidget()
+        control_bar.setMaximumHeight(70)
+        layout = QHBoxLayout(control_bar)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Status indicator
+        self.status_indicator = QLabel("IDLE")
+        self.status_indicator.setProperty("class", "status-indicator status-idle")
+        self.status_indicator.setMinimumWidth(60)
+        self.status_indicator.setMaximumWidth(80)
+        layout.addWidget(self.status_indicator)
+        
+        # Recording controls
+        control_buttons = QWidget()
+        control_buttons_layout = QHBoxLayout(control_buttons)
+        control_buttons_layout.setSpacing(10)
+        
+        self.record_btn = QPushButton("Start Recording")
+        self.record_btn.setObjectName("recordButton")
+        self.record_btn.clicked.connect(self.toggle_recording)
+        self.record_btn.setMinimumWidth(100)
+        control_buttons_layout.addWidget(self.record_btn)
+        
+        self.pause_btn = QPushButton("Pause")
+        self.pause_btn.setObjectName("pauseButton")
+        self.pause_btn.setEnabled(False)
+        self.pause_btn.clicked.connect(self.toggle_pause)
+        self.pause_btn.setMinimumWidth(70)
+        control_buttons_layout.addWidget(self.pause_btn)
+        
+        layout.addWidget(control_buttons)
+        layout.addStretch()
+        
+        # Recording timer display
+        timer_widget = QWidget()
+        timer_layout = QVBoxLayout(timer_widget)
+        timer_layout.setContentsMargins(5, 0, 5, 0)
+        
+        timer_label = QLabel("Recording Time:")
+        timer_label.setStyleSheet("font-size: 9px; color: #A6ADC8;")
+        timer_layout.addWidget(timer_label)
+        
+        self.timer_display = QLabel("00:00:00")
+        self.timer_display.setAlignment(Qt.AlignCenter)
+        self.timer_display.setStyleSheet("font-size: 14px; font-weight: bold; color: #89B4FA;")
+        timer_layout.addWidget(self.timer_display)
+        
+        layout.addWidget(timer_widget)
+        
+        return control_bar
+    
+    def create_status_bar(self):
+        """Create status bar with resource monitoring"""
+        status_bar = QWidget()
+        status_bar.setMaximumHeight(30)
+        layout = QHBoxLayout(status_bar)
+        layout.setContentsMargins(5, 0, 5, 0)
+        
+        # Status message
+        self.status_label = QLabel("Ready")
+        self.status_label.setMinimumWidth(150)
+        self.status_label.setMaximumWidth(200)
+        layout.addWidget(self.status_label)
+        
+        layout.addStretch()
+        
+        # Resource indicators
+        resources_widget = QWidget()
+        resources_layout = QHBoxLayout(resources_widget)
+        resources_layout.setSpacing(10)
+        
+        self.cpu_label = QLabel("CPU: --%")
+        self.cpu_label.setProperty("class", "resource-low")
+        self.cpu_label.setMinimumWidth(50)
+        resources_layout.addWidget(self.cpu_label)
+        
+        self.memory_label = QLabel("RAM: --%")
+        self.memory_label.setProperty("class", "resource-low")
+        self.memory_label.setMinimumWidth(50)
+        resources_layout.addWidget(self.memory_label)
+        
+        self.disk_label = QLabel("Disk: --GB")
+        self.disk_label.setMinimumWidth(60)
+        resources_layout.addWidget(self.disk_label)
+        
+        layout.addWidget(resources_widget)
+        
+        # Add to main window
+        self.main_tab_widget.setCornerWidget(status_bar, Qt.TopRightCorner)
+    
+    def initialize_smart_defaults(self):
+        """Initialize application with smart defaults based on system"""
+        # Detect system capabilities
+        cpu_count = psutil.cpu_count()
+        memory_gb = psutil.virtual_memory().total / (1024**3)
+        
+        # Set defaults based on system capabilities
+        if cpu_count >= 8 and memory_gb >= 16:
+            self.quality_combo.setCurrentText("High")
+            logger.info("High-end system detected, using High quality preset")
+        elif cpu_count >= 4 and memory_gb >= 8:
+            self.quality_combo.setCurrentText("Medium")
+            logger.info("Mid-range system detected, using Medium quality preset")
+        else:
+            self.quality_combo.setCurrentText("Low")
+            logger.info("Low-end system detected, using Low quality preset")
+            # Enable low power mode for low-end systems
+            self.low_power_mode_check.setChecked(True)
+            self.on_low_power_changed()
+        
+        # Set optimal source based on number of monitors
+        screens = QApplication.screens()
+        if len(screens) == 1:
+            self.source_combo.setCurrentText("Full Screen")
+        else:
+            self.source_combo.setCurrentText("Monitor")
+            self.on_source_changed("Monitor")
+        
+        # Enable system audio by default if available
+        if self.audio_sources['speakers']:
+            self.speakers_check.setChecked(True)
+        
+        # Initialize perfect quality checkbox to unchecked
+        if hasattr(self, 'perfect_quality_check'):
+            self.perfect_quality_check.setChecked(False)
+        
+        # Initialize optimizer with balanced mode
+        if hasattr(self, 'optimizer'):
+            self.optimizer.set_performance_mode("balanced")
+    
+    def check_dependencies(self):
+        """Check all dependencies with detailed error reporting"""
+        missing_deps = []
+        
+        # Check FFmpeg
+        if not self.check_ffmpeg():
+            missing_deps.append("FFmpeg")
+        
+        # Check PulseAudio (for audio)
+        try:
+            result = subprocess.run(['pactl', '--version'], 
+                                  capture_output=True, text=True)
+            if result.returncode != 0:
+                missing_deps.append("PulseAudio")
+        except:
+            missing_deps.append("PulseAudio")
+        
+        if missing_deps:
+            deps_str = ", ".join(missing_deps)
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Critical)
+            msg.setWindowTitle("Missing Dependencies")
+            msg.setText(f"The following dependencies are missing or not working:\n{deps_str}")
+            msg.setInformativeText(
+                "Please install the required dependencies:\n"
+                "• FFmpeg: sudo apt install ffmpeg\n"
+                "• PulseAudio: Usually installed by default"
+            )
+            msg.exec_()
+            sys.exit(1)
+    
+    def check_ffmpeg(self):
+        """Check if FFmpeg is installed and get version info"""
+        try:
+            result = subprocess.run(['ffmpeg', '-version'], 
+                                  capture_output=True, text=True, timeout=2)
+            if result.returncode == 0:
+                # Parse version info
+                for line in result.stdout.split('\n'):
+                    if 'ffmpeg version' in line:
+                        version = line.split()[2]
+                        logger.info(f"FFmpeg version: {version}")
+                        break
+                return True
+        except (subprocess.SubprocessError, FileNotFoundError) as e:
+            logger.error(f"FFmpeg check failed: {e}")
+        return False
+    
+    def on_resources_updated(self, resources):
+        """Handle updated system resources"""
+        # Update resource displays
+        cpu_color = "resource-low"
+        if resources.cpu_percent > 70:
+            cpu_color = "resource-high"
+        elif resources.cpu_percent > 40:
+            cpu_color = "resource-medium"
+        
+        mem_color = "resource-low"
+        if resources.memory_percent > 80:
+            mem_color = "resource-high"
+        elif resources.memory_percent > 60:
+            mem_color = "resource-medium"
+        
+        # Update UI in thread-safe manner
+        self.cpu_label.setText(f"CPU: {resources.cpu_percent:.1f}%")
+        self.cpu_label.setProperty("class", cpu_color)
+        self.cpu_label.style().polish(self.cpu_label)
+        
+        self.memory_label.setText(f"RAM: {resources.memory_percent:.1f}%")
+        self.memory_label.setProperty("class", mem_color)
+        self.memory_label.style().polish(self.memory_label)
+        
+        self.disk_label.setText(f"Disk: {resources.disk_free_gb:.1f}GB")
+        
+        # Adaptive recording adjustments
+        if self.recording_state == RecordingState.RECORDING:
+            self.adapt_recording_settings(resources)
+    
+    def on_resource_warning(self, level, message):
+        """Handle resource warnings"""
+        logger.warning(f"Resource warning ({level}): {message}")
+        
+        if level == "critical":
+            # Critical warnings require immediate action
+            self.status_label.setText(f"⚠ {message}")
+            self.status_label.setStyleSheet("color: #F38BA8; font-weight: bold;")
+            
+            # If recording and disk space is critical, stop recording
+            if "Low disk space" in message and self.recording_state == RecordingState.RECORDING:
+                QMessageBox.critical(self, "Critical Disk Space", 
+                                   "Low disk space detected. Recording will be stopped.")
+                self.stop_recording()
+    
+    def adapt_recording_settings(self, resources):
+        """Adapt recording settings based on current resources"""
+        if not hasattr(self, 'current_profile'):
+            return
+        
+        # Check CPU limit (if slider exists)
+        cpu_limit = 80  # Default value
+        if hasattr(self, 'cpu_limit_slider'):
+            cpu_limit = self.cpu_limit_slider.value()
+        
+        if resources.cpu_percent > cpu_limit:
+            # Reduce quality if CPU exceeds limit
+            if hasattr(self, 'current_profile') and self.current_profile.name != "Low":
+                logger.info(f"CPU usage ({resources.cpu_percent:.1f}%) exceeds limit ({cpu_limit}%), reducing quality")
+                self.current_profile = self.optimizer.profiles[RecordingQuality.LOW]
+        
+        # Only adapt every 15 seconds to avoid rapid changes
+        current_time = time.time()
+        if hasattr(self, 'last_adaptation') and current_time - self.last_adaptation < 15:
+            return
+        
+        self.last_adaptation = current_time
+        
+        # Get current resolution
+        if self.region:
+            resolution = (self.region.width(), self.region.height())
+        else:
+            resolution = (1920, 1080)
+        
+        # Optimize settings
+        if hasattr(self, 'optimizer'):
+            profile = self.optimizer.optimize_settings(resources, resolution)
+            
+            # Apply adaptive bitrate
+            adapted_bitrate = self.optimizer.get_adaptive_bitrate(profile.video_bitrate, resources)
+            
+            # Log changes if different from current
+            if hasattr(self, 'current_profile') and (profile.name != self.current_profile.name or adapted_bitrate != self.current_profile.video_bitrate):
+                logger.info(f"Adapting recording: {profile.name}, Bitrate: {adapted_bitrate}")
+                self.current_profile = profile
+                self.current_profile.video_bitrate = adapted_bitrate
+                if hasattr(self, 'recording_stats'):
+                    self.recording_stats['bitrate_adjustments'] += 1
+    
+    def format_time(self, seconds):
+        """Format seconds into HH:MM:SS format"""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        seconds = int(seconds % 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    
+    def load_monitor_names(self):
+        """Load custom monitor names from settings"""
+        monitor_names = {}
+        size = self.settings.beginReadArray("MonitorNames")
+        for i in range(size):
+            self.settings.setArrayIndex(i)
+            index = self.settings.value("index", type=int)
+            name = self.settings.value("name", "", type=str)
+            monitor_names[index] = name
+        self.settings.endArray()
+        return monitor_names
+    
+    def save_monitor_names(self):
+        """Save custom monitor names to settings"""
+        self.settings.beginWriteArray("MonitorNames")
+        for i, (index, name) in enumerate(self.monitor_names.items()):
+            self.settings.setArrayIndex(i)
+            self.settings.setValue("index", index)
+            self.settings.setValue("name", name)
+        self.settings.endArray()
+    
+    def load_last_region(self):
+        """Load the last selected region from settings"""
+        region_str = self.settings.value("last_region")
+        if region_str:
+            try:
+                x, y, width, height = map(int, region_str.split(","))
+                return QRect(x, y, width, height)
+            except Exception as e:
+                logger.error(f"Error loading last region: {e}")
+        return None
+    
+    def save_last_region(self):
+        """Save the last selected region to settings"""
+        if self.region:
+            region_str = f"{self.region.x()},{self.region.y()},{self.region.width()},{self.region.height()}"
+            self.settings.setValue("last_region", region_str)
+    
+    def get_audio_sources(self):
+        """Get available audio sources with better detection"""
+        sources = {
+            'microphone': [],
+            'speakers': []
+        }
+        
+        # Try multiple methods to get audio sources
+        methods = [
+            self._get_audio_sources_pactl,
+            self._get_audio_sources_fallback
+        ]
+        
+        for method in methods:
+            try:
+                result = method()
+                if result['microphone'] or result['speakers']:
+                    sources = result
+                    break
+            except Exception as e:
+                logger.debug(f"Audio detection method failed: {e}")
+        
+        # Log results
+        logger.info(f"Found {len(sources['microphone'])} microphone(s) and {len(sources['speakers'])} speaker source(s)")
+        
+        return sources
+    
+    def _get_audio_sources_pactl(self):
+        """Get audio sources using pactl"""
+        sources = {'microphone': [], 'speakers': []}
+        
+        try:
+            # Get sources
+            result = subprocess.run(['pactl', 'list', 'short', 'sources'], 
+                                  capture_output=True, text=True, timeout=2)
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    parts = line.split('\t')
+                    if len(parts) >= 2:
+                        source_name = parts[1]
+                        source_desc = parts[2] if len(parts) > 2 else source_name
+                        
+                        if 'monitor' in source_name.lower():
+                            sources['speakers'].append((source_name, f"🔊 {source_desc}"))
+                        else:
+                            sources['microphone'].append((source_name, f"🎤 {source_desc}"))
+            
+            # Get default sink monitor
+            try:
+                result = subprocess.run(['pactl', 'get-default-sink'], 
+                                      capture_output=True, text=True, timeout=1)
+                if result.returncode == 0:
+                    default_sink = result.stdout.strip()
+                    if default_sink:
+                        monitor_name = f"{default_sink}.monitor"
+                        if not any(monitor_name == name for name, _ in sources['speakers']):
+                            sources['speakers'].append((monitor_name, f"🔊 Default Output"))
+            except:
+                pass
+                
+        except Exception as e:
+            logger.debug(f"pactl method failed: {e}")
+        
+        return sources
+    
+    def _get_audio_sources_fallback(self):
+        """Fallback audio source detection"""
+        sources = {'microphone': [], 'speakers': []}
+        
+        # Common fallback sources
+        sources['speakers'].append(("default", "🔊 System Default"))
+        sources['microphone'].append(("default", "🎤 Default Microphone"))
+        
+        return sources
+    
+    def populate_monitor_combo(self):
+        """Populate the monitor combo box with enhanced info"""
+        self.monitor_combo.clear()
+        for i, screen in enumerate(QApplication.screens()):
+            name = screen.name() if screen.name() else f"Monitor {i+1}"
+            if screen == QApplication.primaryScreen():
+                name += " (Primary)"
+            
+            # Add DPI info
+            dpi = screen.logicalDotsPerInch()
+            name += f" - {screen.geometry().width()}×{screen.geometry().height()}"
+            
+            self.monitor_combo.addItem(name, i)
+    
+    def populate_mic_devices(self):
+        """Populate microphone devices combo box"""
+        self.mic_device_combo.clear()
+        if not self.audio_sources['microphone']:
+            self.mic_device_combo.addItem("No microphones found", "")
+            self.mic_device_combo.setEnabled(False)
+        else:
+            for name, desc in self.audio_sources['microphone']:
+                self.mic_device_combo.addItem(desc, name)
+    
+    def populate_speaker_devices(self):
+        """Populate speaker devices combo box"""
+        self.speaker_device_combo.clear()
+        if not self.audio_sources['speakers']:
+            self.speaker_device_combo.addItem("No system audio sources found", "")
+            self.speaker_device_combo.setEnabled(False)
+        else:
+            for name, desc in self.audio_sources['speakers']:
+                self.speaker_device_combo.addItem(desc, name)
+    
+    def on_source_changed(self, source):
+        """Handle source change with enhanced feedback"""
+        if source == "Full Screen":
+            self.monitor_combo.setEnabled(False)
+            self.region_btn.setEnabled(False)
+            
+            screen = QApplication.primaryScreen()
+            self.region = screen.geometry()
+            self.selected_monitor = screen
+            self.status_label.setText(f"Full Screen: {screen.geometry().width()}×{screen.geometry().height()}")
+        elif source == "Region":
+            self.monitor_combo.setEnabled(False)
+            self.region_btn.setEnabled(True)
+            self.selected_monitor = None
+            if self.region:
+                self.status_label.setText(f"Region: {self.region.width()}×{self.region.height()}")
+            else:
+                self.status_label.setText("No region selected")
+        elif source == "Monitor":
+            self.monitor_combo.setEnabled(True)
+            self.region_btn.setEnabled(False)
+            self.region = None
+            self.status_label.setText("Select a monitor from the dropdown")
+    
+    def on_monitor_selected(self, index):
+        """Handle monitor selection from combo box"""
+        if index >= 0:
+            monitor_index = self.monitor_combo.itemData(index)
+            screens = QApplication.screens()
+            if 0 <= monitor_index < len(screens):
+                self.selected_monitor = screens[monitor_index]
+                self.region = self.selected_monitor.geometry()
+                self.status_label.setText(
+                    f"Monitor: {self.selected_monitor.geometry().width()}×"
+                    f"{self.selected_monitor.geometry().height()}"
+                )
+    
+    def on_audio_toggled(self):
+        """Handle audio source changes and enforce mutual exclusivity"""
+        sender = self.sender()
+        
+        # If microphone is checked, uncheck speakers
+        if sender == self.mic_check and self.mic_check.isChecked():
+            self.speakers_check.setChecked(False)
+        
+        # If speakers is checked, uncheck microphone
+        elif sender == self.speakers_check and self.speakers_check.isChecked():
+            self.mic_check.setChecked(False)
+        
+        # Update UI state
+        self.mic_device_combo.setEnabled(self.mic_check.isChecked() and self.mic_device_combo.count() > 0)
+        self.speaker_device_combo.setEnabled(self.speakers_check.isChecked() and self.speaker_device_combo.count() > 0)
+    
+    def on_format_changed(self, format):
+        """Handle format change"""
+        if not self.custom_output_file:
+            base, _ = os.path.splitext(self.output_file)
+            self.output_file = f"{base}.{format}"
+            self.output_edit.setText(self.output_file)
+    
+    def on_quality_changed(self, quality):
+        """Handle quality change with 1:1 options"""
+        if quality == "Lossless":
+            # Enable perfect quality mode
+            self.perfect_quality_check.setChecked(True)
+            self.on_perfect_quality_changed(Qt.Checked)
+            logger.info("Lossless quality selected")
+        elif hasattr(self, 'perfect_quality_check') and self.perfect_quality_check.isChecked():
+            self.perfect_quality_check.setChecked(False)
+            logger.info(f"Quality changed to {quality}")
+    
+    def on_output_changed(self, text):
+        """Handle output file path change"""
+        self.output_file = text
+        self.custom_output_file = True
+    
+    def on_fps_changed(self, value):
+        """Handle FPS change"""
+        self.fps_value.setText(str(value))
+        if self.preview_active:
+            self.stop_preview()
+            self.start_preview()
+    
+    def on_timer_changed(self, state):
+        """Handle timer enable/disable"""
+        self.timer_enabled = (state == Qt.Checked)
+        self.timer_time_edit.setEnabled(self.timer_enabled)
+        self.set_custom_timer_btn.setEnabled(self.timer_enabled)
+        if self.timer_enabled:
+            self.timer_duration = self.timer_time_edit.time()
+            seconds = self.timer_duration.hour() * 3600 + self.timer_duration.minute() * 60 + self.timer_duration.second()
+            self.timer_remaining = seconds
+            self.timer_label.setText(self.format_time(seconds))
+        else:
+            self.timer_label.setText("00:00:00")
+    
+    def on_low_power_changed(self):
+        """Handle low power mode change"""
+        if hasattr(self, 'low_power_mode_check') and self.low_power_mode_check.isChecked():
+            if hasattr(self, 'optimizer'):
+                self.optimizer.set_performance_mode("low_power")
+            logger.info("Low power mode enabled")
+            # Reduce quality when low power mode is enabled
+            if hasattr(self, 'quality_combo') and self.quality_combo.currentText() != "Low":
+                self.quality_combo.setCurrentText("Low")
+        else:
+            if hasattr(self, 'optimizer'):
+                self.optimizer.set_performance_mode("balanced")
+            logger.info("Low power mode disabled")
+    
+    def on_cpu_limit_changed(self, value):
+        """Handle CPU limit change"""
+        if hasattr(self, 'cpu_limit_label'):
+            self.cpu_limit_label.setText(f"{value}%")
+        logger.info(f"CPU limit set to {value}%")
+
+    def on_perfect_quality_changed(self, state):
+        """Handle perfect quality checkbox changes"""
+        is_checked = state == Qt.Checked
+        
+        if is_checked:
+            # Enable 1:1 perfect quality mode
+            logger.info("1:1 Perfect Quality enabled")
+            
+            # Update UI to reflect perfect quality
+            if hasattr(self, 'quality_combo'):
+                self.quality_combo.setCurrentText("Lossless")
+            
+            # Disable adaptive quality since we want constant perfect quality
+            if hasattr(self, 'adaptive_quality_check'):
+                self.adaptive_quality_check.setChecked(False)
+                self.adaptive_quality_check.setEnabled(False)
+            
+            # Disable low power mode since it reduces quality
+            if hasattr(self, 'low_power_mode_check'):
+                self.low_power_mode_check.setChecked(False)
+                self.low_power_mode_check.setEnabled(False)
+            
+            # Show warning about resource usage
+            QMessageBox.information(
+                self, 
+                "Perfect Quality Mode",
+                "1:1 Perfect Quality mode enabled.\n\n"
+                "⚠️ This will use significantly more CPU and disk space.\n"
+                "Recording files will be much larger.\n\n"
+                "Recommended for: archival, professional work, or when\n"
+                "pixel-perfect accuracy is required."
+            )
+        else:
+            # Re-enable other options
+            logger.info("1:1 Perfect Quality disabled")
+            
+            if hasattr(self, 'adaptive_quality_check'):
+                self.adaptive_quality_check.setEnabled(True)
+            
+            if hasattr(self, 'low_power_mode_check'):
+                self.low_power_mode_check.setEnabled(True)
+            
+            # Switch back to a reasonable quality preset
+            if hasattr(self, 'quality_combo'):
+                self.quality_combo.setCurrentText("High")
+    
+    def browse_output(self):
+        """Open file dialog to browse for output file"""
+        current_format = self.format_combo.currentText()
+        file_filter = f"{current_format.upper()} Files (*.{current_format})"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, 
+            "Save Recording", 
+            self.output_file, 
+            file_filter
+        )
+        if file_path:
+            self.output_file = file_path
+            self.output_edit.setText(file_path)
+            self.custom_output_file = True
+    
+    def select_region(self):
+        """Open region selector with accurate coordinate handling"""
+        try:
+            # Close any existing selector
+            if self.region_selector:
+                self.region_selector.close()
+                self.region_selector = None
+            
+            # Create new region selector
+            self.region_selector = RegionSelector()
+            self.region_selector.region_selected.connect(self.on_region_selected)
+            
+            # Show the selector
+            self.region_selector.showFullScreen()
+            logger.debug("Region selector opened")
+            
+        except Exception as e:
+            logger.error(f"Error opening region selector: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to open region selector: {str(e)}")
+    
+    def on_region_selected(self, region):
+        logger.info(f"Region selected: {region}")
+        logger.info(f"Position: X={region.x()}, Y={region.y()}")
+        logger.info(f"Size: {region.width()}x{region.height()}")
+
+        if region.width() < 50 or region.height() < 50:
+            QMessageBox.warning(self, "Region Too Small", 
+                              "Please select a larger region (minimum 50×50 pixels).")
+            return
+
+        self.region = region
+        self.source_combo.setCurrentText("Region")
+        self.on_source_changed("Region")
+
+        # ✅ CRITICAL: update output filename now that region is valid
+        if not self.custom_output_file:
+            self.set_default_output_file()
+    
+    def toggle_preview(self):
+        """Toggle preview on/off with CPU optimization"""
+        if self.preview_active:
+            self.stop_preview()
+        else:
+            self.start_preview()
+    
+    def start_preview(self):
+        if self.source_combo.currentText() == "Full Screen":
+            screen = QApplication.primaryScreen()
+            self.region = screen.geometry()
+        elif self.source_combo.currentText() == "Monitor" and self.selected_monitor:
+            self.region = self.selected_monitor.geometry()
+        elif self.source_combo.currentText() == "Region" and self.region:
+            if self.region.width() < 100 or self.region.height() < 100:
+                QMessageBox.warning(self, "Region Too Small", 
+                                  "For better preview performance, please select a larger region (minimum 100×100 pixels).")
+                return
+        else:
+            QMessageBox.warning(self, "Preview", "Please select a recording source first.")
+            return
+
+        try:
+            if self.preview_active:
+                self.stop_preview()
+            time.sleep(0.1)
+
+            self.preview_active = True
+            self.preview_btn.setText("Stop Preview")
+            # ❌ DO NOT disable the button — user needs to click it to stop
+            # self.preview_btn.setEnabled(False)  ← REMOVE THIS
+
+            fps = self.fps_slider.value()
+            self.preview_worker = PreviewWorker(self.region, fps)
+            self.preview_worker.frame_ready.connect(self.preview_widget.set_image)
+            self.preview_worker.stats_updated.connect(self.preview_widget.set_stats)
+            self.preview_worker.error_occurred.connect(self.on_preview_error)
+            # Optional: connect finished to re-enable, but not needed if you don’t disable
+            self.preview_worker.start()
+
+        except Exception as e:
+            logger.error(f"Error starting preview: {e}")
+            self.preview_active = False
+            self.preview_btn.setText("Start Preview")
+            self.preview_btn.setEnabled(True)  # Re-enable on error
+            QMessageBox.critical(self, "Preview Error", f"Failed to start preview: {str(e)}")
+        
+    def stop_preview(self):
+        self.preview_active = False
+        self.preview_btn.setText("Start Preview")
+        self.preview_btn.setEnabled(True)  # Always re-enable
+        if self.preview_worker:
+            self.preview_worker.stop()
+            self.preview_worker = None
+        self.preview_widget.set_image(None)
+        self.preview_widget.update()
+    
+    def on_preview_error(self, error_msg):
+        """Handle preview errors"""
+        logger.error(f"Preview error: {error_msg}")
+        self.stop_preview()
+        QMessageBox.critical(self, "Preview Error", f"Preview failed: {error_msg}")
+
+    def toggle_detachable_preview(self):
+        """Toggle detachable preview window"""
+        if self.detachable_preview is None:
+            # Create detachable preview window
+            self.detachable_preview = DetachablePreviewWindow(self)
+            self.detachable_preview.destroyed.connect(self.on_preview_window_closed)
+            
+            # Start preview if we have a region
+            if self.region:
+                self.detachable_preview.start_preview(self.region, self.fps_slider.value())
+            
+            self.detachable_preview.show()
+            self.detach_preview_btn.setText("Close Preview")
+        else:
+            # Close detachable preview window
+            self.detachable_preview.close()
+            self.detachable_preview = None
+            self.detach_preview_btn.setText("Detach Preview")
+    
+    def on_preview_window_closed(self):
+        """Handle preview window closed"""
+        self.detachable_preview = None
+        self.detach_preview_btn.setText("Detach Preview")
+    
+    def toggle_recording(self):
+        """Toggle recording on/off with validation"""
+        if self.recording_state == RecordingState.RECORDING:
+            self.stop_recording()
+        else:
+            self.start_recording()
+    
+    def start_recording(self):
+        """Start recording with intelligent optimization"""
+        try:
+            # Update state
+            self.recording_state = RecordingState.INITIALIZING
+            self.update_status_indicator()
+            
+            # Stop preview if active
+            if self.preview_active:
+                self.stop_preview()
+            if self.detachable_preview:
+                self.detachable_preview.stop_preview()
+            
+            # Reset output file if not custom
+            if not self.custom_output_file:
+                self.set_default_output_file()
+            
+            # Determine recording region
+            if self.source_combo.currentText() == "Full Screen":
+                screen = QApplication.primaryScreen()
+                self.region = screen.geometry()
+            elif self.source_combo.currentText() == "Monitor" and self.selected_monitor:
+                self.region = self.selected_monitor.geometry()
+            elif self.source_combo.currentText() == "Region" and self.region:
+                pass
+            else:
+                QMessageBox.warning(self, "Recording", "Please select a recording source first.")
+                self.recording_state = RecordingState.IDLE
+                self.update_status_indicator()
+                return
+            
+            # Build FFmpeg command with intelligent optimization
+            cmd = self.build_ffmpeg_command()
+            
+            logger.info(f"Starting recording with command: {' '.join(cmd[:10])}...")
+            
+            # Create process
+            self.ffmpeg_process = QProcess(self)
+            self.ffmpeg_process.setProcessChannelMode(QProcess.MergedChannels)
+            
+            # Connect signals
+            self.ffmpeg_process.finished.connect(self.on_recording_finished)
+            self.ffmpeg_process.errorOccurred.connect(self.on_recording_error)
+            self.ffmpeg_process.readyReadStandardOutput.connect(self.on_recording_output)
+            
+            # Start process
+            self.ffmpeg_process.start(cmd[0], cmd[1:])
+            
+            # Wait for start
+            if not self.ffmpeg_process.waitForStarted(5000):
+                raise Exception("FFmpeg process failed to start within 5 seconds")
+            
+            # Update state
+            self.recording_state = RecordingState.RECORDING
+            self.recording_time = 0
+            self.recording_stats['start_time'] = time.time()
+            self.recording_stats['frames_captured'] = 0
+            self.recording_stats['bitrate_adjustments'] = 0
+            
+            # Update UI
+            self.record_btn.setText("Stop Recording")
+            self.pause_btn.setEnabled(True)
+            self.update_status_indicator()
+            
+            # Start timer if enabled
+            if self.timer_enabled:
+                seconds = self.timer_duration.hour() * 3600 + self.timer_duration.minute() * 60 + self.timer_duration.second()
+                self.timer_remaining = seconds
+                self.countdown_timer.start()
+                
+                if self.hide_on_timer_start_check.isChecked():
+                    self.hide()
+            
+            logger.info("Recording started successfully")
+            
+        except Exception as e:
+            logger.error(f"Error starting recording: {e}")
+            self.recording_state = RecordingState.ERROR
+            self.update_status_indicator()
+            QMessageBox.critical(self, "Recording Error", f"Failed to start recording: {str(e)}")
+            
+            # Clean up
+            if self.ffmpeg_process:
+                self.ffmpeg_process.terminate()
+                self.ffmpeg_process = None
+    
+    def build_ffmpeg_command(self):
+        """Build FFmpeg command for 1:1 perfect quality with proper file finalization"""
+        cmd = ['ffmpeg']
+        
+        # Add flags for better file handling and immediate flushing
+        cmd.extend([
+            '-threads', '0',  # Use all threads
+            '-loglevel', 'info',
+            '-flush_packets', '1',  # Flush packets immediately
+            '-fflags', '+genpts+discardcorrupt+flush_packets',  # Generate PTS and flush
+            '-avioflags', 'direct',  # Reduce buffering
+        ])
+        
+        # Video input with high precision
+        display = os.environ.get('DISPLAY', ':0')
+        cmd.extend([
+            '-f', 'x11grab',
+            '-video_size', f'{self.region.width()}x{self.region.height()}',
+            '-framerate', str(self.framerate_spin.value() if hasattr(self, 'framerate_spin') else 30),
+            '-i', f'{display}+{self.region.x()},{self.region.y()}',
+            '-probesize', '50M',  # Large probe for accurate capture
+            '-analyzeduration', '10M',
+        ])
+        
+        # Audio input - only one source based on selection (mutually exclusive)
+        audio_selected = False
+        
+        # Microphone input (only if checked AND speakers not checked)
+        if self.mic_check.isChecked() and not self.speakers_check.isChecked():
+            mic_device = self.mic_device_combo.currentData()
+            if mic_device:
+                cmd.extend(['-f', 'pulse', '-i', mic_device])
+                audio_selected = True
+                logger.info("Adding microphone audio source")
+        
+        # System audio input (only if checked AND mic not checked)
+        elif self.speakers_check.isChecked() and not self.mic_check.isChecked():
+            speaker_device = self.speaker_device_combo.currentData()
+            if speaker_device:
+                cmd.extend(['-f', 'pulse', '-i', speaker_device])
+                audio_selected = True
+                logger.info("Adding system audio source")
+        
+        # Get video codec
+        video_codec = self.video_codec_combo.currentText()
+        
+        # Video encoding settings for 1:1 quality
+        if self.perfect_quality_check.isChecked() or self.quality_combo.currentText() == "Lossless":
+            # Lossless or near-lossless settings
+            if video_codec == "libx264":
+                cmd.extend([
+                    '-c:v', 'libx264',
+                    '-preset', 'veryslow',  # Slowest for best quality
+                    '-crf', '0',  # Lossless
+                    '-qp', '0',  # Lossless quantization
+                    '-x264-params', 'keyint=60:min-keyint=60:scenecut=0',  # Constant quality
+                ])
+            elif video_codec == "libx265":
+                cmd.extend([
+                    '-c:v', 'libx265',
+                    '-preset', 'veryslow',
+                    '-x265-params', 'lossless=1:keyint=60:min-keyint=60',
+                ])
+            elif video_codec in ["prores", "ffv1", "huffyuv"]:
+                # These are lossless codecs
+                cmd.extend(['-c:v', video_codec])
+                if video_codec == "prores":
+                    cmd.extend(['-profile:v', '3'])  # HQ Profile
+                elif video_codec == "ffv1":
+                    cmd.extend(['-level', '3', '-coder', '1', '-context', '1', '-g', '1'])
+            else:
+                # Fallback for other codecs
+                cmd.extend([
+                    '-c:v', video_codec,
+                    '-preset', 'veryslow',
+                    '-crf', '0',
+                ])
+            
+            # Pixel format for perfect quality
+            cmd.extend(['-pix_fmt', 'yuv444p'])  # Full color resolution (no chroma subsampling)
+        else:
+            # Regular quality settings
+            bitrate = self.video_bitrate_combo.currentText() if hasattr(self, 'video_bitrate_combo') else "2000k"
+            if bitrate == "Custom":
+                bitrate = "20000k"  # Default high bitrate
+            
+            cmd.extend([
+                '-c:v', video_codec,
+                '-preset', 'slow',  # Good balance
+                '-crf', str(self.crf_spin.value() if hasattr(self, 'crf_spin') else 23),
+                '-b:v', bitrate,
+                '-maxrate', f'{int(bitrate.replace("k", "")) * 2}k',  # Double for peaks
+                '-bufsize', '8M',
+            ])
+        
+        # Audio settings - simplified for single audio source
+        if audio_selected:
+            # Audio is input index 1 (video is 0)
+            cmd.extend([
+                '-map', '0:v',  # Map video stream
+                '-map', '1:a',  # Map audio stream
+                '-c:a', self.audio_codec_combo.currentText(),
+                '-b:a', self.audio_bitrate_combo.currentText(),
+            ])
+        else:
+            # No audio selected
+            cmd.extend(['-an'])  # No audio
+            logger.info("No audio selected for recording")
+        
+        # Add mouse click recording if enabled
+        if self.mouse_clicks_check.isChecked():
+            cmd.extend(['-draw_mouse', '1'])
+        
+        # Get output format
+        output_format = self.format_combo.currentText()
+        
+        # Format-specific optimizations for better file finalization
+        if output_format == "mp4":
+            cmd.extend([
+                '-movflags', '+faststart+write_colr',  # Optimize for web streaming + color info
+                '-f', 'mp4',
+            ])
+        elif output_format == "mkv":
+            cmd.extend([
+                '-f', 'matroska',
+                '-write_crc32', '1',  # Add CRC checksums
+            ])
+        else:
+            cmd.extend(['-f', output_format])
+        
+        # Metadata for better file organization
+        cmd.extend([
+            '-metadata', f'title={APP_NAME} Recording',
+            '-metadata', f'creation_time={datetime.now().isoformat()}',
+        ])
+        
+        # Force output format flags for immediate writing
+        cmd.extend([
+            '-max_interleave_delta', '0',  # Reduce interleaving delay
+        ])
+        
+        # Output file with overwrite flag
+        cmd.extend(['-y', self.output_file])
+        
+        return cmd
+        
+    def on_recording_output(self):
+        """Handle output from FFmpeg process"""
+        if self.ffmpeg_process:
+            output = self.ffmpeg_process.readAll().data().decode('utf-8', errors='ignore').strip()
+            if output:
+                # Parse for important information
+                if 'frame=' in output:
+                    try:
+                        # Extract frame count
+                        parts = output.split()
+                        for part in parts:
+                            if part.startswith('frame='):
+                                frame_str = part.split('=')[1]
+                                self.recording_stats['frames_captured'] = int(frame_str)
+                                break
+                    except:
+                        pass
+                
+                # Log important messages
+                if 'error' in output.lower() or 'failed' in output.lower():
+                    logger.error(f"FFmpeg error: {output}")
+                elif 'speed=' in output:
+                    if random.random() < 0.05:  # Reduced logging frequency
+                        logger.debug(f"FFmpeg status: {output}")
+    
+    def on_recording_error(self, error):
+        """Handle errors from FFmpeg process"""
+        error_msg = f"FFmpeg process error: {error}"
+        logger.error(error_msg)
+        
+        if self.recording_state == RecordingState.RECORDING:
+            self.recording_state = RecordingState.ERROR
+            self.update_status_indicator()
+            
+            # Attempt auto-recovery if enabled
+            if hasattr(self, 'auto_recovery_check') and self.auto_recovery_check.isChecked() and self.auto_recovery.should_recover(error):
+                try:
+                    logger.info("Attempting auto-recovery...")
+                    self.auto_recovery.attempt_recovery(self.start_recording)
+                    return
+                except:
+                    pass
+            
+            QMessageBox.critical(self, "Recording Error", 
+                               f"Recording encountered an error:\n{error_msg}")
+    
+    def on_recording_finished(self, exit_code, exit_status):
+        """Handle recording completion"""
+        logger.info(f"Recording finished with exit code: {exit_code}, status: {exit_status}")
+        
+        # Reset state
+        self.ffmpeg_process = None
+        self.recording_state = RecordingState.IDLE
+        self.recording_time = 0
+        
+        # Update UI
+        self.record_btn.setText("Start Recording")
+        self.pause_btn.setText("Pause")
+        self.pause_btn.setEnabled(False)
+        self.update_status_indicator()
+        
+        # Stop timer
+        if self.countdown_timer.isActive():
+            self.countdown_timer.stop()
+        
+        # Show notification if enabled
+        if hasattr(self, 'show_notification_check') and self.show_notification_check.isChecked():
+            self.show_notification("Recording Complete", 
+                                 f"Recording saved to:\n{self.output_file}")
+        
+        # Show window if it was hidden
+        if self.isHidden():
+            self.show()
+        
+        logger.info("Recording completed successfully")
+    
+    def stop_recording(self):
+        """Stop recording gracefully and ensure file is properly finalized"""
+        if self.recording_state != RecordingState.RECORDING:
+            return
+        
+        self.recording_state = RecordingState.STOPPING
+        self.update_status_indicator()
+        
+        try:
+            if self.ffmpeg_process:
+                # Check if process exists and is running
+                if self.ffmpeg_process.state() == QProcess.Running:
+                    logger.info("Stopping recording gracefully...")
+                    
+                    # Method 1: Send 'q' to FFmpeg to quit gracefully
+                    self.ffmpeg_process.write(b'q')
+                    
+                    # Wait for process to finish with timeout
+                    if not self.ffmpeg_process.waitForFinished(5000):  # 5 seconds
+                        logger.warning("FFmpeg didn't finish gracefully, trying SIGINT...")
+                        
+                        # Method 2: Send SIGINT (Ctrl+C equivalent)
+                        self.ffmpeg_process.terminate()
+                        
+                        if not self.ffmpeg_process.waitForFinished(2000):
+                            logger.error("FFmpeg still not finished, forcing kill...")
+                            
+                            # Method 3: Force kill
+                            self.ffmpeg_process.kill()
+                            self.ffmpeg_process.waitForFinished(1000)
+            
+            # Check if file exists and has size
+            if os.path.exists(self.output_file):
+                file_size = os.path.getsize(self.output_file)
+                logger.info(f"Recording saved: {self.output_file} ({file_size / (1024*1024):.2f} MB)")
+                
+                # Force filesystem sync
+                try:
+                    os.sync()
+                except:
+                    pass
+                
+                # Update file manager with dbus notification
+                self.update_file_manager(self.output_file)
+        
+        except Exception as e:
+            logger.error(f"Error stopping recording: {e}")
+        finally:
+            # Clean up process reference
+            self.ffmpeg_process = None
+    
+    def toggle_pause(self):
+        """Toggle recording pause/resume"""
+        if self.recording_state == RecordingState.RECORDING:
+            self.recording_state = RecordingState.PAUSED
+            self.pause_btn.setText("Resume")
+            if self.ffmpeg_process:
+                # Pause by sending SIGSTOP
+                self.ffmpeg_process.suspend()
+        
+        elif self.recording_state == RecordingState.PAUSED:
+            self.recording_state = RecordingState.RECORDING
+            self.pause_btn.setText("Pause")
+            if self.ffmpeg_process:
+                self.ffmpeg_process.resume()
+        
+        self.update_status_indicator()
+    
+    def update_status_indicator(self):
+        """Update the status indicator based on current state"""
+        state_text = self.recording_state.value.upper()
+        
+        # Update indicator
+        self.status_indicator.setText(state_text)
+        
+        # Clear existing classes
+        for cls in ["status-idle", "status-recording", "status-paused", "status-error"]:
+            self.status_indicator.setProperty("class", "")
+        
+        # Set appropriate class
+        if self.recording_state == RecordingState.IDLE:
+            self.status_indicator.setProperty("class", "status-indicator status-idle")
+            self.status_label.setText("Ready")
+        elif self.recording_state == RecordingState.RECORDING:
+            self.status_indicator.setProperty("class", "status-indicator status-recording")
+            self.status_label.setText("Recording...")
+        elif self.recording_state == RecordingState.PAUSED:
+            self.status_indicator.setProperty("class", "status-indicator status-paused")
+            self.status_label.setText("Paused")
+        elif self.recording_state in [RecordingState.ERROR, RecordingState.STOPPING]:
+            self.status_indicator.setProperty("class", "status-indicator status-error")
+            if self.last_error:
+                self.status_label.setText(f"Error: {self.last_error}")
+            else:
+                self.status_label.setText("Error occurred")
+        elif self.recording_state == RecordingState.INITIALIZING:
+            self.status_indicator.setProperty("class", "status-indicator status-idle")
+            self.status_label.setText("Initializing...")
+        
+        # Force style update
+        self.status_indicator.style().polish(self.status_indicator)
+    
+    def update_countdown(self):
+        """Update countdown timer"""
+        if self.recording_state != RecordingState.RECORDING:
+            return
+        
+        if self.timer_remaining > 0:
+            self.timer_remaining -= 1
+            self.timer_label.setText(self.format_time(self.timer_remaining))
+            
+            # Warning at 30 seconds
+            if self.timer_remaining == 30:
+                self.show_notification("Time Warning", "30 seconds remaining")
+            
+            # Warning at 10 seconds
+            elif self.timer_remaining == 10:
+                self.show_notification("Time Warning", "10 seconds remaining")
+        
+        else:
+            logger.info("Timer expired, stopping recording")
+            self.stop_recording()
+    
+    def update_ui(self):
+        """Update UI elements with intelligent timing"""
+        # Update recording timer
+        if self.recording_state == RecordingState.RECORDING:
+            self.recording_time += 2  # Increment by 2 since timer runs every 2 seconds
+            self.timer_display.setText(self.format_time(self.recording_time))
+        
+        # Update audio meters less frequently
+        current_time = time.time()
+        if hasattr(self, 'last_audio_update'):
+            if current_time - self.last_audio_update < 2:  # Update every 2 seconds
+                return
+        
+        self.last_audio_update = current_time
+        
+        # Simulate audio levels
+        if self.recording_state != RecordingState.RECORDING:
+            current_time = time.time()
+            mic_level = 20 + 10 * math.sin(current_time * 1)  # Reduced frequency
+            speaker_level = 25 + 15 * math.sin(current_time * 1.5)
+            
+            self.mic_meter.set_level(mic_level)
+            self.speakers_meter.set_level(speaker_level)
+    
+    def set_default_output_file(self):
+        if not self.custom_output_file:
+            videos_dir = Path.home() / "Videos" / "Screen Recordings"
+            videos_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            source = self.source_combo.currentText().replace(" ", "_").lower()
+
+            if source == "full_screen":
+                source_info = "fullscreen"
+            elif source == "region":
+                if self.region and self.region.width() >= 50 and self.region.height() >= 50:
+                    source_info = f"region_{self.region.width()}x{self.region.height()}"
+                else:
+                    source_info = "region"
+            elif source == "monitor" and self.selected_monitor:
+                monitor_name = self.selected_monitor.name() or "monitor"
+                if self.region:
+                    source_info = f"{monitor_name}_{self.region.width()}x{self.region.height()}"
+                else:
+                    source_info = monitor_name
+            else:
+                source_info = "recording"
+
+            format_ext = self.format_combo.currentText()
+            filename = f"{timestamp}_{source_info}.{format_ext}"
+            self.output_file = str(videos_dir / filename)
+
+            # Prevent marking as custom on auto-fill
+            self.output_edit.blockSignals(True)
+            self.output_edit.setText(self.output_file)
+            self.output_edit.blockSignals(False)
+    
+    def clear_log(self):
+        """Clear the log"""
+        self.log_text.clear()
+    
+    def set_custom_timer(self):
+        """Open dialog to set custom recording time"""
+        dialog = TimerDialog(self, self.timer_time_edit.time())
+        result = dialog.exec_()
+        if result == QDialog.Accepted:
+            self.timer_time_edit.setTime(dialog.get_time())
+            self.timer_duration = self.timer_time_edit.time()
+            seconds = self.timer_duration.hour() * 3600 + self.timer_duration.minute() * 60 + self.timer_duration.second()
+            self.timer_remaining = seconds
+            self.timer_label.setText(self.format_time(seconds))
+    
+    def update_file_manager(self, file_path):
+        """Update file manager to refresh file display"""
+        try:
+            # Method 1: Use gvfs-info to trigger refresh
+            subprocess.run(['gvfs-info', '-a', 'standard::size', file_path], 
+                          capture_output=True, timeout=1)
+        except:
+            pass
+        
+        try:
+            # Method 2: Use gio to trigger file change notification
+            subprocess.run(['gio', 'info', file_path], 
+                          capture_output=True, timeout=1)
+        except:
+            pass
+        
+        try:
+            # Method 3: Use dbus to notify file manager (for KDE/GNOME)
+            if 'KDE' in os.environ.get('XDG_CURRENT_DESKTOP', ''):
+                # KDE Plasma
+                subprocess.run(['kbuildsycoca5'], capture_output=True, timeout=2)
+            elif 'GNOME' in os.environ.get('XDG_CURRENT_DESKTOP', '') or 'ubuntu:GNOME' in os.environ.get('XDG_CURRENT_DESKTOP', ''):
+                # GNOME
+                subprocess.run(['gvfs-trash', '--list'], capture_output=True, timeout=1)
+        except:
+            pass
+    
+    def show_notification(self, title, message):
+        """Show system notification"""
+        try:
+            subprocess.run(['notify-send', title, message], 
+                          capture_output=True, timeout=1)
+        except:
+            QMessageBox.information(self, title, message)
+    
+    def closeEvent(self, event):
+        """Handle window close event with proper cleanup"""
+        # Save settings
+        self.save_monitor_names()
+        self.save_last_region()
+        
+        # Check if recording is in progress
+        if self.recording_state in [RecordingState.RECORDING, RecordingState.PAUSED]:
+            reply = QMessageBox.question(
+                self, "Recording in Progress",
+                "A recording is in progress. Do you want to stop it and exit?",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
+            )
+            
+            if reply == QMessageBox.Yes:
+                self.stop_recording()
+                QTimer.singleShot(500, self.cleanup_and_exit)
+                event.ignore()
+                return
+            elif reply == QMessageBox.Cancel:
+                event.ignore()
+                return
+        
+        # Cleanup and exit
+        self.cleanup_and_exit()
+        event.accept()
+    
+    def cleanup_and_exit(self):
+        """Perform cleanup before exit"""
+        # Stop preview
+        if self.preview_active:
+            self.stop_preview()
+        if self.detachable_preview:
+            self.detachable_preview.close()
+
+        # Stop resource monitor
+        self.resource_monitor.stop()
+        
+        # Stop timers
+        self.ui_timer.stop()
+        self.countdown_timer.stop()
+        
+        # Terminate any remaining processes
+        if self.ffmpeg_process and self.ffmpeg_process.state() == QProcess.Running:
+            self.ffmpeg_process.terminate()
+            self.ffmpeg_process.waitForFinished(1000)
+        
+        logger.info("Application shutting down")
+        QApplication.quit()
+
+def main():
+    """Main application entry point"""
+    # Enable high DPI scaling
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    
+    app = QApplication(sys.argv)
+    app.setStyle(QStyleFactory.create("Fusion"))
+    app.setQuitOnLastWindowClosed(True)
+    app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(VERSION)
+    
+    # Create and show recorder
+    recorder = ScreenRecorder()
+    recorder.show()
+    
+    sys.exit(app.exec_())
+
+if __name__ == "__main__":
+    main()
