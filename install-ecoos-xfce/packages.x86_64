@@ -238,4 +238,4 @@ lib32-mesa
 vulkan-intel
 ffmpeg
 python-watchog
-python-paramiko 
+python-paramiko
