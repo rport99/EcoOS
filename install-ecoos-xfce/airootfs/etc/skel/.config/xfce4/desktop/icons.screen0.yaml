@@ -36,6 +36,9 @@ configs:
     "/home/ben/Desktop/StormOS_mirrors.desktop":
       row: 5
       col: 0
+    "/home/bennji/Desktop/OpCore-Simplify":
+      row: 2
+      col: 2
     "/home/bennji/Desktop/NB TC":
       row: 6
       col: 1
@@ -66,6 +69,9 @@ configs:
     "/home/bennji/Desktop/SWG NB":
       row: 6
       col: 0
+    "/home/bennji/Desktop/gibMacOS":
+      row: 3
+      col: 2
     "/home/bennji/Desktop/LFS2.png":
       row: 1
       col: 1
@@ -99,6 +105,9 @@ configs:
     "/home/bennji/Desktop/BFS-Linux-install":
       row: 0
       col: 0
+    "/home/bennji/Desktop/Hardware-Sniffer":
+      row: 3
+      col: 2
     "/home/bennji/Desktop/StormOS Downloader.desktop":
       row: 4
       col: 0
@@ -159,11 +168,11 @@ configs:
     "/home/bennji/Desktop/Infinity":
       row: 0
       col: 2
-    "/home/bennji/Desktop/RustDesk.desktop":
-      row: 8
-      col: 0
     "/home/liveuser/Desktop/StormOS_Download_Manager.desktop":
       row: 6
+      col: 0
+    "/home/bennji/Desktop/RustDesk.desktop":
+      row: 8
       col: 0
     "/home/liveuser/Desktop/StormOS_Recorder.desktop":
       row: 3

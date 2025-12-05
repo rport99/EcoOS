@@ -57,17 +57,17 @@ class ArchIsoBuilder(QMainWindow):
     REQUIRED_PACKAGES = [
         'archiso', 'mkinitcpio-archiso',
     ]
-    GIT_REPO = "https://github.com/rport99/EcoOS"
+    GIT_REPO = "https://github.com/bfitzgit23/stormos-build-files"
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("EcoOS ISO Builder v3.2")
+        self.setWindowTitle("StormOS ISO Builder v3.2")
         self.setMinimumSize(800, 600)
         
         # Initialize paths
         self.USER_HOME = os.path.expanduser("~")
-        self.STORMOS_DIR = os.path.join(self.USER_HOME, "Desktop", "EcoOS-build-files", "install-stormos-xfce")
-        self.OUTPUT_DIR = os.path.join(self.USER_HOME, "Desktop", "EcoOS-ISO")
+        self.STORMOS_DIR = os.path.join(self.USER_HOME, "Desktop", "stormos-build-files", "install-stormos-xfce")
+        self.OUTPUT_DIR = os.path.join(self.USER_HOME, "Desktop", "StormOS-ISO")
         self.LOCAL_PACKAGE_DIR = os.path.join(self.STORMOS_DIR, "local_packages")
         
         # State variables

@@ -198,6 +198,7 @@ mintstick-git
 ffmpegthumbnailer
 system-config-printer
 pavucontrol
+zram-generator
 ttf-jetbrains-mono-nerd
 localsend
 brightnessctl
@@ -236,5 +237,5 @@ vulkan-radeon
 lib32-mesa
 vulkan-intel
 ffmpeg
-onlyoffice-bin
-rustdesk-bin
+python-watchog
+python-paramiko 

@@ -1,7 +1,7 @@
 [Desktop Entry]
 Version=1.0
 Type=Application
-Exec=fm10
+Exec=exo-open --launch FileManager %u
 Icon=org.xfce.filemanager
 StartupNotify=true
 Terminal=false
@@ -13,4 +13,3 @@ X-AppStream-Ignore=True
 Name=File Manager
 Comment=Browse the file system
 X-XFCE-Source=file:///usr/share/applications/xfce4-file-manager.desktop
-Path=

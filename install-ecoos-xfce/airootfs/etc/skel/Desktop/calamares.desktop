@@ -1,13 +1,12 @@
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=EcoOS-calamares
+Name=stormos-calamares
 GenericName=Live Installer (Calamares)
 Comment=Install the operating system to disk
 Exec=sudo calamares
-Icon=storm os
+Icon=storm os.png
 Terminal=false
 StartupNotify=true
 Type=Application
 Categories=Qt;System;Desktop
-Path=
