@@ -65,11 +65,11 @@ class EnhancedNetworkWidget(QWidget):
         self.network_icon.setFixedSize(32, 32)
         self.network_icon.setAlignment(Qt.AlignCenter)
         self.network_icon.setStyleSheet(f"""
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 {TokyoNight.SELECTION}, 
-                stop:1 {TokyoNight.NIGHT_BOTTOM});
+            background-color: #24283b;
+            border: 1px solid #3a415e;
             border-radius: 6px;
             font-size: 12pt;
+            color: {TokyoNight.FOREGROUND};
         """)
         self.update_network_icon()
         layout.addWidget(self.network_icon)
@@ -78,9 +78,8 @@ class EnhancedNetworkWidget(QWidget):
         self.network_label = QLabel("Connecting...")
         self.network_label.setStyleSheet(f"""
             padding: 4px 8px;
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 {TokyoNight.SELECTION}, 
-                stop:1 {TokyoNight.NIGHT_BOTTOM});
+            background-color: #24283b;
+            border: 1px solid #3a415e;
             border-radius: 6px;
             font-size: 9pt;
             color: {TokyoNight.FOREGROUND};
@@ -1170,42 +1169,43 @@ class CortileAdapter(QObject):
 
 
 class TokyoNight:
-    # Base colors - deeper, more night-like
-    BACKGROUND = "#0d0f1a"  # Deeper dark blue-black
-    FOREGROUND = "#c0caf5"
-    # Content colors
-    COMMENT = "#3a415e"  # Slightly lighter comment color
-    SELECTION = "#1a2332"  # Darker selection
-    # Ansi colors - adjusted for night theme
-    BLACK = "#0a0b14"  # Almost pure black
-    RED = "#f7768e"
-    GREEN = "#9ece6a"
-    YELLOW = "#e0af68"
-    BLUE = "#5a7fc7"  # Slightly muted blue
-    PURPLE = "#9b7fc7"  # Muted purple
-    CYAN = "#5abfcf"  # Muted cyan
+    # Base colors from simple panel
+    BACKGROUND = "#1a1b26"  # Dark blue-black
+    FOREGROUND = "#c0caf5"   # Light blue
+    ACCENT = "#7aa2f7"       # Blue accent
+    GREEN = "#9ece6a"        # Green
+    RED = "#f7768e"          # Red  
+    YELLOW = "#e0af68"       # Yellow
+    ORANGE = "#ff9e64"       # Orange
+    
+    # Additional colors from your original complex code
+    SELECTION = "#292e42"    # Selection color
+    COMMENT = "#565f89"      # Comment color
+    BLUE = "#7aa2f7"         # Blue (same as ACCENT)
+    PURPLE = "#bb9af7"       # Purple
+    CYAN = "#7dcfff"         # Cyan
+    PINK = "#ff007c"         # Pink
+    
+    # Original Tokyo Night colors from complex code
+    BLACK = "#0a0b14"
     WHITE = "#a9b1d6"
-    # Bright colors - adjusted for night theme
-    BRIGHT_BLACK = "#2a3146"  # Darker bright black
+    BRIGHT_BLACK = "#2a3146"
     BRIGHT_RED = "#f7768e"
     BRIGHT_GREEN = "#9ece6a"
     BRIGHT_YELLOW = "#e0af68"
-    BRIGHT_BLUE = "#5a7fc7"  # Muted bright blue
-    BRIGHT_PURPLE = "#9b7fc7"  # Muted bright purple
-    BRIGHT_CYAN = "#5abfcf"  # Muted bright cyan
+    BRIGHT_BLUE = "#5a7fc7"
+    BRIGHT_PURPLE = "#9b7fc7"
+    BRIGHT_CYAN = "#5abfcf"
     BRIGHT_WHITE = "#c0caf5"
-    # Additional accents - night-themed
-    ORANGE = "#ff9e64"
-    PINK = "#ff007c"
     TEAL = "#2ac3de"
-    # Night sky gradient colors
-    NIGHT_TOP = "#0a0b14"  # Deep space black
-    NIGHT_BOTTOM = "#1a1b26"  # Tokyo night background
-    NIGHT_HIGHLIGHT = "#1f2335"  # Subtle highlight
-    # Moon and stars colors
-    MOON_GLOW = "#e0e6ff"  # Soft moon glow
-    STAR_COLOR = "#ffffff"  # White stars
-    NEBULA = "#3a415e"  # Nebula clouds
+    
+    # Night sky colors
+    NIGHT_TOP = "#0a0b14"
+    NIGHT_BOTTOM = "#1a1b26"
+    NIGHT_HIGHLIGHT = "#1f2335"
+    MOON_GLOW = "#e0e6ff"
+    STAR_COLOR = "#ffffff"
+    NEBULA = "#3a415e"
 
 @dataclass
 class Application:
@@ -9445,7 +9445,7 @@ class TokyoNightPanelBar(QMainWindow):
         elif not hasattr(self, 'custom_apps'):
             # Initialize with default launchers if none exist
             self.custom_apps = [
-                ("StormOS Launcher", "launcher", "󰀻"),
+                ("EcoOS Launcher", "launcher", "󰀻"),
                 # Add more default launchers here if desired
             ]
         
