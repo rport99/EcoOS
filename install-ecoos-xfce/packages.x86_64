@@ -176,7 +176,7 @@ lightdm
 htop
 gvfs
 StormOS-conf
-stormos-grub-theme
+#stormos-grub-theme
 fzf
 gnome-disk-utility
 vivaldi
