@@ -9548,7 +9548,7 @@ class TokyoNightPanelBar(QMainWindow):
         menu.addSeparator()
         # System tools
         tools_actions = [
-            ("󰍛 System Monitor", "gnome-system-monitor"),
+            ("󰍛 System Monitor", "eco_sys"),
             ("󰒓 Settings", "xfce4-settings-manager"),
         ]
         for name, command in tools_actions:
