@@ -1,0 +1,1250 @@
+#!/usr/bin/env python3
+import os
+import sys
+import json
+import datetime
+import subprocess
+import calendar
+import webbrowser
+from typing import Dict, List, Optional, Tuple
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget,
+                             QCalendarWidget, QPushButton, QDialog, QTextEdit,
+                             QTextBrowser, QHBoxLayout, QLabel, QTimeEdit, 
+                             QCheckBox, QInputDialog, QMessageBox, QListWidget,
+                             QComboBox, QGroupBox, QLineEdit, QSplitter,
+                             QStyleFactory, QProgressBar, QFrame, QListWidgetItem)
+from PyQt5.QtCore import Qt, QDate, QDateTime, QTimer, QTime, pyqtSignal
+from PyQt5.QtGui import QFont, QPalette, QColor, QIcon, QPixmap
+
+# Optional imports for enhanced features
+try:
+    from geopy.geocoders import Nominatim
+    from geopy.distance import geodesic
+    WEATHER_AVAILABLE = True
+except ImportError:
+    WEATHER_AVAILABLE = False
+    
+try:
+    import requests
+    API_AVAILABLE = True
+except ImportError:
+    API_AVAILABLE = False
+
+class TokyoNightTheme:
+    """Tokyo Night Theme colors and styling"""
+    
+    # Colors from Tokyo Night theme
+    COLORS = {
+        'background': '#1a1b26',
+        'foreground': '#a9b1d6',
+        'selection': '#283457',
+        'comment': '#565f89',
+        'blue': '#7aa2f7',
+        'cyan': '#7dcfff',
+        'green': '#9ece6a',
+        'magenta': '#bb9af7',
+        'orange': '#ff9e64',
+        'red': '#f7768e',
+        'yellow': '#e0af68',
+        'black': '#1a1b26',
+        'white': '#c0caf5',
+        'gray': '#565f89',
+        'dark_gray': '#414868',
+    }
+    
+    @staticmethod
+    def apply(app: QApplication):
+        """Apply Tokyo Night theme to the application"""
+        palette = QPalette()
+        
+        # Base colors
+        palette.setColor(QPalette.Window, QColor(TokyoNightTheme.COLORS['background']))
+        palette.setColor(QPalette.WindowText, QColor(TokyoNightTheme.COLORS['foreground']))
+        palette.setColor(QPalette.Base, QColor(TokyoNightTheme.COLORS['background']))
+        palette.setColor(QPalette.AlternateBase, QColor(TokyoNightTheme.COLORS['dark_gray']))
+        palette.setColor(QPalette.ToolTipBase, QColor(TokyoNightTheme.COLORS['background']))
+        palette.setColor(QPalette.ToolTipText, QColor(TokyoNightTheme.COLORS['foreground']))
+        palette.setColor(QPalette.Text, QColor(TokyoNightTheme.COLORS['foreground']))
+        palette.setColor(QPalette.Button, QColor(TokyoNightTheme.COLORS['dark_gray']))
+        palette.setColor(QPalette.ButtonText, QColor(TokyoNightTheme.COLORS['foreground']))
+        palette.setColor(QPalette.BrightText, QColor(TokyoNightTheme.COLORS['red']))
+        palette.setColor(QPalette.Link, QColor(TokyoNightTheme.COLORS['blue']))
+        palette.setColor(QPalette.Highlight, QColor(TokyoNightTheme.COLORS['selection']))
+        palette.setColor(QPalette.HighlightedText, QColor(TokyoNightTheme.COLORS['white']))
+        
+        app.setPalette(palette)
+        
+        # Additional styling
+        app.setStyleSheet(f"""
+            QMainWindow, QDialog {{
+                background-color: {TokyoNightTheme.COLORS['background']};
+                color: {TokyoNightTheme.COLORS['foreground']};
+            }}
+            
+            QCalendarWidget {{
+                background-color: {TokyoNightTheme.COLORS['background']};
+                color: {TokyoNightTheme.COLORS['foreground']};
+            }}
+            
+            QCalendarWidget QWidget {{
+                alternate-background-color: {TokyoNightTheme.COLORS['dark_gray']};
+            }}
+            
+            QCalendarWidget QToolButton {{
+                color: {TokyoNightTheme.COLORS['blue']};
+                font-weight: bold;
+            }}
+            
+            QCalendarWidget QMenu {{
+                background-color: {TokyoNightTheme.COLORS['background']};
+                color: {TokyoNightTheme.COLORS['foreground']};
+            }}
+            
+            QPushButton {{
+                background-color: {TokyoNightTheme.COLORS['dark_gray']};
+                color: {TokyoNightTheme.COLORS['foreground']};
+                border: 1px solid {TokyoNightTheme.COLORS['gray']};
+                border-radius: 4px;
+                padding: 8px;
+                font-weight: bold;
+            }}
+            
+            QPushButton:hover {{
+                background-color: {TokyoNightTheme.COLORS['selection']};
+                border-color: {TokyoNightTheme.COLORS['blue']};
+            }}
+            
+            QPushButton:pressed {{
+                background-color: {TokyoNightTheme.COLORS['blue']};
+                color: {TokyoNightTheme.COLORS['background']};
+            }}
+            
+            QListWidget {{
+                background-color: {TokyoNightTheme.COLORS['background']};
+                color: {TokyoNightTheme.COLORS['foreground']};
+                border: 1px solid {TokyoNightTheme.COLORS['gray']};
+                border-radius: 4px;
+            }}
+            
+            QListWidget::item:selected {{
+                background-color: {TokyoNightTheme.COLORS['selection']};
+                color: {TokyoNightTheme.COLORS['white']};
+            }}
+            
+            QListWidget::item:hover {{
+                background-color: {TokyoNightTheme.COLORS['dark_gray']};
+            }}
+            
+            QTextEdit, QTimeEdit, QLineEdit {{
+                background-color: {TokyoNightTheme.COLORS['background']};
+                color: {TokyoNightTheme.COLORS['foreground']};
+                border: 1px solid {TokyoNightTheme.COLORS['gray']};
+                border-radius: 4px;
+                padding: 4px;
+            }}
+            
+            QLabel {{
+                color: {TokyoNightTheme.COLORS['foreground']};
+            }}
+            
+            QCheckBox {{
+                color: {TokyoNightTheme.COLORS['foreground']};
+            }}
+            
+            QCheckBox::indicator {{
+                width: 18px;
+                height: 18px;
+            }}
+            
+            QCheckBox::indicator:checked {{
+                background-color: {TokyoNightTheme.COLORS['green']};
+            }}
+            
+            QGroupBox {{
+                color: {TokyoNightTheme.COLORS['blue']};
+                font-weight: bold;
+                border: 1px solid {TokyoNightTheme.COLORS['gray']};
+                border-radius: 4px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }}
+            
+            QProgressBar {{
+                border: 1px solid {TokyoNightTheme.COLORS['gray']};
+                border-radius: 4px;
+                text-align: center;
+            }}
+            
+            QProgressBar::chunk {{
+                background-color: {TokyoNightTheme.COLORS['green']};
+                border-radius: 4px;
+            }}
+            
+            QComboBox {{
+                background-color: {TokyoNightTheme.COLORS['background']};
+                color: {TokyoNightTheme.COLORS['foreground']};
+                border: 1px solid {TokyoNightTheme.COLORS['gray']};
+                border-radius: 4px;
+                padding: 4px;
+            }}
+            
+            QComboBox::drop-down {{
+                border: none;
+            }}
+            
+            QComboBox QAbstractItemView {{
+                background-color: {TokyoNightTheme.COLORS['background']};
+                color: {TokyoNightTheme.COLORS['foreground']};
+                selection-background-color: {TokyoNightTheme.COLORS['selection']};
+            }}
+        """)
+
+
+class SmartEventManager:
+    """Intelligent event management with suggestions and analytics"""
+    
+    def __init__(self):
+        self.event_history = []
+        self.categories = {
+            'work': ['Meeting', 'Deadline', 'Conference'],
+            'personal': ['Birthday', 'Anniversary', 'Family'],
+            'health': ['Doctor', 'Exercise', 'Meditation'],
+            'social': ['Party', 'Dinner', 'Gathering'],
+            'education': ['Class', 'Study', 'Workshop']
+        }
+        
+    def suggest_event_time(self, event_name: str, duration_hours: int = 1) -> Tuple[str, str]:
+        """Suggest optimal time for an event based on its type"""
+        current_time = datetime.datetime.now()
+        
+        if any(word in event_name.lower() for word in ['meeting', 'work', 'deadline']):
+            # Suggest work hours (9 AM - 5 PM)
+            suggested_time = current_time.replace(hour=9, minute=0, second=0)
+        elif any(word in event_name.lower() for word in ['exercise', 'gym', 'yoga']):
+            # Suggest morning or evening for health
+            suggested_time = current_time.replace(hour=7, minute=0, second=0)
+        elif any(word in event_name.lower() for word in ['dinner', 'party', 'social']):
+            # Suggest evening for social events
+            suggested_time = current_time.replace(hour=19, minute=0, second=0)
+        else:
+            # Default to 2 PM
+            suggested_time = current_time.replace(hour=14, minute=0, second=0)
+        
+        end_time = suggested_time + datetime.timedelta(hours=duration_hours)
+        return suggested_time.strftime("%H:%M"), end_time.strftime("%H:%M")
+    
+    def categorize_event(self, event_name: str) -> str:
+        """Categorize event based on keywords"""
+        event_lower = event_name.lower()
+        
+        for category, keywords in self.categories.items():
+            for keyword in keywords:
+                if keyword.lower() in event_lower:
+                    return category
+                
+        # Check for keyword patterns
+        if any(word in event_lower for word in ['meet', 'work', 'office', 'project']):
+            return 'work'
+        elif any(word in event_lower for word in ['birthday', 'anniversary', 'family']):
+            return 'personal'
+        elif any(word in event_lower for word in ['doctor', 'health', 'exercise', 'gym']):
+            return 'health'
+        elif any(word in event_lower for word in ['party', 'dinner', 'friends', 'social']):
+            return 'social'
+        
+        return 'other'
+    
+    def analyze_productivity(self, events: Dict) -> Dict:
+        """Analyze productivity patterns from events"""
+        analysis = {
+            'work_hours': 0,
+            'personal_hours': 0,
+            'social_hours': 0,
+            'health_hours': 0,
+            'total_events': 0,
+            'busiest_day': None
+        }
+        
+        day_count = {}
+        
+        for date_str, event_list in events.items():
+            day_events = len(event_list)
+            day_count[date_str] = day_events
+            
+            for event in event_list:
+                category = self.categorize_event(event['name'])
+                if category in analysis:
+                    analysis[f'{category}_hours'] += 1
+                analysis['total_events'] += 1
+        
+        if day_count:
+            analysis['busiest_day'] = max(day_count, key=day_count.get)
+        
+        return analysis
+
+
+class CalendarApp(QMainWindow):
+    """Enhanced Calendar Application with Tokyo Night Theme"""
+    
+    # Signals for event updates
+    event_added = pyqtSignal(dict)
+    event_updated = pyqtSignal(dict)
+    event_deleted = pyqtSignal(str, int)
+    
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("EcoOS Calendar Pro")
+        self.setGeometry(100, 100, 1200, 800)
+        
+        # Initialize smart features
+        self.smart_manager = SmartEventManager()
+        self.location = self.get_user_location()
+        
+        # Load settings
+        self.settings = self.load_settings()
+        
+        # Setup timers
+        self.setup_timers()
+        
+        # Initialize data
+        self.events = {}
+        self.notes = {}
+        self.load_all_data()
+        
+        # Setup UI
+        self.init_ui()
+        
+        # Apply theme
+        self.apply_theme_colors()
+        
+        # Start background tasks
+        self.start_background_tasks()
+    
+    def load_settings(self) -> Dict:
+        """Load application settings"""
+        settings_file = os.path.expanduser("~/Documents/calendar_settings.json")
+        default_settings = {
+            'theme': 'tokyo_night',
+            'notifications': True,
+            'sound_alerts': True,
+            'auto_backup': True,
+            'weather_enabled': False,
+            'productivity_tracking': True
+        }
+        
+        if os.path.exists(settings_file):
+            try:
+                with open(settings_file, 'r') as f:
+                    return {**default_settings, **json.load(f)}
+            except:
+                return default_settings
+        return default_settings
+    
+    def save_settings(self):
+        """Save application settings"""
+        settings_file = os.path.expanduser("~/Documents/calendar_settings.json")
+        with open(settings_file, 'w') as f:
+            json.dump(self.settings, f, indent=4)
+    
+    def get_user_location(self) -> Optional[Dict]:
+        """Get user location for weather and timezone"""
+        if not WEATHER_AVAILABLE:
+            return None
+            
+        try:
+            geolocator = Nominatim(user_agent="eco_calendar")
+            # For privacy, use a default location or implement proper location services
+            location = geolocator.geocode("New York")
+            if location:
+                return {
+                    'city': 'New York',
+                    'latitude': location.latitude,
+                    'longitude': location.longitude
+                }
+        except:
+            pass
+        return None
+    
+    def setup_timers(self):
+        """Setup all timers for the application"""
+        # Reminder timer
+        self.reminder_timer = QTimer(self)
+        self.reminder_timer.timeout.connect(self.check_for_reminders)
+        self.reminder_timer.start(30000)  # Check every 30 seconds
+        
+        # Update timer
+        self.update_timer = QTimer(self)
+        self.update_timer.timeout.connect(self.update_display)
+        self.update_timer.start(1000)  # Update every second
+        
+        # Auto-save timer
+        self.autosave_timer = QTimer(self)
+        self.autosave_timer.timeout.connect(self.auto_save)
+        self.autosave_timer.start(300000)  # Auto-save every 5 minutes
+    
+    def load_all_data(self):
+        """Load all data from files"""
+        self.load_events()
+        self.load_notes()
+        
+    def load_events(self):
+        """Load events from file"""
+        events_file = os.path.expanduser("~/Documents/calendar_events.json")
+        if os.path.exists(events_file):
+            try:
+                with open(events_file, 'r') as f:
+                    self.events = json.load(f)
+            except:
+                self.events = {}
+        else:
+            self.events = {}
+    
+    def load_notes(self):
+        """Load notes from file"""
+        notes_file = os.path.expanduser("~/Documents/calendar_notes.json")
+        if os.path.exists(notes_file):
+            try:
+                with open(notes_file, 'r') as f:
+                    self.notes = json.load(f)
+            except:
+                self.notes = {}
+        else:
+            self.notes = {}
+    
+    def save_events(self):
+        """Save events to file"""
+        events_file = os.path.expanduser("~/Documents/calendar_events.json")
+        with open(events_file, 'w') as f:
+            json.dump(self.events, f, indent=4)
+    
+    def save_notes(self):
+        """Save notes to file"""
+        notes_file = os.path.expanduser("~/Documents/calendar_notes.json")
+        with open(notes_file, 'w') as f:
+            json.dump(self.notes, f, indent=4)
+    
+    def auto_save(self):
+        """Auto-save all data"""
+        self.save_events()
+        self.save_notes()
+        print("Auto-save completed")
+    
+    def apply_theme_colors(self):
+        """Apply theme-specific colors to UI elements"""
+        # Set font
+        font = QFont("Fira Code", 10)
+        self.setFont(font)
+        
+        # Set window icon (you can add an icon file)
+        # self.setWindowIcon(QIcon("path/to/icon.png"))
+    
+    def init_ui(self):
+        """Initialize the user interface"""
+        # Create central widget and main layout
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        
+        main_layout = QHBoxLayout(central_widget)
+        
+        # Create splitter for resizable panels
+        splitter = QSplitter(Qt.Horizontal)
+        
+        # Left panel - Calendar and controls
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        
+        # Date and time display
+        self.date_time_label = QLabel()
+        self.date_time_label.setAlignment(Qt.AlignCenter)
+        self.date_time_label.setStyleSheet(f"""
+            font-size: 16px;
+            font-weight: bold;
+            color: {TokyoNightTheme.COLORS['blue']};
+            padding: 10px;
+            border: 2px solid {TokyoNightTheme.COLORS['gray']};
+            border-radius: 8px;
+            background-color: {TokyoNightTheme.COLORS['dark_gray']};
+        """)
+        left_layout.addWidget(self.date_time_label)
+        
+        # Calendar widget
+        self.calendar = QCalendarWidget()
+        self.calendar.setGridVisible(True)
+        self.calendar.clicked[QDate].connect(self.show_events_for_date)
+        self.calendar.setSelectedDate(QDate.currentDate())
+        left_layout.addWidget(self.calendar)
+        
+        # Quick action buttons
+        quick_actions = QGroupBox("Quick Actions")
+        quick_layout = QHBoxLayout()
+        
+        self.today_btn = QPushButton("Today")
+        self.today_btn.clicked.connect(self.go_to_today)
+        quick_layout.addWidget(self.today_btn)
+        
+        self.week_view_btn = QPushButton("Week")
+        self.week_view_btn.clicked.connect(self.show_week_view)
+        quick_layout.addWidget(self.week_view_btn)
+        
+        self.month_view_btn = QPushButton("Month")
+        self.month_view_btn.clicked.connect(self.show_month_view)
+        quick_layout.addWidget(self.month_view_btn)
+        
+        quick_actions.setLayout(quick_layout)
+        left_layout.addWidget(quick_actions)
+        
+        # Event management buttons
+        event_buttons = QHBoxLayout()
+        
+        self.add_event_btn = QPushButton("➕ Add Event")
+        self.add_event_btn.clicked.connect(self.show_add_event_dialog)
+        event_buttons.addWidget(self.add_event_btn)
+        
+        self.add_note_btn = QPushButton("📝 Add Note")
+        self.add_note_btn.clicked.connect(self.show_add_note_dialog)
+        event_buttons.addWidget(self.add_note_btn)
+        
+        left_layout.addLayout(event_buttons)
+        
+        # Productivity stats
+        self.stats_label = QLabel()
+        self.stats_label.setAlignment(Qt.AlignCenter)
+        self.stats_label.setStyleSheet(f"""
+            padding: 5px;
+            border: 1px solid {TokyoNightTheme.COLORS['gray']};
+            border-radius: 4px;
+            background-color: {TokyoNightTheme.COLORS['dark_gray']};
+        """)
+        left_layout.addWidget(self.stats_label)
+        
+        # Add left panel to splitter
+        splitter.addWidget(left_panel)
+        
+        # Right panel - Events and details
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        
+        # Events list
+        self.event_list = QListWidget()
+        self.event_list.itemClicked.connect(self.on_event_clicked)
+        right_layout.addWidget(QLabel("Events for Selected Date:"))
+        right_layout.addWidget(self.event_list)
+        
+        # Event details panel
+        self.event_details = QTextBrowser()
+        self.event_details.setMaximumHeight(200)
+        right_layout.addWidget(QLabel("Event Details:"))
+        right_layout.addWidget(self.event_details)
+        
+        # Notes section
+        notes_group = QGroupBox("Notes")
+        notes_layout = QVBoxLayout()
+        
+        self.notes_list = QListWidget()
+        self.notes_list.itemClicked.connect(self.on_note_clicked)
+        notes_layout.addWidget(self.notes_list)
+        
+        notes_buttons = QHBoxLayout()
+        self.delete_note_btn = QPushButton("Delete Note")
+        self.delete_note_btn.clicked.connect(self.delete_note)
+        notes_buttons.addWidget(self.delete_note_btn)
+        
+        notes_group.setLayout(notes_layout)
+        right_layout.addWidget(notes_group)
+        
+        # Add right panel to splitter
+        splitter.addWidget(right_panel)
+        
+        # Set splitter sizes
+        splitter.setSizes([400, 800])
+        
+        # Add splitter to main layout
+        main_layout.addWidget(splitter)
+        
+        # Create status bar
+        self.statusBar().showMessage("Ready")
+        
+        # Create menu bar
+        self.create_menu_bar()
+        
+        # Initial display
+        self.show_events_for_date(QDate.currentDate())
+        self.update_display()
+    
+    def create_menu_bar(self):
+        """Create the menu bar"""
+        menubar = self.menuBar()
+        
+        # File menu
+        file_menu = menubar.addMenu('File')
+        
+        export_action = file_menu.addAction('Export Events')
+        export_action.triggered.connect(self.export_events)
+        
+        import_action = file_menu.addAction('Import Events')
+        import_action.triggered.connect(self.import_events)
+        
+        file_menu.addSeparator()
+        
+        backup_action = file_menu.addAction('Backup Data')
+        backup_action.triggered.connect(self.backup_data)
+        
+        restore_action = file_menu.addAction('Restore Data')
+        restore_action.triggered.connect(self.restore_data)
+        
+        file_menu.addSeparator()
+        
+        exit_action = file_menu.addAction('Exit')
+        exit_action.triggered.connect(self.close)
+        
+        # View menu
+        view_menu = menubar.addMenu('View')
+        
+        theme_action = view_menu.addAction('Change Theme')
+        theme_action.triggered.connect(self.change_theme)
+        
+        # Tools menu
+        tools_menu = menubar.addMenu('Tools')
+        
+        stats_action = tools_menu.addAction('Productivity Stats')
+        stats_action.triggered.connect(self.show_productivity_stats)
+        
+        suggest_action = tools_menu.addAction('Suggest Events')
+        suggest_action.triggered.connect(self.suggest_events)
+        
+        # Help menu
+        help_menu = menubar.addMenu('Help')
+        
+        about_action = help_menu.addAction('About')
+        about_action.triggered.connect(self.show_about)
+    
+    def update_display(self):
+        """Update all display elements"""
+        current_datetime = QDateTime.currentDateTime()
+        self.date_time_label.setText(current_datetime.toString("dddd, MMMM d, yyyy\nhh:mm:ss AP"))
+        
+        # Update status bar
+        selected_date = self.calendar.selectedDate().toString("yyyy-MM-dd")
+        event_count = len(self.events.get(selected_date, []))
+        self.statusBar().showMessage(f"{event_count} events for {selected_date}")
+        
+        # Update stats
+        self.update_stats()
+    
+    def update_stats(self):
+        """Update productivity statistics"""
+        analysis = self.smart_manager.analyze_productivity(self.events)
+        stats_text = f"📊 Stats: {analysis['total_events']} events | "
+        stats_text += f"Work: {analysis['work_hours']} | "
+        stats_text += f"Personal: {analysis['personal_hours']}"
+        self.stats_label.setText(stats_text)
+    
+    def go_to_today(self):
+        """Go to today's date"""
+        self.calendar.setSelectedDate(QDate.currentDate())
+        self.show_events_for_date(QDate.currentDate())
+    
+    def show_week_view(self):
+        """Show week view (placeholder for future enhancement)"""
+        QMessageBox.information(self, "Week View", "Week view will be implemented in the next version!")
+    
+    def show_month_view(self):
+        """Show month view (placeholder for future enhancement)"""
+        QMessageBox.information(self, "Month View", "Month view will be implemented in the next version!")
+    
+    def show_events_for_date(self, date):
+        """Show events for the selected date"""
+        selected_date = date.toString("yyyy-MM-dd")
+        self.event_list.clear()
+        
+        events = self.events.get(selected_date, [])
+        if events:
+            for event in events:
+                item_text = f"{event['time']} - {event['name']}"
+                if event.get('reminder'):
+                    item_text += " ⏰"
+                if event.get('category'):
+                    item_text += f" [{event['category']}]"
+                
+                item = QListWidgetItem(item_text)
+                # Color code by category
+                category = event.get('category', 'other')
+                color_map = {
+                    'work': TokyoNightTheme.COLORS['blue'],
+                    'personal': TokyoNightTheme.COLORS['green'],
+                    'health': TokyoNightTheme.COLORS['cyan'],
+                    'social': TokyoNightTheme.COLORS['magenta'],
+                    'other': TokyoNightTheme.COLORS['gray']
+                }
+                item.setForeground(QColor(color_map.get(category, TokyoNightTheme.COLORS['gray'])))
+                self.event_list.addItem(item)
+        else:
+            self.event_list.addItem("No events for this date")
+    
+    def on_event_clicked(self, item):
+        """Handle event item click"""
+        selected_date = self.calendar.selectedDate().toString("yyyy-MM-dd")
+        events = self.events.get(selected_date, [])
+        
+        # Find the clicked event
+        event_text = item.text()
+        for event in events:
+            display_text = f"{event['time']} - {event['name']}"
+            if event.get('reminder'):
+                display_text += " ⏰"
+            if event.get('category'):
+                display_text += f" [{event['category']}]"
+            
+            if display_text == event_text:
+                # Display event details
+                details = f"""
+                <h3>{event['name']}</h3>
+                <b>Date:</b> {selected_date}<br>
+                <b>Time:</b> {event['time']}<br>
+                <b>Category:</b> {event.get('category', 'Uncategorized')}<br>
+                <b>Reminder:</b> {'Yes' if event.get('reminder') else 'No'}<br>
+                """
+                if event.get('description'):
+                    details += f"<b>Description:</b><br>{event['description']}<br>"
+                if event.get('location'):
+                    details += f"<b>Location:</b> {event['location']}<br>"
+                
+                self.event_details.setHtml(details)
+                break
+    
+    def on_note_clicked(self, item):
+        """Handle note item click"""
+        note_text = item.text()
+        date = note_text.split(" - ")[0]
+        if date in self.notes:
+            self.event_details.setHtml(f"<h3>Note for {date}</h3><p>{self.notes[date]}</p>")
+    
+    def show_add_event_dialog(self):
+        """Show dialog to add a new event"""
+        selected_date = self.calendar.selectedDate()
+        dialog = AddEventDialog(self.events, self.smart_manager, self, selected_date)
+        if dialog.exec_() == QDialog.Accepted:
+            self.show_events_for_date(selected_date)
+            self.save_events()
+            self.update_stats()
+    
+    def show_add_note_dialog(self):
+        """Show dialog to add a note"""
+        selected_date = self.calendar.selectedDate().toString("yyyy-MM-dd")
+        note, ok = QInputDialog.getMultiLineText(self, "Add Note", 
+                                                 f"Enter note for {selected_date}:",
+                                                 self.notes.get(selected_date, ""))
+        if ok and note.strip():
+            self.notes[selected_date] = note.strip()
+            self.save_notes()
+            self.update_notes_list()
+    
+    def update_notes_list(self):
+        """Update the notes list display"""
+        self.notes_list.clear()
+        for date, note in sorted(self.notes.items()):
+            preview = note[:50] + "..." if len(note) > 50 else note
+            self.notes_list.addItem(f"{date} - {preview}")
+    
+    def delete_note(self):
+        """Delete selected note"""
+        current_item = self.notes_list.currentItem()
+        if current_item:
+            date = current_item.text().split(" - ")[0]
+            if date in self.notes:
+                del self.notes[date]
+                self.save_notes()
+                self.update_notes_list()
+                self.event_details.clear()
+    
+    def check_for_reminders(self):
+        """Check for upcoming event reminders"""
+        current_time = datetime.datetime.now()
+        current_date = current_time.date().isoformat()
+        current_hour_minute = current_time.time().strftime("%H:%M")
+        
+        events_for_today = self.events.get(current_date, [])
+        
+        for event in events_for_today:
+            if event.get("reminder") and event["time"][:5] == current_hour_minute:
+                # Show notification
+                self.show_notification(f"Reminder: {event['name']}", 
+                                       f"You have an event at {event['time']}")
+                
+                # Play sound if enabled
+                if self.settings.get('sound_alerts', True):
+                    self.play_reminder_sound()
+                
+                # Disable reminder to prevent multiple notifications
+                event["reminder"] = False
+        
+        self.save_events()
+    
+    def show_notification(self, title: str, message: str):
+        """Show a system notification"""
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Information)
+        msg.setWindowTitle(title)
+        msg.setText(message)
+        msg.setStandardButtons(QMessageBox.Ok)
+        
+        # Make dialog stay on top
+        msg.setWindowFlags(msg.windowFlags() | Qt.WindowStaysOnTopHint)
+        msg.exec_()
+    
+    def play_reminder_sound(self):
+        """Play reminder sound"""
+        try:
+            subprocess.run(["paplay", "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga"])
+        except:
+            # Fallback to system beep
+            print("\a")
+    
+    def export_events(self):
+        """Export events to JSON file"""
+        file_path, _ = QInputDialog.getText(self, "Export Events", 
+                                           "Enter file path for export:")
+        if file_path:
+            try:
+                with open(file_path, 'w') as f:
+                    json.dump(self.events, f, indent=4)
+                QMessageBox.information(self, "Success", "Events exported successfully!")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to export: {str(e)}")
+    
+    def import_events(self):
+        """Import events from JSON file"""
+        file_path, _ = QInputDialog.getText(self, "Import Events", 
+                                           "Enter file path to import:")
+        if file_path and os.path.exists(file_path):
+            try:
+                with open(file_path, 'r') as f:
+                    imported_events = json.load(f)
+                self.events.update(imported_events)
+                self.save_events()
+                self.show_events_for_date(self.calendar.selectedDate())
+                QMessageBox.information(self, "Success", "Events imported successfully!")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to import: {str(e)}")
+    
+    def backup_data(self):
+        """Backup all calendar data"""
+        backup_dir = os.path.expanduser("~/Documents/calendar_backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_file = os.path.join(backup_dir, f"calendar_backup_{timestamp}.json")
+        
+        backup_data = {
+            'events': self.events,
+            'notes': self.notes,
+            'settings': self.settings,
+            'backup_date': timestamp
+        }
+        
+        try:
+            with open(backup_file, 'w') as f:
+                json.dump(backup_data, f, indent=4)
+            QMessageBox.information(self, "Success", f"Backup created at:\n{backup_file}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Backup failed: {str(e)}")
+    
+    def restore_data(self):
+        """Restore data from backup"""
+        QMessageBox.warning(self, "Restore", 
+                           "Restoring will overwrite current data. Continue?",
+                           QMessageBox.Yes | QMessageBox.No)
+    
+    def change_theme(self):
+        """Change application theme"""
+        themes = ['Tokyo Night', 'Dark', 'Light', 'System']
+        theme, ok = QInputDialog.getItem(self, "Change Theme", 
+                                        "Select theme:", themes, 0, False)
+        if ok:
+            self.settings['theme'] = theme.lower().replace(' ', '_')
+            self.save_settings()
+            QMessageBox.information(self, "Theme Changed", 
+                                  "Please restart the application to apply the new theme.")
+    
+    def show_productivity_stats(self):
+        """Show productivity statistics"""
+        analysis = self.smart_manager.analyze_productivity(self.events)
+        
+        stats_html = """
+        <html>
+        <head>
+        <style>
+        body { color: #a9b1d6; font-family: Arial, sans-serif; }
+        h2 { color: #7aa2f7; }
+        .stat { margin: 10px 0; padding: 10px; background: #1a1b26; border-radius: 5px; }
+        .progress { height: 20px; background: #414868; border-radius: 10px; margin: 5px 0; }
+        .progress-bar { height: 100%; background: #7aa2f7; border-radius: 10px; }
+        </style>
+        </head>
+        <body>
+        <h2>📈 Productivity Statistics</h2>
+        """
+        
+        total = analysis['total_events']
+        if total > 0:
+            for key, value in analysis.items():
+                if key.endswith('_hours'):
+                    category = key.replace('_hours', '').title()
+                    percentage = (value / total) * 100 if total > 0 else 0
+                    stats_html += f"""
+                    <div class="stat">
+                        <strong>{category}:</strong> {value} hours ({percentage:.1f}%)
+                        <div class="progress">
+                            <div class="progress-bar" style="width: {percentage}%"></div>
+                        </div>
+                    </div>
+                    """
+        
+        stats_html += f"""
+        <div class="stat">
+            <strong>Total Events:</strong> {total}
+        </div>
+        """
+        
+        if analysis['busiest_day']:
+            stats_html += f"""
+            <div class="stat">
+                <strong>Busiest Day:</strong> {analysis['busiest_day']}
+            </div>
+            """
+        
+        stats_html += "</body></html>"
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Productivity Statistics")
+        dialog.setGeometry(200, 200, 400, 400)
+        
+        layout = QVBoxLayout()
+        text_browser = QTextBrowser()
+        text_browser.setHtml(stats_html)
+        layout.addWidget(text_browser)
+        
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        
+        dialog.setLayout(layout)
+        dialog.exec_()
+    
+    def suggest_events(self):
+        """Suggest events based on patterns"""
+        suggestions = [
+            {"name": "Weekly Team Meeting", "time": "10:00", "category": "work"},
+            {"name": "Morning Exercise", "time": "07:00", "category": "health"},
+            {"name": "Plan Next Week", "time": "16:00", "category": "work"},
+            {"name": "Family Dinner", "time": "19:00", "category": "personal"}
+        ]
+        
+        selected_date = self.calendar.selectedDate().toString("yyyy-MM-dd")
+        
+        suggestion_text = "<h3>Event Suggestions:</h3><ul>"
+        for suggestion in suggestions:
+            suggestion_text += f"<li>{suggestion['time']} - {suggestion['name']} [{suggestion['category']}]</li>"
+        suggestion_text += "</ul>"
+        
+        reply = QMessageBox.question(self, "Event Suggestions", 
+                                    suggestion_text + "<br>Add these events to today?",
+                                    QMessageBox.Yes | QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            if selected_date not in self.events:
+                self.events[selected_date] = []
+            
+            for suggestion in suggestions:
+                self.events[selected_date].append({
+                    "name": suggestion['name'],
+                    "time": suggestion['time'],
+                    "category": suggestion['category'],
+                    "reminder": True,
+                    "description": "Suggested by AI assistant"
+                })
+            
+            self.save_events()
+            self.show_events_for_date(self.calendar.selectedDate())
+            QMessageBox.information(self, "Success", "Suggested events added!")
+    
+    def show_about(self):
+        """Show about dialog"""
+        about_text = """
+        <h2>EcoOS Calendar Pro</h2>
+        <p><strong>Version:</strong> 2.0</p>
+        <p><strong>Features:</strong></p>
+        <ul>
+            <li>Tokyo Night Theme</li>
+            <li>Smart Event Suggestions</li>
+            <li>Productivity Analytics</li>
+            <li>Notes System</li>
+            <li>Reminders & Notifications</li>
+            <li>Data Backup & Export</li>
+        </ul>
+        <p><strong>Powered by PyQt5</strong></p>
+        """
+        
+        QMessageBox.about(self, "About EcoOS Calendar Pro", about_text)
+    
+    def start_background_tasks(self):
+        """Start background tasks"""
+        # Update notes list
+        self.update_notes_list()
+        
+        # Check for overdue events
+        self.check_overdue_events()
+    
+    def check_overdue_events(self):
+        """Check for overdue events"""
+        current_date = datetime.date.today().isoformat()
+        yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+        
+        # Check yesterday's events for completion
+        if yesterday in self.events:
+            for event in self.events[yesterday]:
+                if event.get('reminder'):
+                    # Event had reminder set but wasn't marked complete
+                    pass  # Could add notification for missed events
+    
+    def closeEvent(self, event):
+        """Handle application close"""
+        # Auto-save before closing
+        self.auto_save()
+        
+        # Save window state
+        geometry_bytes = self.saveGeometry()
+        if geometry_bytes:
+            self.settings['window_geometry'] = geometry_bytes.toBase64().data().decode('utf-8')
+        self.save_settings()
+        
+        event.accept()
+
+
+class AddEventDialog(QDialog):
+    """Enhanced dialog for adding events"""
+    
+    def __init__(self, events, smart_manager, parent=None, selected_date=None):
+        super().__init__(parent)
+        self.events = events
+        self.smart_manager = smart_manager
+        self.parent_app = parent
+        
+        self.setWindowTitle("Add Smart Event")
+        self.setGeometry(300, 300, 500, 600)
+        
+        self.init_ui(selected_date)
+    
+    def init_ui(self, selected_date):
+        layout = QVBoxLayout()
+        
+        # Event name with smart suggestions
+        name_group = QGroupBox("Event Details")
+        name_layout = QVBoxLayout()
+        
+        self.event_name_label = QLabel("Event Name:")
+        self.event_name_edit = QLineEdit()
+        self.event_name_edit.textChanged.connect(self.on_name_changed)
+        name_layout.addWidget(self.event_name_label)
+        name_layout.addWidget(self.event_name_edit)
+        
+        # Category selection
+        self.category_label = QLabel("Category:")
+        self.category_combo = QComboBox()
+        self.category_combo.addItems(['work', 'personal', 'health', 'social', 'education', 'other'])
+        name_layout.addWidget(self.category_label)
+        name_layout.addWidget(self.category_combo)
+        
+        name_group.setLayout(name_layout)
+        layout.addWidget(name_group)
+        
+        # Date and time
+        time_group = QGroupBox("Date & Time")
+        time_layout = QVBoxLayout()
+        
+        self.date_label = QLabel("Date:")
+        self.date_edit = QCalendarWidget()
+        if selected_date:
+            self.date_edit.setSelectedDate(selected_date)
+        time_layout.addWidget(self.date_label)
+        time_layout.addWidget(self.date_edit)
+        
+        self.time_label = QLabel("Time:")
+        time_hbox = QHBoxLayout()
+        self.time_edit = QTimeEdit()
+        self.time_edit.setTime(QTime.currentTime())
+        
+        self.duration_combo = QComboBox()
+        self.duration_combo.addItems(['30 min', '1 hour', '1.5 hours', '2 hours', '3 hours'])
+        self.duration_combo.setCurrentIndex(1)
+        
+        self.suggest_time_btn = QPushButton("Suggest Time")
+        self.suggest_time_btn.clicked.connect(self.suggest_time)
+        
+        time_hbox.addWidget(self.time_edit)
+        time_hbox.addWidget(QLabel("Duration:"))
+        time_hbox.addWidget(self.duration_combo)
+        time_hbox.addWidget(self.suggest_time_btn)
+        time_layout.addLayout(time_hbox)
+        
+        time_group.setLayout(time_layout)
+        layout.addWidget(time_group)
+        
+        # Additional details
+        details_group = QGroupBox("Additional Details")
+        details_layout = QVBoxLayout()
+        
+        self.location_label = QLabel("Location (optional):")
+        self.location_edit = QLineEdit()
+        details_layout.addWidget(self.location_label)
+        details_layout.addWidget(self.location_edit)
+        
+        self.description_label = QLabel("Description (optional):")
+        self.description_edit = QTextEdit()
+        self.description_edit.setMaximumHeight(100)
+        details_layout.addWidget(self.description_label)
+        details_layout.addWidget(self.description_edit)
+        
+        details_group.setLayout(details_layout)
+        layout.addWidget(details_group)
+        
+        # Reminder options
+        self.reminder_checkbox = QCheckBox("Set Reminder")
+        self.reminder_checkbox.setChecked(True)
+        layout.addWidget(self.reminder_checkbox)
+        
+        # Smart features
+        self.auto_categorize_checkbox = QCheckBox("Auto-categorize event")
+        self.auto_categorize_checkbox.setChecked(True)
+        layout.addWidget(self.auto_categorize_checkbox)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        self.add_button = QPushButton("Add Event")
+        self.add_button.clicked.connect(self.add_event)
+        self.add_button.setStyleSheet(f"""
+            background-color: {TokyoNightTheme.COLORS['green']};
+            color: {TokyoNightTheme.COLORS['background']};
+            font-weight: bold;
+            padding: 10px;
+        """)
+        
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.reject)
+        
+        button_layout.addWidget(self.add_button)
+        button_layout.addWidget(self.cancel_button)
+        layout.addLayout(button_layout)
+        
+        self.setLayout(layout)
+    
+    def on_name_changed(self, text):
+        """Update category based on event name"""
+        if self.auto_categorize_checkbox.isChecked() and text.strip():
+            category = self.smart_manager.categorize_event(text)
+            index = self.category_combo.findText(category)
+            if index >= 0:
+                self.category_combo.setCurrentIndex(index)
+    
+    def suggest_time(self):
+        """Suggest optimal time for the event"""
+        event_name = self.event_name_edit.text().strip()
+        if event_name:
+            duration_map = {
+                '30 min': 0.5,
+                '1 hour': 1,
+                '1.5 hours': 1.5,
+                '2 hours': 2,
+                '3 hours': 3
+            }
+            duration = duration_map.get(self.duration_combo.currentText(), 1)
+            
+            suggested_start, suggested_end = self.smart_manager.suggest_event_time(event_name, duration)
+            
+            # Parse suggested time
+            suggested_time = QTime.fromString(suggested_start, "HH:mm")
+            self.time_edit.setTime(suggested_time)
+            
+            QMessageBox.information(self, "Time Suggested", 
+                                  f"Suggested time: {suggested_start} - {suggested_end}")
+    
+    def add_event(self):
+        """Add the event to the calendar"""
+        event_name = self.event_name_edit.text().strip()
+        event_date = self.date_edit.selectedDate().toString("yyyy-MM-dd")
+        event_time = self.time_edit.time().toString("HH:mm")
+        category = self.category_combo.currentText()
+        
+        if not event_name:
+            QMessageBox.warning(self, "Warning", "Please enter an event name!")
+            return
+        
+        # Auto-categorize if enabled
+        if self.auto_categorize_checkbox.isChecked():
+            category = self.smart_manager.categorize_event(event_name)
+        
+        # Create event object
+        new_event = {
+            "name": event_name,
+            "time": event_time,
+            "category": category,
+            "reminder": self.reminder_checkbox.isChecked(),
+            "description": self.description_edit.toPlainText().strip(),
+            "location": self.location_edit.text().strip(),
+            "created": datetime.datetime.now().isoformat()
+        }
+        
+        # Add to events
+        if event_date not in self.events:
+            self.events[event_date] = []
+        
+        self.events[event_date].append(new_event)
+        
+        # Sort events by time
+        self.events[event_date].sort(key=lambda x: x['time'])
+        
+        # Emit signal if parent has it
+        if hasattr(self.parent_app, 'event_added'):
+            self.parent_app.event_added.emit(new_event)
+        
+        self.accept()
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("EcoOS Calendar Pro")
+    
+    # Apply Tokyo Night theme
+    TokyoNightTheme.apply(app)
+    
+    # Set application style
+    app.setStyle(QStyleFactory.create('Fusion'))
+    
+    window = CalendarApp()
+    
+    # Restore window geometry if saved
+    if 'window_geometry' in window.settings:
+        try:
+            geometry_data = window.settings['window_geometry']
+            # Convert the base64 string back to bytes, then to QByteArray
+            import base64
+            geometry_bytes = base64.b64decode(geometry_data)
+            geometry_bytearray = QByteArray(geometry_bytes)
+            window.restoreGeometry(geometry_bytearray)
+        except Exception as e:
+            print(f"Could not restore window geometry: {e}")
+            # Use default geometry
+    
+    window.show()
+    
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    # Check for optional dependencies
+    if not WEATHER_AVAILABLE:
+        print("Note: Weather features disabled. Install geopy: pip install geopy")
+    if not API_AVAILABLE:
+        print("Note: Some API features disabled. Install requests: pip install requests")
+    
+    main()

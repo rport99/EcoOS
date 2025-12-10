@@ -14,7 +14,7 @@ import json
 import signal
 import math
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta
+from datetime import datetime as dt, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
@@ -28,6 +28,15 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
 from PyQt5.QtCore import Qt, QTimer, QPoint, QSize, pyqtSignal, QThread, QSettings, QEvent, QPropertyAnimation, QEasingCurve, QObject, QRect
 from PyQt5.QtGui import (QIcon, QFont, QPalette, QColor, QPainter, QLinearGradient, 
                         QFontDatabase, QPixmap, QPen, QWheelEvent, QBrush, QRadialGradient, QKeySequence, QCursor)
+
+
+# Add these imports near the top with other imports
+import json
+from PyQt5.QtWidgets import QCalendarWidget, QDateEdit, QTimeEdit, QSplitter, QGroupBox
+from PyQt5.QtCore import QDate, QTime
+import datetime
+
+
 # Try to import QX11Info from the correct module
 try:
     from PyQt5.QtX11Extras import QX11Info
@@ -8947,61 +8956,283 @@ class TokyoNightPanelBar(QMainWindow):
 
     def show_calendar(self, event):
         """Show a calendar dialog when the clock is left-clicked."""
-        from PyQt5.QtWidgets import QDialog, QCalendarWidget, QVBoxLayout, QLabel
-        from PyQt5.QtCore import Qt, QDate
-        
         # ONLY show calendar if left mouse button was pressed
         if event.button() != Qt.LeftButton:
             return  # Ignore right-clicks, middle-clicks, etc.
+        
+        # Import the CalendarApp from the calendar program
+        # We'll create a simplified version for the popup
+        self.show_calendar_popup()
+
+    def show_calendar_popup(self):
+        """Show the enhanced calendar popup"""
+        try:
+            # Create a simplified calendar dialog instead of importing the full app
+            dialog = QDialog(self)
+            dialog.setWindowTitle("EcoOS Calendar")
+            dialog.setFixedSize(700, 600)
+            dialog.setStyleSheet(f"""
+                QDialog {{
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {TokyoNight.NIGHT_TOP}, 
+                        stop:0.7 {TokyoNight.NIGHT_BOTTOM},
+                        stop:1 {TokyoNight.NIGHT_HIGHLIGHT});
+                    color: {TokyoNight.FOREGROUND};
+                    border-radius: 8px;
+                    border: 1px solid {TokyoNight.NEBULA};
+                }}
+                QCalendarWidget {{
+                    background: {TokyoNight.SELECTION};
+                    color: {TokyoNight.FOREGROUND};
+                    border: 1px solid {TokyoNight.NEBULA};
+                    border-radius: 4px;
+                    padding: 5px;
+                }}
+                QCalendarWidget QWidget {{
+                    alternate-background-color: {TokyoNight.DARK_GRAY};
+                }}
+                QCalendarWidget QToolButton {{
+                    color: {TokyoNight.BLUE};
+                    font-weight: bold;
+                    background: {TokyoNight.SELECTION};
+                    border: 1px solid {TokyoNight.NEBULA};
+                    border-radius: 4px;
+                    padding: 5px;
+                }}
+                QCalendarWidget QToolButton:hover {{
+                    background: {TokyoNight.BLUE}40;
+                }}
+                QCalendarWidget QMenu {{
+                    background: {TokyoNight.NIGHT_BOTTOM};
+                    color: {TokyoNight.FOREGROUND};
+                    border: 1px solid {TokyoNight.NEBULA};
+                    border-radius: 4px;
+                }}
+                QCalendarWidget QAbstractItemView:enabled {{
+                    selection-background-color: {TokyoNight.BLUE};
+                    selection-color: {TokyoNight.BACKGROUND};
+                }}
+                QPushButton {{
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {TokyoNight.BLUE}, 
+                        stop:1 {TokyoNight.PURPLE});
+                    color: {TokyoNight.BACKGROUND};
+                    border: none;
+                    border-radius: 4px;
+                    padding: 8px 16px;
+                    font-weight: bold;
+                }}
+                QPushButton:hover {{
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {TokyoNight.CYAN}, 
+                        stop:1 {TokyoNight.BLUE});
+                }}
+                QLabel {{
+                    color: {TokyoNight.FOREGROUND};
+                    font-size: 12pt;
+                    padding: 5px;
+                }}
+                QListWidget {{
+                    background: {TokyoNight.SELECTION};
+                    color: {TokyoNight.FOREGROUND};
+                    border: 1px solid {TokyoNight.NEBULA};
+                    border-radius: 4px;
+                    padding: 5px;
+                }}
+                QListWidget::item {{
+                    padding: 8px;
+                    border-radius: 3px;
+                    border-bottom: 1px solid {TokyoNight.NEBULA}40;
+                }}
+                QListWidget::item:selected {{
+                    background: {TokyoNight.BLUE};
+                    color: {TokyoNight.BACKGROUND};
+                }}
+                QTextEdit {{
+                    background: {TokyoNight.SELECTION};
+                    color: {TokyoNight.FOREGROUND};
+                    border: 1px solid {TokyoNight.NEBULA};
+                    border-radius: 4px;
+                    padding: 5px;
+                }}
+            """)
             
-        # Create a dialog
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Calendar")
-        dialog.setFixedSize(300, 250)
-        dialog.setStyleSheet(f"""
-            QDialog {{
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {TokyoNight.NIGHT_TOP}, 
-                    stop:0.7 {TokyoNight.NIGHT_BOTTOM},
-                    stop:1 {TokyoNight.NIGHT_HIGHLIGHT});
-                color: {TokyoNight.FOREGROUND};
-                border-radius: 8px;
-                border: 1px solid {TokyoNight.NEBULA};
-            }}
-            QCalendarWidget {{
-                background: {TokyoNight.SELECTION};
-                color: {TokyoNight.FOREGROUND};
-                border: 1px solid {TokyoNight.NEBULA};
-                border-radius: 4px;
-            }}
-            QCalendarWidget QAbstractItemView:enabled {{
-                selection-background-color: {TokyoNight.BLUE};
-                selection-color: {TokyoNight.BACKGROUND};
-            }}
-            QCalendarWidget QToolButton {{
-                background: {TokyoNight.SELECTION};
-                color: {TokyoNight.FOREGROUND};
-                border: none;
-                border-radius: 4px;
-            }}
-            QCalendarWidget QToolButton:hover {{
-                background: {TokyoNight.BLUE}40;
-            }}
-        """)
-        
-        # Create a vertical layout
-        layout = QVBoxLayout(dialog)
-        
-        # Create a calendar widget
-        calendar = QCalendarWidget()
-        # Optional: Set the current date as the selected date
-        current_date = QDate.currentDate()
-        calendar.setSelectedDate(current_date)
-        calendar.setGridVisible(True)
-        layout.addWidget(calendar)
-        
-        # Show the dialog
-        dialog.exec_()
+            layout = QVBoxLayout(dialog)
+            
+            # Date display header
+            current_date = QDate.currentDate()
+            date_label = QLabel(current_date.toString("dddd, MMMM d, yyyy"))
+            date_label.setAlignment(Qt.AlignCenter)
+            layout.addWidget(date_label)
+            
+            # Splitter for calendar and event list
+            splitter = QSplitter(Qt.Horizontal)
+            
+            # Calendar widget
+            calendar = QCalendarWidget()
+            calendar.setGridVisible(True)
+            calendar.setSelectedDate(current_date)
+            
+            # Events list for selected date
+            event_panel = QWidget()
+            event_layout = QVBoxLayout(event_panel)
+            
+            events_label = QLabel("Events for selected date:")
+            event_layout.addWidget(events_label)
+            
+            events_list = QListWidget()
+            events_list.setMaximumHeight(200)
+            event_layout.addWidget(events_list)
+            
+            # Quick event add section
+            add_event_group = QGroupBox("Quick Event")
+            add_event_layout = QVBoxLayout(add_event_group)
+            
+            event_name_edit = QLineEdit()
+            event_name_edit.setPlaceholderText("Event name")
+            add_event_layout.addWidget(event_name_edit)
+            
+            event_time_edit = QTimeEdit()
+            event_time_edit.setTime(QTime.currentTime())
+            add_event_layout.addWidget(event_time_edit)
+            
+            event_desc_edit = QTextEdit()
+            event_desc_edit.setMaximumHeight(80)
+            event_desc_edit.setPlaceholderText("Description (optional)")
+            add_event_layout.addWidget(event_desc_edit)
+            
+            add_event_btn = QPushButton("Add Event")
+            add_event_layout.addWidget(add_event_btn)
+            
+            event_layout.addWidget(add_event_group)
+            
+            # Add widgets to splitter
+            splitter.addWidget(calendar)
+            splitter.addWidget(event_panel)
+            splitter.setSizes([400, 300])
+            
+            layout.addWidget(splitter)
+            
+            # Bottom buttons
+            button_layout = QHBoxLayout()
+            
+            today_btn = QPushButton("Today")
+            today_btn.clicked.connect(lambda: calendar.setSelectedDate(QDate.currentDate()))
+            button_layout.addWidget(today_btn)
+            
+            add_reminder_btn = QPushButton("Add Reminder")
+            button_layout.addWidget(add_reminder_btn)
+            
+            show_all_btn = QPushButton("Show All Events")
+            button_layout.addWidget(show_all_btn)
+            
+            button_layout.addStretch()
+            
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(dialog.accept)
+            button_layout.addWidget(close_btn)
+            
+            layout.addLayout(button_layout)
+            
+            # Function to update events list
+            def update_events_list():
+                events_list.clear()
+                selected_date = calendar.selectedDate().toString("yyyy-MM-dd")
+                # Load events from file or use sample events
+                events_file = os.path.expanduser("~/Documents/calendar_events.json")
+                if os.path.exists(events_file):
+                    try:
+                        with open(events_file, 'r') as f:
+                            events = json.load(f)
+                            date_events = events.get(selected_date, [])
+                            for event in date_events:
+                                events_list.addItem(f"{event.get('time', '')} - {event.get('name', '')}")
+                    except:
+                        events_list.addItem("No events found")
+                else:
+                    events_list.addItem("No events scheduled")
+            
+            # Connect signals
+            calendar.selectionChanged.connect(update_events_list)
+            
+            # Function to add event
+            def add_event():
+                name = event_name_edit.text().strip()
+                if not name:
+                    QMessageBox.warning(dialog, "Warning", "Please enter an event name")
+                    return
+                
+                time = event_time_edit.time().toString("HH:mm")
+                desc = event_desc_edit.toPlainText().strip()
+                selected_date = calendar.selectedDate().toString("yyyy-MM-dd")
+                
+                # Save event to file
+                events_file = os.path.expanduser("~/Documents/calendar_events.json")
+                events = {}
+                if os.path.exists(events_file):
+                    try:
+                        with open(events_file, 'r') as f:
+                            events = json.load(f)
+                    except:
+                        pass
+                
+                if selected_date not in events:
+                    events[selected_date] = []
+                
+                events[selected_date].append({
+                    "name": name,
+                    "time": time,
+                    "description": desc,
+                    "reminder": True,
+                    "created": datetime.datetime.now().isoformat()
+                })
+                
+                with open(events_file, 'w') as f:
+                    json.dump(events, f, indent=4)
+                
+                # Clear inputs and update list
+                event_name_edit.clear()
+                event_desc_edit.clear()
+                update_events_list()
+                
+                QMessageBox.information(dialog, "Success", "Event added!")
+            
+            add_event_btn.clicked.connect(add_event)
+            
+            # Update events list initially
+            update_events_list()
+            
+            # Show dialog
+            dialog.exec_()
+            
+        except Exception as e:
+            print(f"Error showing calendar: {e}")
+            # Fallback to simple calendar
+            simple_dialog = QDialog(self)
+            simple_dialog.setWindowTitle("Calendar")
+            simple_dialog.setFixedSize(400, 400)
+            simple_dialog.setStyleSheet(f"""
+                QDialog {{
+                    background: {TokyoNight.NIGHT_BOTTOM};
+                    color: {TokyoNight.FOREGROUND};
+                    border-radius: 8px;
+                    border: 1px solid {TokyoNight.NEBULA};
+                }}
+                QCalendarWidget {{
+                    background: {TokyoNight.SELECTION};
+                    color: {TokyoNight.FOREGROUND};
+                    border: 1px solid {TokyoNight.NEBULA};
+                    border-radius: 4px;
+                }}
+            """)
+            
+            layout = QVBoxLayout(simple_dialog)
+            calendar = QCalendarWidget()
+            calendar.setGridVisible(True)
+            calendar.setSelectedDate(QDate.currentDate())
+            layout.addWidget(calendar)
+            
+            simple_dialog.exec_()
 
 
 
@@ -9138,7 +9369,7 @@ class TokyoNightPanelBar(QMainWindow):
 
     def update_clock(self):
         """Update clock display with customizable formatting"""
-        now = datetime.now()
+        now = dt.now()
         
         try:
             # Convert our format strings to Python strftime format codes
@@ -10025,7 +10256,7 @@ class TokyoNightPanelBar(QMainWindow):
 
     def update_clock(self):
         """Update clock display"""
-        now = datetime.now()
+        now = dt.now()
         time_str = now.strftime("%I:%M %p")
         date_str = now.strftime("%a %b %d")
         self.clock_label.setText(time_str)
