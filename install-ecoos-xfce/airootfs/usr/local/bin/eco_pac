@@ -1,0 +1,3574 @@
+#!/usr/bin/env python3
+"""
+EcoPac Enhanced - Intelligent & Robust Package Manager for Arch Linux
+With AUR, Flatpak support, Tokyo Night theme, repository selection, and terminal output.
+ULTRA-FAST VERSION
+"""
+
+import sys
+import os
+import subprocess
+import json
+import time
+import sqlite3
+import platform
+import psutil
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import List, Dict, Optional, Set, Tuple, Any
+from dataclasses import dataclass, field
+from collections import defaultdict
+from enum import Enum
+from contextlib import contextmanager
+import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from PyQt5.QtWidgets import *
+from PyQt5.QtCore import *
+from PyQt5.QtGui import *
+
+# ============================================================================
+# CONSTANTS & CONFIGURATION
+# ============================================================================
+CONFIG_DIR = Path.home() / ".config" / "ecopac"
+CACHE_DIR = Path.home() / ".cache" / "ecopac"
+LOG_FILE = Path.home() / ".local" / "share" / "ecopac" / "ecopac.log"
+
+# AUR API URL
+AUR_API_URL = "https://aur.archlinux.org/rpc/?v=5"
+
+# Official repositories
+OFFICIAL_REPOS = ['core', 'extra', 'community', 'multilib']
+
+# Flatpak remotes
+FLATPAK_REMOTES = ['flathub', 'flathub-beta', 'gnome-nightly', 'kdeapps']
+
+# Ensure directories exist
+for directory in [CONFIG_DIR, CACHE_DIR, LOG_FILE.parent]:
+    directory.mkdir(parents=True, exist_ok=True)
+
+# ============================================================================
+# LOGGING SETUP
+# ============================================================================
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# ============================================================================
+# ENUMS
+# ============================================================================
+class PackageStatus(Enum):
+    INSTALLED = "installed"
+    AVAILABLE = "available"
+    UPDATE_AVAILABLE = "update"
+    ORPHANED = "orphaned"
+    FOREIGN = "foreign"
+    AUR = "aur"
+    FLATPAK = "flatpak"
+    NOT_FOUND = "not_found"
+
+class PackageType(Enum):
+    PACMAN = "pacman"
+    AUR = "aur"
+    FLATPAK = "flatpak"
+
+class OperationType(Enum):
+    INSTALL = "install"
+    REMOVE = "remove"
+    UPDATE = "update"
+    REINSTALL = "reinstall"
+
+# ============================================================================
+# DATA CLASSES
+# ============================================================================
+@dataclass
+class Package:
+    name: str
+    version: str
+    description: str = ""
+    repo: str = ""
+    status: PackageStatus = PackageStatus.AVAILABLE
+    new_version: str = ""
+    install_date: str = ""
+    size: str = ""
+    url: str = ""
+    licenses: List[str] = field(default_factory=list)
+    dependencies: List[str] = field(default_factory=list)
+    is_required_by: List[str] = field(default_factory=list)
+    packager: str = ""
+    votes: int = 0
+    popularity: float = 0.0
+    last_updated: str = ""
+    architectures: List[str] = field(default_factory=list)
+    build_date: str = ""
+    install_reason: str = ""
+    package_type: PackageType = PackageType.PACMAN
+    flatpak_id: str = ""
+    flatpak_branch: str = ""
+    flatpak_origin: str = ""
+    
+    def __post_init__(self):
+        # Simple validation
+        if not self.name:
+            self.name = "unknown"
+    
+    def __hash__(self):
+        """Make Package objects hashable based on name and version."""
+        return hash((self.name, self.version, self.repo, self.package_type.value))
+    
+    def __eq__(self, other):
+        """Define equality for Package objects."""
+        if not isinstance(other, Package):
+            return False
+        return (self.name == other.name and 
+                self.version == other.version and 
+                self.repo == other.repo and
+                self.package_type == other.package_type)
+    
+    @property
+    def is_installed(self) -> bool:
+        return self.status in [PackageStatus.INSTALLED, PackageStatus.UPDATE_AVAILABLE]
+    
+    @property
+    def is_aur(self) -> bool:
+        return self.package_type == PackageType.AUR or self.repo.lower() == "aur" or self.status == PackageStatus.AUR
+    
+    @property
+    def is_flatpak(self) -> bool:
+        return self.package_type == PackageType.FLATPAK or self.status == PackageStatus.FLATPAK
+    
+    @property
+    def is_official(self) -> bool:
+        return self.repo.lower() in [r.lower() for r in OFFICIAL_REPOS]
+    
+    @property
+    def display_name(self) -> str:
+        if self.is_aur:
+            return f"{self.name} (AUR)"
+        elif self.is_flatpak:
+            if self.flatpak_id:
+                return f"{self.flatpak_id} (Flatpak)"
+            return f"{self.name} (Flatpak)"
+        elif self.repo:
+            return f"{self.name} ({self.repo})"
+        return self.name
+    
+    @property
+    def display_version(self) -> str:
+        if self.status == PackageStatus.UPDATE_AVAILABLE and self.new_version:
+            return f"{self.version} → {self.new_version}"
+        return self.version
+    
+    @property
+    def repo_display(self) -> str:
+        """Get display text for repository."""
+        if self.is_flatpak:
+            return "FLATPAK"
+        elif self.repo:
+            return self.repo.upper()
+        return ""
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+@contextmanager
+def handle_exceptions(context: str = ""):
+    """Context manager for better exception handling."""
+    try:
+        yield
+    except Exception as e:
+        logger.error(f"{context} - Error: {e}")
+        raise
+
+def safe_subprocess_run(cmd: List[str], timeout: int = 30, **kwargs) -> subprocess.CompletedProcess:
+    """Safe subprocess run with timeout and error handling."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kwargs)
+    except Exception as e:
+        logger.error(f"Command failed: {' '.join(cmd)} - {e}")
+        raise
+
+def check_flatpak_installed() -> bool:
+    """Check if Flatpak is installed."""
+    try:
+        result = subprocess.run(['which', 'flatpak'], capture_output=True, text=True)
+        return result.returncode == 0
+    except:
+        return False
+
+def search_aur_packages(query: str, limit: int = 100) -> List[Dict]:
+    """Search for packages in AUR."""
+    try:
+        response = requests.get(f"{AUR_API_URL}&type=search&arg={query}", timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('resultcount', 0) > 0:
+                return data.get('results', [])[:limit]
+    except Exception as e:
+        logger.error(f"Error searching AUR: {e}")
+    return []
+
+def get_aur_info(package_names: List[str]) -> List[Dict]:
+    """Get detailed info for AUR packages."""
+    if not package_names:
+        return []
+    
+    try:
+        names_param = "&".join([f"arg[]={name}" for name in package_names])
+        response = requests.get(f"{AUR_API_URL}&type=info&{names_param}", timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('results', [])
+    except Exception as e:
+        logger.error(f"Error getting AUR info: {e}")
+    return []
+
+def aur_package_to_package(aur_data: Dict) -> Package:
+    """Convert AUR API data to Package object."""
+    return Package(
+        name=aur_data.get('Name', ''),
+        version=aur_data.get('Version', ''),
+        description=aur_data.get('Description', ''),
+        repo='aur',
+        status=PackageStatus.AUR,
+        package_type=PackageType.AUR,
+        url=aur_data.get('URL', ''),
+        licenses=[aur_data.get('License', '')] if aur_data.get('License') else [],
+        dependencies=aur_data.get('Depends', []) + aur_data.get('MakeDepends', []),
+        votes=aur_data.get('NumVotes', 0),
+        popularity=aur_data.get('Popularity', 0.0),
+        last_updated=str(aur_data.get('LastModified', ''))
+    )
+
+def search_flatpak_apps(query: str, limit: int = 50) -> List[Package]:
+    """Search for Flatpak applications."""
+    packages = []
+    
+    if not check_flatpak_installed():
+        return packages
+    
+    try:
+        result = safe_subprocess_run(['flatpak', 'search', query, '--columns=all'], timeout=10)
+        if result.returncode == 0:
+            lines = result.stdout.strip().split('\n')
+            for line in lines:
+                if line and '\t' in line:
+                    parts = line.split('\t')
+                    if len(parts) >= 5:
+                        flatpak_id = parts[0]
+                        name = parts[1] if parts[1] else flatpak_id.split('.')[-1]
+                        description = parts[2]
+                        version = parts[4] if len(parts) > 4 else 'unknown'
+                        origin = parts[3] if len(parts) > 3 else 'flathub'
+                        
+                        packages.append(Package(
+                            name=name,
+                            version=version,
+                            description=description,
+                            repo='flatpak',
+                            status=PackageStatus.AVAILABLE,
+                            package_type=PackageType.FLATPAK,
+                            flatpak_id=flatpak_id,
+                            flatpak_origin=origin
+                        ))
+    except Exception as e:
+        logger.error(f"Error searching Flatpak: {e}")
+    
+    return packages[:limit]
+
+def get_package_repositories(package_name: str) -> List[Dict]:
+    """Get all repositories that contain a package."""
+    repositories = []
+    
+    try:
+        # Check official repositories
+        for repo in OFFICIAL_REPOS:
+            try:
+                result = safe_subprocess_run(['pacman', '-Si', package_name, '--repo', repo], timeout=5)
+                if result.returncode == 0:
+                    # Parse pacman -Si output
+                    repo_info = {'name': repo, 'version': '', 'description': ''}
+                    for line in result.stdout.split('\n'):
+                        if line.startswith('Version'):
+                            repo_info['version'] = line.split(':', 1)[1].strip()
+                        elif line.startswith('Description'):
+                            repo_info['description'] = line.split(':', 1)[1].strip()
+                    repositories.append(repo_info)
+            except:
+                continue
+        
+        # Check AUR
+        try:
+            aur_info = get_aur_info([package_name])
+            if aur_info:
+                repositories.append({
+                    'name': 'aur',
+                    'version': aur_info[0].get('Version', ''),
+                    'description': aur_info[0].get('Description', ''),
+                    'votes': aur_info[0].get('NumVotes', 0),
+                    'popularity': aur_info[0].get('Popularity', 0.0)
+                })
+        except:
+            pass
+        
+    except Exception as e:
+        logger.error(f"Error getting repositories for {package_name}: {e}")
+    
+    return repositories
+
+# ============================================================================
+# CORE COMPONENTS
+# ============================================================================
+
+class PackageCache:
+    """Cache for package information to reduce repeated queries."""
+    
+    def __init__(self):
+        self.cache = {}
+        self.expiry_times = {}
+        self.cache_duration = timedelta(minutes=5)  # Cache for 5 minutes
+    
+    def get(self, key: str):
+        """Get item from cache if not expired."""
+        if key in self.cache:
+            if datetime.now() < self.expiry_times.get(key, datetime.min):
+                return self.cache[key]
+            else:
+                # Remove expired item
+                del self.cache[key]
+                del self.expiry_times[key]
+        return None
+    
+    def set(self, key: str, value: Any):
+        """Set item in cache with expiry time."""
+        self.cache[key] = value
+        self.expiry_times[key] = datetime.now() + self.cache_duration
+    
+    def clear(self):
+        """Clear the cache."""
+        self.cache.clear()
+        self.expiry_times.clear()
+
+
+class PackageManagerModel(QAbstractTableModel):
+    """Model for displaying packages in a table view."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.packages = []
+        self.headers = ["Package", "Version", "Repository", "Status", "Type", "Votes", "Popularity"]
+    
+    def rowCount(self, parent=None):
+        return len(self.packages)
+    
+    def columnCount(self, parent=None):
+        return len(self.headers)
+    
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        
+        pkg = self.packages[index.row()]
+        col = index.column()
+        
+        if role == Qt.DisplayRole:
+            if col == 0:
+                return pkg.display_name
+            elif col == 1:
+                return pkg.display_version
+            elif col == 2:
+                return pkg.repo_display
+            elif col == 3:
+                return pkg.status.value.capitalize()
+            elif col == 4:
+                return pkg.package_type.value.upper()
+            elif col == 5:
+                return str(pkg.votes) if pkg.is_aur else ""
+            elif col == 6:
+                return f"{pkg.popularity:.2f}" if pkg.is_aur else ""
+        
+        elif role == Qt.ForegroundRole:
+            # Color coding based on status
+            if col == 3:  # Status column
+                if pkg.status == PackageStatus.INSTALLED:
+                    return QColor("#9ece6a")  # Green
+                elif pkg.status == PackageStatus.UPDATE_AVAILABLE:
+                    return QColor("#ff9e64")  # Orange
+                elif pkg.status == PackageStatus.ORPHANED:
+                    return QColor("#f7768e")  # Red
+                elif pkg.status == PackageStatus.AUR:
+                    return QColor("#bb9af7")  # Purple
+                elif pkg.status == PackageStatus.FLATPAK:
+                    return QColor("#73daca")  # Teal for Flatpak
+                elif pkg.status == PackageStatus.FOREIGN:
+                    return QColor("#bb9af7")  # Purple
+            elif col == 2:  # Repository column
+                if pkg.is_aur:
+                    return QColor("#bb9af7")  # Purple for AUR
+                elif pkg.is_flatpak:
+                    return QColor("#73daca")  # Teal for Flatpak
+                else:
+                    return QColor("#7aa2f7")  # Blue for official
+            elif col == 4:  # Type column
+                if pkg.is_flatpak:
+                    return QColor("#73daca")  # Teal for Flatpak
+                elif pkg.is_aur:
+                    return QColor("#bb9af7")  # Purple for AUR
+        
+        elif role == Qt.FontRole:
+            font = QFont()
+            if pkg.status == PackageStatus.UPDATE_AVAILABLE:
+                font.setBold(True)
+            return font
+        
+        elif role == Qt.ToolTipRole:
+            tooltip = f"{pkg.name}\n\n{pkg.description}\n"
+            if pkg.is_aur:
+                tooltip += f"\nVotes: {pkg.votes}\nPopularity: {pkg.popularity:.2f}"
+            elif pkg.is_flatpak and pkg.flatpak_id:
+                tooltip += f"\nFlatpak ID: {pkg.flatpak_id}"
+                if pkg.flatpak_origin:
+                    tooltip += f"\nOrigin: {pkg.flatpak_origin}"
+            return tooltip
+        
+        elif role == Qt.UserRole:
+            # Return the actual Package object
+            return pkg
+        
+        return None
+    
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if orientation == Qt.Horizontal and role == Qt.DisplayRole:
+            return self.headers[section]
+        return None
+    
+    def set_packages(self, packages):
+        """Update the model with new packages."""
+        self.beginResetModel()
+        self.packages = packages
+        self.endResetModel()
+
+
+class PackageLoaderUltraFast(QThread):
+    """ULTRA-FAST package loader - loads installed + AUR + Flatpak packages."""
+    
+    # Signals
+    progress_updated = pyqtSignal(int, str)  # progress, message
+    packages_loaded = pyqtSignal(list)      # list of Package objects
+    error_occurred = pyqtSignal(str)        # error message
+    
+    def __init__(self):
+        super().__init__()
+        self.flatpak_available = check_flatpak_installed()
+    
+    def run(self):
+        """Load packages ULTRA-FAST."""
+        try:
+            self.progress_updated.emit(0, "Loading installed packages...")
+            
+            # Get installed packages
+            installed_packages = self.get_installed_packages()
+            self.progress_updated.emit(40, f"Loaded {len(installed_packages)} installed packages")
+            
+            # Check for updates
+            updated_packages = self.check_for_updates(installed_packages)
+            self.progress_updated.emit(60, "Checked for updates")
+            
+            # Get AUR info for foreign packages
+            packages_with_aur = self.add_aur_info(updated_packages)
+            self.progress_updated.emit(70, "Loaded AUR info")
+            
+            # Get Flatpak packages if available
+            if self.flatpak_available:
+                flatpak_packages = self.get_flatpak_packages()
+                packages_with_aur.extend(flatpak_packages)
+                self.progress_updated.emit(90, f"Loaded {len(flatpak_packages)} Flatpak packages")
+            
+            final_packages = packages_with_aur
+            self.progress_updated.emit(100, f"Finalized {len(final_packages)} packages")
+            
+            self.packages_loaded.emit(final_packages)
+            
+        except Exception as e:
+            logger.error(f"Error loading packages: {e}")
+            self.error_occurred.emit(str(e))
+    
+    def get_installed_packages(self) -> List[Package]:
+        """Get installed packages - optimized."""
+        packages = []
+        
+        try:
+            # Get all installed packages
+            result = safe_subprocess_run(['pacman', '-Q'], timeout=3)
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                for line in lines:
+                    if line:
+                        try:
+                            name, version = line.split()
+                            packages.append(Package(
+                                name=name,
+                                version=version,
+                                status=PackageStatus.INSTALLED,
+                                package_type=PackageType.PACMAN
+                            ))
+                        except:
+                            continue
+            
+            # Get orphaned packages
+            orphan_names = set()
+            try:
+                result = safe_subprocess_run(['pacman', '-Qdtq'], timeout=1)
+                if result.returncode == 0 and result.stdout.strip():
+                    orphan_names = set(result.stdout.strip().split('\n'))
+            except:
+                pass
+            
+            # Get foreign packages (AUR)
+            aur_names = set()
+            try:
+                result = safe_subprocess_run(['pacman', '-Qmq'], timeout=1)
+                if result.returncode == 0 and result.stdout.strip():
+                    aur_names = set(result.stdout.strip().split('\n'))
+            except:
+                pass
+            
+            # Update statuses
+            for package in packages:
+                if package.name in orphan_names:
+                    package.status = PackageStatus.ORPHANED
+                elif package.name in aur_names:
+                    package.status = PackageStatus.AUR
+                    package.repo = 'aur'
+                    package.package_type = PackageType.AUR
+            
+            # Get descriptions for first 50 packages (for display)
+            if packages:
+                batch_size = 10
+                for i in range(0, min(50, len(packages)), batch_size):
+                    batch = packages[i:i+batch_size]
+                    for package in batch:
+                        try:
+                            result = safe_subprocess_run(['pacman', '-Qi', package.name], timeout=0.5)
+                            if result.returncode == 0:
+                                for line in result.stdout.strip().split('\n'):
+                                    if line.startswith('Description'):
+                                        package.description = line.split(':', 1)[1].strip()[:60]
+                                        break
+                        except:
+                            continue
+                    
+                    progress = 10 + int(i/50 * 30)
+                    self.progress_updated.emit(progress, f"Loading descriptions {i+batch_size}/50")
+        
+        except Exception as e:
+            logger.error(f"Error getting installed packages: {e}")
+        
+        return packages
+    
+    def check_for_updates(self, packages: List[Package]) -> List[Package]:
+        """Check for updates - only for installed packages."""
+        try:
+            # Check for pacman updates
+            result = safe_subprocess_run(['pacman', '-Qu'], timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                update_lines = result.stdout.strip().split('\n')
+                
+                # Create dictionary for quick lookup
+                packages_by_name = {pkg.name: pkg for pkg in packages}
+                
+                for line in update_lines:
+                    if line:
+                        try:
+                            name, new_version = line.split()
+                            if name in packages_by_name:
+                                pkg = packages_by_name[name]
+                                pkg.status = PackageStatus.UPDATE_AVAILABLE
+                                pkg.new_version = new_version
+                                
+                                # Try to get repo info for updated package
+                                try:
+                                    result = safe_subprocess_run(['pacman', '-Si', name], timeout=1)
+                                    if result.returncode == 0:
+                                        for info_line in result.stdout.strip().split('\n'):
+                                            if info_line.startswith('Repository'):
+                                                pkg.repo = info_line.split(':', 1)[1].strip()
+                                                break
+                                except:
+                                    pass
+                        except:
+                            continue
+        
+        except Exception as e:
+            logger.error(f"Error checking for updates: {e}")
+        
+        return packages
+    
+    def add_aur_info(self, packages: List[Package]) -> List[Package]:
+        """Add AUR info for foreign packages."""
+        aur_packages = [pkg for pkg in packages if pkg.package_type == PackageType.AUR]
+        
+        if aur_packages:
+            # Get AUR info in batches
+            batch_size = 20
+            for i in range(0, len(aur_packages), batch_size):
+                batch = aur_packages[i:i+batch_size]
+                batch_names = [pkg.name for pkg in batch]
+                
+                try:
+                    aur_info = get_aur_info(batch_names)
+                    aur_info_dict = {info.get('Name'): info for info in aur_info}
+                    
+                    for pkg in batch:
+                        if pkg.name in aur_info_dict:
+                            info = aur_info_dict[pkg.name]
+                            pkg.version = info.get('Version', pkg.version)
+                            pkg.description = info.get('Description', pkg.description)[:80]
+                            pkg.votes = info.get('NumVotes', 0)
+                            pkg.popularity = info.get('Popularity', 0.0)
+                except:
+                    pass
+                
+                progress = 40 + int(i/len(aur_packages) * 20)
+                self.progress_updated.emit(progress, f"Loading AUR info {i+len(batch)}/{len(aur_packages)}")
+        
+        return packages
+    
+    def get_flatpak_packages(self) -> List[Package]:
+        """Get installed Flatpak packages."""
+        packages = []
+        
+        try:
+            # Get installed Flatpak apps
+            result = safe_subprocess_run(['flatpak', 'list', '--columns=all', '--app'], timeout=5)
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                for line in lines:
+                    if line and '\t' in line:
+                        parts = line.split('\t')
+                        if len(parts) >= 5:
+                            flatpak_id = parts[0]
+                            name = parts[1] if parts[1] else flatpak_id.split('.')[-1]
+                            description = parts[2]
+                            origin = parts[3]
+                            version = parts[4]
+                            branch = parts[5] if len(parts) > 5 else 'stable'
+                            
+                            packages.append(Package(
+                                name=name,
+                                version=version,
+                                description=description,
+                                repo='flatpak',
+                                status=PackageStatus.INSTALLED,
+                                package_type=PackageType.FLATPAK,
+                                flatpak_id=flatpak_id,
+                                flatpak_origin=origin,
+                                flatpak_branch=branch
+                            ))
+            
+            # Check for Flatpak updates
+            try:
+                result = safe_subprocess_run(['flatpak', 'remote-ls', '--updates', '--columns=all'], timeout=5)
+                if result.returncode == 0 and result.stdout.strip():
+                    update_lines = result.stdout.strip().split('\n')
+                    
+                    # Create dictionary for quick lookup
+                    flatpak_by_id = {pkg.flatpak_id: pkg for pkg in packages}
+                    
+                    for line in update_lines:
+                        if line and '\t' in line:
+                            parts = line.split('\t')
+                            if len(parts) >= 4:
+                                flatpak_id = parts[0]
+                                new_version = parts[3]
+                                
+                                if flatpak_id in flatpak_by_id:
+                                    pkg = flatpak_by_id[flatpak_id]
+                                    pkg.status = PackageStatus.UPDATE_AVAILABLE
+                                    pkg.new_version = new_version
+            except:
+                pass
+        
+        except Exception as e:
+            logger.error(f"Error getting Flatpak packages: {e}")
+        
+        return packages
+
+
+class RepositorySelectionDialog(QDialog):
+    """Dialog for selecting repository to install from."""
+    
+    def __init__(self, parent=None, package_name: str = "", repositories: List[Dict] = None):
+        super().__init__(parent)
+        self.package_name = package_name
+        self.repositories = repositories or []
+        self.selected_repository = None
+        
+        self.init_ui()
+        self.apply_tokyo_night_theme()
+    
+    def init_ui(self):
+        """Initialize the dialog."""
+        self.setWindowTitle(f"Select Repository for {self.package_name}")
+        self.setModal(True)
+        self.resize(500, 300)
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        
+        # Header
+        header = QLabel(f"Multiple repositories found for <b>{self.package_name}</b>:")
+        layout.addWidget(header)
+        
+        # Repository list
+        self.repo_list = QListWidget()
+        self.repo_list.setAlternatingRowColors(True)
+        
+        for repo in self.repositories:
+            item_text = self.format_repository_text(repo)
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.UserRole, repo)
+            
+            # Color code repositories
+            if repo.get('name') == 'aur':
+                item.setForeground(QColor("#bb9af7"))  # Purple for AUR
+            elif repo.get('name') == 'flatpak':
+                item.setForeground(QColor("#73daca"))  # Teal for Flatpak
+            else:
+                item.setForeground(QColor("#7aa2f7"))  # Blue for official
+            
+            self.repo_list.addItem(item)
+        
+        self.repo_list.itemSelectionChanged.connect(self.on_selection_changed)
+        layout.addWidget(self.repo_list)
+        
+        # Button box
+        button_box = QDialogButtonBox()
+        self.install_btn = QPushButton("Install")
+        self.install_btn.clicked.connect(self.accept)
+        self.install_btn.setEnabled(False)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        
+        button_box.addButton(self.install_btn, QDialogButtonBox.AcceptRole)
+        button_box.addButton(cancel_btn, QDialogButtonBox.RejectRole)
+        
+        layout.addWidget(button_box)
+    
+    def apply_tokyo_night_theme(self):
+        """Apply Tokyo Night theme to the dialog."""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1a1b26;
+            }
+            QLabel {
+                color: #c0caf5;
+                font-size: 13px;
+            }
+            QListWidget {
+                background-color: #16161e;
+                color: #c0caf5;
+                border: 1px solid #292e42;
+                border-radius: 4px;
+                alternate-background-color: #1a1b26;
+                font-size: 12px;
+            }
+            QListWidget::item {
+                padding: 10px;
+                border-bottom: 1px solid #292e42;
+            }
+            QListWidget::item:selected {
+                background-color: #3d59a1;
+                color: #c0caf5;
+            }
+            QListWidget::item:hover {
+                background-color: #292e42;
+            }
+            QPushButton {
+                background-color: #292e42;
+                color: #c0caf5;
+                border: 1px solid #3d59a1;
+                border-radius: 4px;
+                padding: 10px 20px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #3d59a1;
+            }
+            QPushButton:disabled {
+                background-color: #1a1b26;
+                color: #565f89;
+                border: 1px solid #292e42;
+            }
+        """)
+    
+    def format_repository_text(self, repo: Dict) -> str:
+        """Format repository information for display."""
+        name = repo.get('name', '').upper()
+        version = repo.get('version', '')
+        description = repo.get('description', '')
+        
+        text = f"【{name}】\n"
+        text += f"Version: {version}\n"
+        
+        if description:
+            text += f"Description: {description[:100]}"
+            if len(description) > 100:
+                text += "..."
+        
+        # Add AUR specific info
+        if name.lower() == 'aur':
+            votes = repo.get('votes', 0)
+            popularity = repo.get('popularity', 0.0)
+            if votes > 0:
+                text += f"\nVotes: {votes} • Popularity: {popularity:.2f}"
+        
+        return text
+    
+    def on_selection_changed(self):
+        """Handle repository selection change."""
+        selected_items = self.repo_list.selectedItems()
+        self.install_btn.setEnabled(len(selected_items) > 0)
+        
+        if selected_items:
+            self.selected_repository = selected_items[0].data(Qt.UserRole)
+        else:
+            self.selected_repository = None
+    
+    def get_selected_repository(self) -> Optional[Dict]:
+        """Get the selected repository."""
+        return self.selected_repository
+
+
+# ============================================================================
+# TERMINAL OUTPUT WIDGET
+# ============================================================================
+class TerminalOutputWidget(QWidget):
+    """Widget to display terminal-like output."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.init_ui()
+    
+    def init_ui(self):
+        """Initialize the terminal output widget."""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        # Terminal header
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(10, 5, 10, 5)
+        
+        title = QLabel("Terminal Output")
+        title.setStyleSheet("font-weight: bold; color: #7aa2f7;")
+        header_layout.addWidget(title)
+        
+        header_layout.addStretch()
+        
+        # Clear button
+        self.clear_btn = QPushButton("Clear")
+        self.clear_btn.clicked.connect(self.clear_output)
+        self.clear_btn.setMaximumWidth(80)
+        header_layout.addWidget(self.clear_btn)
+        
+        layout.addWidget(header)
+        
+        # Terminal output area
+        self.output_text = QTextEdit()
+        self.output_text.setReadOnly(True)
+        self.output_text.setFont(QFont("Monospace", 10))
+        self.output_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #16161e;
+                color: #c0caf5;
+                border: 1px solid #292e42;
+                border-radius: 0px;
+                font-family: Monospace;
+                font-size: 10px;
+            }
+        """)
+        
+        layout.addWidget(self.output_text)
+    
+    def clear_output(self):
+        """Clear the terminal output."""
+        self.output_text.clear()
+    
+    def append_output(self, text: str, color: str = "#c0caf5"):
+        """Append text to the terminal output with specified color."""
+        cursor = self.output_text.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        
+        # Create HTML for colored text
+        html = f'<span style="color: {color};">{text}</span><br>'
+        
+        # Insert HTML
+        self.output_text.textCursor().insertHtml(html)
+        
+        # Scroll to bottom
+        self.output_text.verticalScrollBar().setValue(
+            self.output_text.verticalScrollBar().maximum()
+        )
+    
+    def append_command(self, command: str):
+        """Append a command being executed."""
+        self.append_output(f"$ {command}", "#7aa2f7")
+    
+    def append_success(self, text: str):
+        """Append success message."""
+        self.append_output(f"✓ {text}", "#9ece6a")
+    
+    def append_error(self, text: str):
+        """Append error message."""
+        self.append_output(f"✗ {text}", "#f7768e")
+    
+    def append_warning(self, text: str):
+        """Append warning message."""
+        self.append_output(f"⚠ {text}", "#ff9e64")
+    
+    def append_info(self, text: str):
+        """Append info message."""
+        self.append_output(f"ℹ {text}", "#7aa2f7")
+    
+    def append_stdout(self, text: str):
+        """Append standard output."""
+        if text.strip():
+            self.append_output(text, "#c0caf5")
+    
+    def append_stderr(self, text: str):
+        """Append standard error."""
+        if text.strip():
+            self.append_output(text, "#ff9e64")
+
+
+# ============================================================================
+# COMMAND EXECUTION THREAD WITH REAL-TIME OUTPUT
+# ============================================================================
+class CommandExecutor(QThread):
+    """Thread for executing commands with real-time output."""
+    
+    # Signals
+    output_received = pyqtSignal(str, str)  # text, type (stdout/stderr)
+    command_started = pyqtSignal(str)       # command string
+    command_finished = pyqtSignal(bool, str)  # success, message
+    progress_updated = pyqtSignal(int)      # progress percentage
+    
+    def __init__(self, command: List[str], operation_name: str = ""):
+        super().__init__()
+        self.command = command
+        self.operation_name = operation_name
+        self.process = None
+        self.should_stop = False
+    
+    def run(self):
+        """Execute the command with real-time output."""
+        try:
+            # Emit start signal
+            self.command_started.emit(" ".join(self.command))
+            self.output_received.emit(f"Starting {self.operation_name}...", "info")
+            
+            # Create process
+            self.process = subprocess.Popen(
+                self.command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                bufsize=1,
+                shell=False,
+                env={**os.environ, 'LC_ALL': 'C', 'LANG': 'C'}  # Ensure English output
+            )
+            
+            # Read stdout in real-time
+            def read_output(pipe, output_type):
+                try:
+                    for line in iter(pipe.readline, ''):
+                        if self.should_stop:
+                            break
+                        if line:
+                            self.output_received.emit(line.rstrip('\n'), output_type)
+                    pipe.close()
+                except Exception as e:
+                    self.output_received.emit(f"Error reading output: {str(e)}", "error")
+            
+            # Start threads for stdout and stderr
+            import threading
+            stdout_thread = threading.Thread(target=read_output, args=(self.process.stdout, "stdout"))
+            stderr_thread = threading.Thread(target=read_output, args=(self.process.stderr, "stderr"))
+            
+            stdout_thread.start()
+            stderr_thread.start()
+            
+            # Wait for process to complete
+            self.process.wait()
+            
+            # Wait for threads to finish
+            stdout_thread.join(timeout=1)
+            stderr_thread.join(timeout=1)
+            
+            if self.should_stop:
+                self.command_finished.emit(False, "Operation cancelled")
+                self.output_received.emit("Operation cancelled by user", "warning")
+            else:
+                success = self.process.returncode == 0
+                message = f"{self.operation_name} completed successfully" if success else f"{self.operation_name} failed"
+                self.command_finished.emit(success, message)
+                
+                if success:
+                    self.output_received.emit(f"✅ {message}", "success")
+                else:
+                    self.output_received.emit(f"❌ {message} (exit code: {self.process.returncode})", "error")
+        
+        except Exception as e:
+            self.command_finished.emit(False, f"Error: {str(e)}")
+            self.output_received.emit(f"❌ Error executing command: {str(e)}", "error")
+    
+    def stop(self):
+        """Stop the command execution."""
+        self.should_stop = True
+        if self.process:
+            try:
+                self.process.terminate()
+                self.process.wait(timeout=5)
+            except:
+                try:
+                    self.process.kill()
+                except:
+                    pass
+
+
+# ============================================================================
+# COMMAND EXECUTION DIALOG WITH TERMINAL OUTPUT
+# ============================================================================
+class CommandExecutionDialog(QDialog):
+    """Dialog for executing commands with terminal output display."""
+    
+    def __init__(self, parent=None, command: List[str] = None, operation_name: str = ""):
+        super().__init__(parent)
+        self.command = command or []
+        self.operation_name = operation_name
+        self.executor = None
+        self.success = False
+        
+        self.init_ui()
+        self.apply_tokyo_night_theme()
+        self.start_execution()
+    
+    def init_ui(self):
+        """Initialize the dialog."""
+        self.setWindowTitle(f"Executing: {self.operation_name}")
+        self.resize(800, 500)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        # Terminal output widget
+        self.terminal = TerminalOutputWidget()
+        layout.addWidget(self.terminal)
+        
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)  # Indeterminate
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("Executing command...")
+        layout.addWidget(self.progress_bar)
+        
+        # Button box
+        self.button_box = QDialogButtonBox()
+        self.cancel_btn = QPushButton("Cancel")
+        self.close_btn = QPushButton("Close")
+        self.close_btn.setEnabled(False)
+        
+        self.button_box.addButton(self.cancel_btn, QDialogButtonBox.RejectRole)
+        self.button_box.addButton(self.close_btn, QDialogButtonBox.AcceptRole)
+        
+        self.cancel_btn.clicked.connect(self.cancel_execution)
+        self.close_btn.clicked.connect(self.accept)
+        
+        layout.addWidget(self.button_box)
+    
+    def apply_tokyo_night_theme(self):
+        """Apply Tokyo Night theme to the dialog."""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1a1b26;
+            }
+            QProgressBar {
+                background-color: #16161e;
+                border: 1px solid #292e42;
+                border-radius: 3px;
+                text-align: center;
+                color: #c0caf5;
+                font-size: 11px;
+            }
+            QProgressBar::chunk {
+                background-color: #7aa2f7;
+                border-radius: 2px;
+            }
+            QPushButton {
+                background-color: #292e42;
+                color: #c0caf5;
+                border: 1px solid #3d59a1;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #3d59a1;
+            }
+            QPushButton:disabled {
+                background-color: #1a1b26;
+                color: #565f89;
+                border: 1px solid #292e42;
+            }
+        """)
+    
+    def start_execution(self):
+        """Start command execution."""
+        # Show the command being executed
+        self.terminal.append_command(" ".join(self.command))
+        
+        # Create and start executor thread
+        self.executor = CommandExecutor(self.command, self.operation_name)
+        self.executor.output_received.connect(self.handle_output)
+        self.executor.command_started.connect(self.handle_command_started)
+        self.executor.command_finished.connect(self.handle_command_finished)
+        self.executor.progress_updated.connect(self.handle_progress_update)
+        self.executor.start()
+    
+    def handle_output(self, text: str, output_type: str):
+        """Handle output from the command."""
+        if output_type == "stdout":
+            self.terminal.append_stdout(text)
+        elif output_type == "stderr":
+            self.terminal.append_stderr(text)
+        elif output_type == "info":
+            self.terminal.append_info(text)
+        elif output_type == "success":
+            self.terminal.append_success(text)
+        elif output_type == "error":
+            self.terminal.append_error(text)
+        elif output_type == "warning":
+            self.terminal.append_warning(text)
+    
+    def handle_command_started(self, command: str):
+        """Handle command started signal."""
+        self.progress_bar.setFormat(f"Executing: {command}")
+    
+    def handle_command_finished(self, success: bool, message: str):
+        """Handle command finished signal."""
+        self.success = success
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(100)
+        
+        if success:
+            self.progress_bar.setFormat("✅ Operation completed successfully")
+            self.terminal.append_success(message)
+        else:
+            self.progress_bar.setFormat("❌ Operation failed")
+            self.terminal.append_error(message)
+        
+        # Update buttons
+        self.cancel_btn.setEnabled(False)
+        self.close_btn.setEnabled(True)
+    
+    def handle_progress_update(self, progress: int):
+        """Handle progress update."""
+        if self.progress_bar.maximum() == 0:
+            self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(progress)
+    
+    def cancel_execution(self):
+        """Cancel the command execution."""
+        if self.executor and self.executor.isRunning():
+            reply = QMessageBox.question(
+                self, "Cancel Operation",
+                "Are you sure you want to cancel this operation?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                self.executor.stop()
+                self.terminal.append_warning("Operation cancelled by user")
+                self.cancel_btn.setEnabled(False)
+                self.close_btn.setEnabled(True)
+                self.progress_bar.setFormat("Operation cancelled")
+    
+    def closeEvent(self, event):
+        """Handle dialog close event."""
+        if self.executor and self.executor.isRunning():
+            reply = QMessageBox.question(
+                self, "Operation in Progress",
+                "An operation is still in progress. Do you want to cancel it?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                self.executor.stop()
+                event.accept()
+            else:
+                event.ignore()
+        else:
+            event.accept()
+
+
+# ============================================================================
+# FLATPAK MANAGER DIALOG
+# ============================================================================
+class FlatpakManagerDialog(QDialog):
+    """Dialog for managing Flatpak applications and remotes."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.flatpak_available = check_flatpak_installed()
+        self.parent_window = parent
+        
+        self.init_ui()
+        self.apply_tokyo_night_theme()
+        self.load_flatpak_apps()
+        self.load_flatpak_remotes()
+    
+    def init_ui(self):
+        """Initialize the Flatpak manager dialog."""
+        self.setWindowTitle("Flatpak Manager")
+        self.setModal(True)
+        self.resize(900, 600)
+        
+        layout = QVBoxLayout(self)
+        
+        # Header
+        header = QLabel("Flatpak Applications")
+        header_font = QFont()
+        header_font.setPointSize(16)
+        header_font.setBold(True)
+        header.setFont(header_font)
+        header.setStyleSheet("color: #73daca;")
+        layout.addWidget(header)
+        
+        # Create tabs
+        self.tab_widget = QTabWidget()
+        
+        # Installed apps tab
+        installed_tab = QWidget()
+        installed_layout = QVBoxLayout(installed_tab)
+        
+        self.flatpak_list = QListWidget()
+        self.flatpak_list.setAlternatingRowColors(True)
+        self.flatpak_list.setSelectionMode(QListWidget.ExtendedSelection)
+        
+        installed_layout.addWidget(self.flatpak_list)
+        
+        # Installed apps actions
+        actions_widget = QWidget()
+        actions_layout = QHBoxLayout(actions_widget)
+        
+        update_flatpak_btn = QPushButton("Update Selected")
+        update_flatpak_btn.clicked.connect(self.update_selected_flatpak)
+        actions_layout.addWidget(update_flatpak_btn)
+        
+        remove_flatpak_btn = QPushButton("Remove Selected")
+        remove_flatpak_btn.clicked.connect(self.remove_selected_flatpak)
+        actions_layout.addWidget(remove_flatpak_btn)
+        
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(self.load_flatpak_apps)
+        actions_layout.addWidget(refresh_btn)
+        
+        installed_layout.addWidget(actions_widget)
+        
+        self.tab_widget.addTab(installed_tab, "Installed")
+        
+        # Remotes tab
+        remotes_tab = QWidget()
+        remotes_layout = QVBoxLayout(remotes_tab)
+        
+        self.remotes_list = QListWidget()
+        self.remotes_list.setSelectionMode(QListWidget.SingleSelection)
+        
+        remotes_layout.addWidget(self.remotes_list)
+        
+        # Remote actions
+        remote_actions = QWidget()
+        remote_actions_layout = QHBoxLayout(remote_actions)
+        
+        add_remote_btn = QPushButton("Add Remote")
+        add_remote_btn.clicked.connect(self.add_flatpak_remote_dialog)
+        remote_actions_layout.addWidget(add_remote_btn)
+        
+        remove_remote_btn = QPushButton("Remove Selected Remote")
+        remove_remote_btn.clicked.connect(self.remove_selected_remote)
+        remote_actions_layout.addWidget(remove_remote_btn)
+        
+        refresh_remotes_btn = QPushButton("Refresh")
+        refresh_remotes_btn.clicked.connect(self.load_flatpak_remotes)
+        remote_actions_layout.addWidget(refresh_remotes_btn)
+        
+        remotes_layout.addWidget(remote_actions)
+        
+        self.tab_widget.addTab(remotes_tab, "Remotes")
+        
+        # Add tabs to dialog
+        layout.addWidget(self.tab_widget)
+        
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
+    
+    def apply_tokyo_night_theme(self):
+        """Apply Tokyo Night theme to the dialog."""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1a1b26;
+            }
+            QLabel {
+                color: #c0caf5;
+            }
+            QListWidget {
+                background-color: #16161e;
+                color: #c0caf5;
+                border: 1px solid #292e42;
+                border-radius: 4px;
+                alternate-background-color: #1a1b26;
+                font-size: 12px;
+            }
+            QListWidget::item {
+                padding: 10px;
+                border-bottom: 1px solid #292e42;
+            }
+            QListWidget::item:selected {
+                background-color: #3d59a1;
+                color: #c0caf5;
+            }
+            QListWidget::item:hover {
+                background-color: #292e42;
+            }
+            QPushButton {
+                background-color: #292e42;
+                color: #c0caf5;
+                border: 1px solid #3d59a1;
+                border-radius: 4px;
+                padding: 10px 20px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #3d59a1;
+            }
+            QPushButton:disabled {
+                background-color: #1a1b26;
+                color: #565f89;
+                border: 1px solid #292e42;
+            }
+            QTabWidget::pane {
+                border: 1px solid #292e42;
+                background-color: #1a1b26;
+            }
+            QTabBar::tab {
+                background-color: #16161e;
+                color: #787c99;
+                padding: 10px 20px;
+                margin-right: 2px;
+                border: 1px solid #292e42;
+                border-bottom: none;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+            }
+            QTabBar::tab:selected {
+                background-color: #1a1b26;
+                color: #7aa2f7;
+                border-bottom: 2px solid #7aa2f7;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #292e42;
+                color: #a9b1d6;
+            }
+        """)
+    
+    def load_flatpak_apps(self):
+        """Load installed Flatpak applications."""
+        self.flatpak_list.clear()
+        
+        if not self.flatpak_available:
+            item = QListWidgetItem("Flatpak is not installed on your system.")
+            item.setForeground(QColor("#f7768e"))
+            self.flatpak_list.addItem(item)
+            return
+        
+        try:
+            # Get installed apps
+            result = safe_subprocess_run(['flatpak', 'list', '--columns=all', '--app'], timeout=5)
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                if not lines or lines[0] == '':
+                    item = QListWidgetItem("No Flatpak applications installed.")
+                    item.setForeground(QColor("#ff9e64"))
+                    self.flatpak_list.addItem(item)
+                    return
+                
+                for line in lines:
+                    if line and '\t' in line:
+                        parts = line.split('\t')
+                        if len(parts) >= 4:
+                            flatpak_id = parts[0]
+                            name = parts[1] if parts[1] else flatpak_id.split('.')[-1]
+                            description = parts[2]
+                            version = parts[3]
+                            
+                            item_text = f"<b>{name}</b> ({version})"
+                            if description:
+                                item_text += f"\n{description[:80]}"
+                            if len(parts) > 4 and parts[4]:  # Origin
+                                item_text += f"\nOrigin: {parts[4]}"
+                            
+                            item = QListWidgetItem(item_text)
+                            item.setData(Qt.UserRole, {
+                                'id': flatpak_id,
+                                'name': name,
+                                'version': version,
+                                'description': description
+                            })
+                            item.setToolTip(f"ID: {flatpak_id}\n{description}")
+                            self.flatpak_list.addItem(item)
+        except Exception as e:
+            logger.error(f"Error loading Flatpak apps: {e}")
+            item = QListWidgetItem(f"Error loading Flatpak applications: {str(e)}")
+            item.setForeground(QColor("#f7768e"))
+            self.flatpak_list.addItem(item)
+    
+    def load_flatpak_remotes(self):
+        """Load Flatpak remotes."""
+        self.remotes_list.clear()
+        
+        if not self.flatpak_available:
+            item = QListWidgetItem("Flatpak is not installed on your system.")
+            item.setForeground(QColor("#f7768e"))
+            self.remotes_list.addItem(item)
+            return
+        
+        try:
+            result = safe_subprocess_run(['flatpak', 'remotes', '--columns=all'], timeout=5)
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                if not lines or lines[0] == '':
+                    item = QListWidgetItem("No Flatpak remotes configured.")
+                    item.setForeground(QColor("#ff9e64"))
+                    self.remotes_list.addItem(item)
+                    return
+                
+                for line in lines:
+                    if line and '\t' in line:
+                        parts = line.split('\t')
+                        if len(parts) >= 3:
+                            name = parts[0]
+                            title = parts[1]
+                            url = parts[2]
+                            
+                            # Get additional info
+                            is_system = "system" in line.lower()
+                            remote_type = "System" if is_system else "User"
+                            
+                            item_text = f"<b>{name}</b> - {title}"
+                            item_text += f"\n{url}"
+                            item_text += f"\nType: {remote_type}"
+                            
+                            item = QListWidgetItem(item_text)
+                            item.setData(Qt.UserRole, {
+                                'name': name,
+                                'title': title,
+                                'url': url,
+                                'is_system': is_system
+                            })
+                            item.setToolTip(f"Name: {name}\nTitle: {title}\nURL: {url}\nType: {remote_type}")
+                            
+                            # Color code system vs user remotes
+                            if is_system:
+                                item.setForeground(QColor("#7aa2f7"))  # Blue for system
+                            else:
+                                item.setForeground(QColor("#9ece6a"))  # Green for user
+                            
+                            self.remotes_list.addItem(item)
+        except Exception as e:
+            logger.error(f"Error loading Flatpak remotes: {e}")
+            item = QListWidgetItem(f"Error loading Flatpak remotes: {str(e)}")
+            item.setForeground(QColor("#f7768e"))
+            self.remotes_list.addItem(item)
+    
+    def update_selected_flatpak(self):
+        """Update selected Flatpak applications."""
+        selected_items = self.flatpak_list.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "No Selection", "Please select applications to update.")
+            return
+        
+        flatpak_ids = []
+        names = []
+        for item in selected_items:
+            data = item.data(Qt.UserRole)
+            if data and 'id' in data:
+                flatpak_ids.append(data['id'])
+                names.append(data.get('name', data['id']))
+        
+        if not flatpak_ids:
+            return
+        
+        reply = QMessageBox.question(
+            self, "Confirm Update",
+            f"Update {len(names)} Flatpak application(s)?\n\n" +
+            "\n".join(names[:5]) +
+            ("\n..." if len(names) > 5 else ""),
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # Create update dialog
+            cmd = ['flatpak', 'update', '-y'] + flatpak_ids
+            dialog = CommandExecutionDialog(self, cmd, f"Updating {len(flatpak_ids)} Flatpak applications")
+            dialog.exec_()
+            
+            if dialog.success:
+                self.load_flatpak_apps()
+                # Refresh main window if it exists
+                if self.parent_window:
+                    self.parent_window.refresh_packages()
+    
+    def remove_selected_flatpak(self):
+        """Remove selected Flatpak applications."""
+        selected_items = self.flatpak_list.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "No Selection", "Please select applications to remove.")
+            return
+        
+        flatpak_ids = []
+        names = []
+        for item in selected_items:
+            data = item.data(Qt.UserRole)
+            if data and 'id' in data:
+                flatpak_ids.append(data['id'])
+                names.append(data.get('name', data['id']))
+        
+        if not flatpak_ids:
+            return
+        
+        reply = QMessageBox.question(
+            self, "Confirm Removal",
+            f"Remove {len(names)} Flatpak application(s)?\n\n" +
+            "This will uninstall the selected applications.\n\n" +
+            "\n".join(names[:5]) +
+            ("\n..." if len(names) > 5 else ""),
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            cmd = ['flatpak', 'uninstall', '-y'] + flatpak_ids
+            dialog = CommandExecutionDialog(self, cmd, f"Removing {len(flatpak_ids)} Flatpak applications")
+            dialog.exec_()
+            
+            if dialog.success:
+                self.load_flatpak_apps()
+                # Refresh main window if it exists
+                if self.parent_window:
+                    self.parent_window.refresh_packages()
+    
+    def add_flatpak_remote_dialog(self):
+        """Open dialog to add Flatpak remote."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add Flatpak Remote")
+        dialog.setModal(True)
+        dialog.resize(500, 300)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Remote name
+        name_label = QLabel("Remote name:")
+        layout.addWidget(name_label)
+        
+        name_input = QLineEdit()
+        name_input.setPlaceholderText("e.g., flathub-beta")
+        layout.addWidget(name_input)
+        
+        # Remote URL
+        url_label = QLabel("Remote URL:")
+        layout.addWidget(url_label)
+        
+        url_input = QLineEdit()
+        url_input.setPlaceholderText("e.g., https://flathub.org/beta-repo/flathub-beta.flatpakrepo")
+        layout.addWidget(url_input)
+        
+        # Common remotes
+        common_label = QLabel("Common remotes:")
+        layout.addWidget(common_label)
+        
+        common_remotes = QWidget()
+        common_layout = QHBoxLayout(common_remotes)
+        
+        flathub_btn = QPushButton("Flathub")
+        flathub_btn.clicked.connect(lambda: self.set_remote_fields(name_input, url_input, 
+                                                                  "flathub", 
+                                                                  "https://flathub.org/repo/flathub.flatpakrepo"))
+        common_layout.addWidget(flathub_btn)
+        
+        flathub_beta_btn = QPushButton("Flathub Beta")
+        flathub_beta_btn.clicked.connect(lambda: self.set_remote_fields(name_input, url_input,
+                                                                       "flathub-beta",
+                                                                       "https://flathub.org/beta-repo/flathub-beta.flatpakrepo"))
+        common_layout.addWidget(flathub_beta_btn)
+        
+        gnome_btn = QPushButton("GNOME Nightly")
+        gnome_btn.clicked.connect(lambda: self.set_remote_fields(name_input, url_input,
+                                                                "gnome-nightly",
+                                                                "https://nightly.gnome.org/gnome-nightly.flatpakrepo"))
+        common_layout.addWidget(gnome_btn)
+        
+        layout.addWidget(common_remotes)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        if dialog.exec_() == QDialog.Accepted:
+            name = name_input.text().strip()
+            url = url_input.text().strip()
+            
+            if name and url:
+                self.add_flatpak_remote_execute(name, url)
+    
+    def set_remote_fields(self, name_input: QLineEdit, url_input: QLineEdit, name: str, url: str):
+        """Set remote name and URL fields."""
+        name_input.setText(name)
+        url_input.setText(url)
+    
+    def add_flatpak_remote_execute(self, name: str, url: str):
+        """Execute adding Flatpak remote."""
+        cmd = ['flatpak', 'remote-add', '--if-not-exists', name, url]
+        dialog = CommandExecutionDialog(self, cmd, f"Adding Flatpak remote: {name}")
+        dialog.exec_()
+        
+        if dialog.success:
+            self.load_flatpak_remotes()
+    
+    def remove_selected_remote(self):
+        """Remove selected Flatpak remote."""
+        selected_items = self.remotes_list.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "No Selection", "Please select a remote to remove.")
+            return
+        
+        for item in selected_items:
+            data = item.data(Qt.UserRole)
+            if not data:
+                continue
+                
+            name = data['name']
+            is_system = data.get('is_system', False)
+            
+            # Warn about essential remotes
+            if name in ['flathub', 'flathub-beta']:
+                reply = QMessageBox.warning(
+                    self, "Remove Essential Remote",
+                    f"Warning: {name} is a commonly used remote.\n\n"
+                    "Are you sure you want to remove it?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply != QMessageBox.Yes:
+                    continue
+            
+            # Warn about system remotes
+            if is_system:
+                reply = QMessageBox.warning(
+                    self, "Remove System Remote",
+                    f"Warning: {name} is a system remote.\n\n"
+                    "System remotes are installed for all users. "
+                    "Are you sure you want to remove it?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply != QMessageBox.Yes:
+                    continue
+            
+            reply = QMessageBox.question(
+                self, "Confirm Removal",
+                f"Remove Flatpak remote: {name}?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                cmd = ['flatpak', 'remote-delete', name]
+                dialog = CommandExecutionDialog(self, cmd, f"Removing Flatpak remote: {name}")
+                dialog.exec_()
+                
+                if dialog.success:
+                    self.load_flatpak_remotes()
+
+
+# ============================================================================
+# MAIN WINDOW WITH TERMINAL OUTPUT TAB - HYBRID LOADING
+# ============================================================================
+class EcoPacManager(QMainWindow):
+    """Main window with terminal output tab - HYBRID LOADING with Flatpak support."""
+    
+    def __init__(self):
+        super().__init__()
+        self.packages = []  # Installed and AUR packages only
+        self.available_packages_cache = {}  # Cache for available packages
+        self.package_cache = PackageCache()
+        self.selected_packages = []
+        self.current_search = ""
+        self.searching_aur = False
+        self.flatpak_available = check_flatpak_installed()
+        self.flatpak_manager_dialog = None  # Reference to Flatpak manager dialog
+        
+        self.init_ui()
+        self.apply_tokyo_night_theme()
+        
+        self.refresh_packages()
+        
+        # Auto-refresh timer
+        self.refresh_timer = QTimer()
+        self.refresh_timer.timeout.connect(self.auto_refresh)
+        self.refresh_timer.start(300000)  # 5 minutes
+    
+    def init_ui(self):
+        """Initialize the user interface with terminal tab."""
+        self.setWindowTitle("EcoPac Package Manager")
+        
+        # Set window size
+        screen = QApplication.primaryScreen().availableGeometry()
+        width = min(1400, screen.width() - 100)
+        height = min(800, screen.height() - 100)
+        
+        self.setGeometry(
+            (screen.width() - width) // 2,
+            (screen.height() - height) // 2,
+            width,
+            height
+        )
+        
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout.setSpacing(15)
+        
+        # Create header
+        self.create_header(main_layout)
+        
+        # Create search panel with AUR and Flatpak toggles
+        self.create_search_panel(main_layout)
+        
+        # Create tab widget for main content
+        self.create_tabbed_content(main_layout)
+        
+        # Create status bar
+        self.create_status_bar()
+        
+        # Create menu bar
+        self.create_menu_bar()
+        
+        # Set minimum size
+        self.setMinimumSize(1000, 600)
+    
+    def create_header(self, layout):
+        """Create header with Tokyo Night colors."""
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 10)
+        
+        # Title with Tokyo Night accent color
+        title_label = QLabel("📦 EcoPac Package Manager")
+        title_font = QFont()
+        title_font.setPointSize(18)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setStyleSheet("color: #7aa2f7;")  # Tokyo Night blue
+        header_layout.addWidget(title_label)
+        
+        header_layout.addStretch()
+        
+        # Stats panel
+        stats_widget = QWidget()
+        stats_layout = QHBoxLayout(stats_widget)
+        stats_layout.setSpacing(15)
+        
+        self.updates_label = self.create_stat_label("🔄", "0", "Updates", "#ff9e64")
+        stats_layout.addWidget(self.updates_label)
+        
+        self.installed_label = self.create_stat_label("📦", "0", "Installed", "#9ece6a")
+        stats_layout.addWidget(self.installed_label)
+        
+        self.aur_label = self.create_stat_label("⭐", "0", "AUR", "#bb9af7")
+        stats_layout.addWidget(self.aur_label)
+        
+        self.flatpak_label = self.create_stat_label("📦", "0", "Flatpak", "#73daca")
+        stats_layout.addWidget(self.flatpak_label)
+        
+        header_layout.addWidget(stats_widget)
+        layout.addWidget(header)
+    
+    def create_stat_label(self, icon: str, value: str, label: str, color: str) -> QWidget:
+        """Create a stat label widget with Tokyo Night colors."""
+        widget = QWidget()
+        widget_layout = QVBoxLayout(widget)
+        widget_layout.setContentsMargins(0, 0, 0, 0)
+        widget_layout.setSpacing(2)
+        
+        value_label = QLabel(f"{icon} {value}")
+        value_font = QFont()
+        value_font.setPointSize(14)
+        value_font.setBold(True)
+        value_label.setFont(value_font)
+        value_label.setStyleSheet(f"color: {color};")
+        widget_layout.addWidget(value_label)
+        
+        label_label = QLabel(label)
+        label_font = QFont()
+        label_font.setPointSize(10)
+        label_label.setFont(label_font)
+        label_label.setStyleSheet("color: #a9b1d6;")  # Tokyo Night muted text
+        widget_layout.addWidget(label_label)
+        
+        return widget
+    
+    def create_search_panel(self, layout):
+        """Create search panel with Tokyo Night styling."""
+        search_widget = QWidget()
+        search_layout = QHBoxLayout(search_widget)
+        search_layout.setContentsMargins(0, 0, 0, 10)
+        search_layout.setSpacing(10)
+        
+        # Search input
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search packages... (Press Enter to search)")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.returnPressed.connect(self.on_search)
+        
+        search_font = QFont()
+        search_font.setPointSize(12)
+        self.search_input.setFont(search_font)
+        self.search_input.setMinimumHeight(40)
+        
+        search_layout.addWidget(self.search_input)
+        
+        # AUR search toggle
+        self.aur_toggle = QCheckBox("Search AUR")
+        self.aur_toggle.setFont(search_font)
+        self.aur_toggle.setChecked(True)  # Default to searching AUR
+        search_layout.addWidget(self.aur_toggle)
+        
+        # Flatpak search toggle
+        self.flatpak_toggle = QCheckBox("Search Flatpak")
+        self.flatpak_toggle.setFont(search_font)
+        self.flatpak_toggle.setChecked(self.flatpak_available)
+        self.flatpak_toggle.setEnabled(self.flatpak_available)
+        search_layout.addWidget(self.flatpak_toggle)
+        
+        # Search button
+        search_btn = QPushButton("🔍 Search")
+        search_btn.clicked.connect(self.on_search)
+        search_btn.setFont(search_font)
+        search_btn.setMinimumHeight(40)
+        search_layout.addWidget(search_btn)
+        
+        # Clear button
+        clear_btn = QPushButton("Clear")
+        clear_btn.clicked.connect(self.clear_search)
+        clear_btn.setFont(search_font)
+        clear_btn.setMinimumHeight(40)
+        search_layout.addWidget(clear_btn)
+        
+        layout.addWidget(search_widget)
+    
+    def create_tabbed_content(self, layout):
+        """Create tabbed content with Packages and Terminal tabs."""
+        self.tab_widget = QTabWidget()
+        
+        # Packages tab
+        packages_tab = QWidget()
+        packages_layout = QVBoxLayout(packages_tab)
+        packages_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Create splitter for packages and details
+        splitter = QSplitter(Qt.Horizontal)
+        
+        # Package table
+        self.create_package_table()
+        splitter.addWidget(self.package_table)
+        
+        # Details panel
+        details_panel = self.create_details_panel()
+        splitter.addWidget(details_panel)
+        
+        splitter.setSizes([700, 300])
+        packages_layout.addWidget(splitter)
+        
+        self.tab_widget.addTab(packages_tab, "📦 Packages")
+        
+        # Terminal tab
+        self.terminal_widget = TerminalOutputWidget()
+        self.tab_widget.addTab(self.terminal_widget, "🖥️ Terminal")
+        
+        layout.addWidget(self.tab_widget)
+    
+    def create_package_table(self):
+        """Create package table with Tokyo Night styling."""
+        self.package_table = QTableView()
+        self.package_model = PackageManagerModel()
+        self.package_table.setModel(self.package_model)
+        
+        # Enable sorting
+        self.package_table.setSortingEnabled(True)
+        
+        # Set fonts
+        table_font = QFont()
+        table_font.setPointSize(11)
+        self.package_table.setFont(table_font)
+        
+        # Set column widths
+        header = self.package_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)  # Package name
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # Version
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # Repository
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Status
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)  # Type
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)  # Votes
+        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)  # Popularity
+        
+        # Styling
+        self.package_table.setAlternatingRowColors(True)
+        self.package_table.setShowGrid(False)
+        self.package_table.verticalHeader().setVisible(False)
+        self.package_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.package_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        
+        # Connect signals
+        self.package_table.selectionModel().selectionChanged.connect(self.on_selection_changed)
+        self.package_table.doubleClicked.connect(self.show_package_details)
+    
+    def create_details_panel(self):
+        """Create details panel with Tokyo Night styling."""
+        panel = QWidget()
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(10, 10, 10, 10)
+        panel_layout.setSpacing(15)
+        
+        # Package details
+        details_group = QGroupBox("Package Details")
+        details_layout = QVBoxLayout(details_group)
+        
+        self.details_text = QTextEdit()
+        self.details_text.setReadOnly(True)
+        details_font = QFont()
+        details_font.setPointSize(12)
+        self.details_text.setFont(details_font)
+        self.details_text.setMaximumHeight(250)
+        details_layout.addWidget(self.details_text)
+        
+        panel_layout.addWidget(details_group)
+        
+        # Action buttons
+        actions_group = QGroupBox("Actions")
+        actions_layout = QVBoxLayout(actions_group)
+        
+        button_font = QFont()
+        button_font.setPointSize(12)
+        
+        self.install_btn = QPushButton("📥 Install Selected")
+        self.install_btn.clicked.connect(self.install_selected)
+        self.install_btn.setEnabled(False)
+        self.install_btn.setFont(button_font)
+        self.install_btn.setMinimumHeight(45)
+        actions_layout.addWidget(self.install_btn)
+        
+        self.remove_btn = QPushButton("🗑️ Remove Selected")
+        self.remove_btn.clicked.connect(self.remove_selected)
+        self.remove_btn.setEnabled(False)
+        self.remove_btn.setFont(button_font)
+        self.remove_btn.setMinimumHeight(45)
+        actions_layout.addWidget(self.remove_btn)
+        
+        self.update_btn = QPushButton("🔄 Update Selected")
+        self.update_btn.clicked.connect(self.update_selected)
+        self.update_btn.setEnabled(False)
+        self.update_btn.setFont(button_font)
+        self.update_btn.setMinimumHeight(45)
+        actions_layout.addWidget(self.update_btn)
+        
+        panel_layout.addWidget(actions_group)
+        
+        # Quick actions
+        quick_group = QGroupBox("Quick Actions")
+        quick_layout = QVBoxLayout(quick_group)
+        
+        update_all_btn = QPushButton("Update All Packages")
+        update_all_btn.clicked.connect(self.update_all)
+        update_all_btn.setFont(button_font)
+        update_all_btn.setMinimumHeight(45)
+        quick_layout.addWidget(update_all_btn)
+        
+        clean_cache_btn = QPushButton("Clean Package Cache")
+        clean_cache_btn.clicked.connect(self.clean_cache)
+        clean_cache_btn.setFont(button_font)
+        clean_cache_btn.setMinimumHeight(45)
+        quick_layout.addWidget(clean_cache_btn)
+        
+        update_flatpak_btn = QPushButton("Update Flatpak Apps")
+        update_flatpak_btn.clicked.connect(self.update_flatpak)
+        update_flatpak_btn.setFont(button_font)
+        update_flatpak_btn.setMinimumHeight(45)
+        update_flatpak_btn.setEnabled(self.flatpak_available)
+        quick_layout.addWidget(update_flatpak_btn)
+        
+        panel_layout.addWidget(quick_group)
+        
+        panel_layout.addStretch()
+        
+        return panel
+    
+    def create_status_bar(self):
+        """Create status bar with Tokyo Night colors."""
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        
+        self.status_label = QLabel("Ready")
+        status_font = QFont()
+        status_font.setPointSize(11)
+        self.status_label.setFont(status_font)
+        self.status_label.setStyleSheet("color: #c0caf5;")  # Tokyo Night text
+        self.status_bar.addWidget(self.status_label)
+        
+        # Package count
+        self.count_label = QLabel("0 packages")
+        self.count_label.setFont(status_font)
+        self.count_label.setStyleSheet("color: #a9b1d6;")  # Tokyo Night muted text
+        self.status_bar.addPermanentWidget(self.count_label)
+    
+    def create_menu_bar(self):
+        """Create menu bar with Tokyo Night styling."""
+        menubar = self.menuBar()
+        menu_font = QFont()
+        menu_font.setPointSize(11)
+        menubar.setFont(menu_font)
+        
+        # File menu
+        file_menu = menubar.addMenu("File")
+        
+        refresh_action = QAction("Refresh (F5)", self)
+        refresh_action.triggered.connect(self.refresh_packages)
+        refresh_action.setShortcut("F5")
+        file_menu.addAction(refresh_action)
+        
+        file_menu.addSeparator()
+        
+        exit_action = QAction("Exit (Ctrl+Q)", self)
+        exit_action.triggered.connect(self.close)
+        exit_action.setShortcut("Ctrl+Q")
+        file_menu.addAction(exit_action)
+        
+        # Tools menu
+        tools_menu = menubar.addMenu("Tools")
+        
+        flatpak_manager_action = QAction("Flatpak Manager", self)
+        flatpak_manager_action.triggered.connect(self.open_flatpak_manager)
+        flatpak_manager_action.setEnabled(self.flatpak_available)
+        tools_menu.addAction(flatpak_manager_action)
+        
+        tools_menu.addSeparator()
+        
+        add_flatpak_remote_action = QAction("Add Flatpak Remote", self)
+        add_flatpak_remote_action.triggered.connect(self.add_flatpak_remote)
+        add_flatpak_remote_action.setEnabled(self.flatpak_available)
+        tools_menu.addAction(add_flatpak_remote_action)
+        
+        # View menu
+        view_menu = menubar.addMenu("View")
+        
+        show_terminal_action = QAction("Show Terminal Tab", self)
+        show_terminal_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(1))
+        show_terminal_action.setShortcut("Ctrl+T")
+        view_menu.addAction(show_terminal_action)
+        
+        # Help menu
+        help_menu = menubar.addMenu("Help")
+        
+        about_action = QAction("About", self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+    
+    def apply_tokyo_night_theme(self):
+        """Apply Tokyo Night theme."""
+        theme = """
+        /* Tokyo Night Theme */
+        QMainWindow, QDialog, QWidget {
+            background-color: #1a1b26;
+            color: #c0caf5;
+        }
+        
+        QTabWidget::pane {
+            border: 1px solid #292e42;
+            background-color: #1a1b26;
+        }
+        
+        QTabBar::tab {
+            background-color: #16161e;
+            color: #787c99;
+            padding: 10px 20px;
+            margin-right: 2px;
+            border: 1px solid #292e42;
+            border-bottom: none;
+            border-top-left-radius: 4px;
+            border-top-right-radius: 4px;
+        }
+        
+        QTabBar::tab:selected {
+            background-color: #1a1b26;
+            color: #7aa2f7;
+            border-bottom: 2px solid #7aa2f7;
+        }
+        
+        QTabBar::tab:hover:!selected {
+            background-color: #292e42;
+            color: #a9b1d6;
+        }
+        
+        QTableView {
+            background-color: #16161e;
+            alternate-background-color: #1a1b26;
+            color: #c0caf5;
+            gridline-color: #292e42;
+            border: 1px solid #292e42;
+            border-radius: 4px;
+        }
+        
+        QTableView::item {
+            padding: 8px;
+            border-bottom: 1px solid #292e42;
+        }
+        
+        QTableView::item:selected {
+            background-color: #3d59a1;
+            color: #c0caf5;
+        }
+        
+        QHeaderView::section {
+            background-color: #292e42;
+            color: #c0caf5;
+            padding: 10px;
+            border: none;
+            border-right: 1px solid #3d59a1;
+            font-weight: bold;
+        }
+        
+        QHeaderView::section:last {
+            border-right: none;
+        }
+        
+        QGroupBox {
+            border: 2px solid #292e42;
+            border-radius: 8px;
+            margin-top: 20px;
+            padding-top: 10px;
+            color: #7aa2f7;
+            font-weight: bold;
+        }
+        
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            subcontrol-position: top left;
+            padding: 0 10px;
+            background-color: #1a1b26;
+        }
+        
+        QLineEdit, QTextEdit {
+            background-color: #16161e;
+            color: #c0caf5;
+            border: 1px solid #292e42;
+            border-radius: 4px;
+            padding: 8px;
+            selection-background-color: #3d59a1;
+        }
+        
+        QLineEdit:focus, QTextEdit:focus {
+            border: 2px solid #7aa2f7;
+        }
+        
+        QPushButton {
+            background-color: #292e42;
+            color: #c0caf5;
+            border: 1px solid #3d59a1;
+            border-radius: 6px;
+            padding: 12px 20px;
+            font-size: 13px;
+            font-weight: bold;
+        }
+        
+        QPushButton:hover {
+            background-color: #3d59a1;
+            border-color: #7aa2f7;
+        }
+        
+        QPushButton:pressed {
+            background-color: #2d4f97;
+        }
+        
+        QPushButton:disabled {
+            background-color: #1a1b26;
+            color: #565f89;
+            border-color: #292e42;
+        }
+        
+        QCheckBox {
+            color: #c0caf5;
+            spacing: 8px;
+        }
+        
+        QCheckBox::indicator {
+            width: 18px;
+            height: 18px;
+            border: 2px solid #292e42;
+            border-radius: 4px;
+            background-color: #16161e;
+        }
+        
+        QCheckBox::indicator:checked {
+            background-color: #7aa2f7;
+            border-color: #7aa2f7;
+            image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24"><path fill="%231a1b26" d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>');
+        }
+        
+        QCheckBox::indicator:hover {
+            border-color: #7aa2f7;
+        }
+        
+        QProgressBar {
+            background-color: #16161e;
+            border: 1px solid #292e42;
+            border-radius: 4px;
+            text-align: center;
+            color: #c0caf5;
+            font-size: 11px;
+        }
+        
+        QProgressBar::chunk {
+            background-color: #7aa2f7;
+            border-radius: 2px;
+        }
+        
+        QStatusBar {
+            background-color: #16161e;
+            color: #c0caf5;
+            border-top: 1px solid #292e42;
+        }
+        
+        QMenuBar {
+            background-color: #16161e;
+            color: #c0caf5;
+            border-bottom: 1px solid #292e42;
+        }
+        
+        QMenuBar::item {
+            padding: 8px 15px;
+            background-color: transparent;
+        }
+        
+        QMenuBar::item:selected {
+            background-color: #3d59a1;
+            border-radius: 4px;
+        }
+        
+        QMenu {
+            background-color: #16161e;
+            color: #c0caf5;
+            border: 1px solid #292e42;
+            border-radius: 6px;
+        }
+        
+        QMenu::item {
+            padding: 8px 30px 8px 20px;
+        }
+        
+        QMenu::item:selected {
+            background-color: #3d59a1;
+        }
+        
+        QMenu::separator {
+            height: 1px;
+            background-color: #292e42;
+            margin: 5px 10px;
+        }
+        """
+        self.setStyleSheet(theme)
+    
+    # ============================================================================
+    # PACKAGE MANAGEMENT METHODS - HYBRID LOADING with Flatpak
+    # ============================================================================
+    
+    def refresh_packages(self):
+        """Refresh ONLY installed and AUR packages - SUPER FAST."""
+        self.status_label.setText("Refreshing installed packages...")
+        
+        # Create and start the package loader
+        self.loader = PackageLoaderUltraFast()
+        self.loader.progress_updated.connect(self.on_load_progress)
+        self.loader.packages_loaded.connect(self.on_packages_loaded)
+        self.loader.error_occurred.connect(self.on_load_error)
+        self.loader.start()
+    
+    def on_load_progress(self, progress, message):
+        """Handle progress updates from package loader."""
+        self.status_label.setText(f"Loading packages... {message}")
+    
+    def on_packages_loaded(self, packages):
+        """Handle loaded packages."""
+        self.packages = packages
+        self.package_cache.clear()
+        
+        # Count statistics
+        update_count = sum(1 for p in packages if p.status == PackageStatus.UPDATE_AVAILABLE)
+        installed_count = sum(1 for p in packages if p.status == PackageStatus.INSTALLED)
+        aur_count = sum(1 for p in packages if p.is_aur)
+        flatpak_count = sum(1 for p in packages if p.is_flatpak)
+        
+        # Update labels
+        self.updates_label.findChild(QLabel).setText(f"🔄 {update_count}")
+        self.installed_label.findChild(QLabel).setText(f"📦 {installed_count}")
+        self.aur_label.findChild(QLabel).setText(f"⭐ {aur_count}")
+        self.flatpak_label.findChild(QLabel).setText(f"📦 {flatpak_count}")
+        
+        # Clear search and show all installed packages
+        self.search_input.clear()
+        self.filtered_packages = self.packages
+        self.package_model.set_packages(self.filtered_packages)
+        
+        self.status_label.setText(f"Loaded {len(packages)} packages")
+        self.count_label.setText(f"{len(self.filtered_packages)} packages")
+    
+    def on_load_error(self, error_message):
+        """Handle load error."""
+        self.status_label.setText("Error loading packages")
+        QMessageBox.critical(self, "Error", f"Failed to load packages: {error_message}")
+    
+    def on_search(self):
+        """Handle search - with lazy loading of available packages."""
+        search_text = self.search_input.text().lower()
+        self.searching_aur = self.aur_toggle.isChecked()
+        
+        if not search_text:
+            # Show all installed packages
+            self.filtered_packages = self.packages
+            self.package_model.set_packages(self.filtered_packages)
+            self.count_label.setText(f"{len(self.filtered_packages)} packages")
+            self.status_label.setText(f"Showing all installed packages")
+            return
+        
+        self.status_label.setText(f"Searching for '{search_text}'...")
+        
+        # Show installed packages matching search immediately
+        matching_installed = [
+            pkg for pkg in self.packages
+            if search_text in pkg.name.lower() or search_text in pkg.description.lower()
+        ]
+        
+        # Filter out AUR packages if toggle is off
+        if not self.aur_toggle.isChecked():
+            matching_installed = [pkg for pkg in matching_installed if not pkg.is_aur]
+        
+        # Filter out Flatpak packages if toggle is off
+        if not self.flatpak_toggle.isChecked():
+            matching_installed = [pkg for pkg in matching_installed if not pkg.is_flatpak]
+        
+        self.filtered_packages = matching_installed
+        self.package_model.set_packages(self.filtered_packages)
+        self.count_label.setText(f"{len(self.filtered_packages)} packages")
+        
+        # Load available packages in background for search
+        self.load_available_packages_for_search(search_text)
+    
+    def load_available_packages_for_search(self, search_text: str):
+        """Load available packages matching search in background."""
+        def search_thread():
+            try:
+                # Check cache first
+                cache_key = f"search_{search_text}_{self.aur_toggle.isChecked()}_{self.flatpak_toggle.isChecked()}"
+                cached = self.available_packages_cache.get(cache_key)
+                
+                if cached is not None:
+                    # Use cached results
+                    QMetaObject.invokeMethod(self, 'add_available_packages_to_search',
+                                            Qt.QueuedConnection,
+                                            Q_ARG(list, cached))
+                    return
+                
+                available_packages = []
+                
+                # Search in official repositories
+                try:
+                    result = safe_subprocess_run(['pacman', '-Ss', search_text], timeout=5)
+                    if result.returncode == 0:
+                        current_pkg = None
+                        for line in result.stdout.strip().split('\n'):
+                            if line and not line.startswith(' '):
+                                # New package entry
+                                if current_pkg and current_pkg.name:
+                                    available_packages.append(current_pkg)
+                                
+                                parts = line.split('/')
+                                if len(parts) >= 2:
+                                    repo_name = parts[0]
+                                    name_version = parts[1].split()
+                                    if len(name_version) >= 1:
+                                        name = name_version[0]
+                                        version = name_version[1] if len(name_version) > 1 else 'unknown'
+                                        
+                                        current_pkg = Package(
+                                            name=name,
+                                            version=version,
+                                            repo=repo_name,
+                                            status=PackageStatus.AVAILABLE,
+                                            package_type=PackageType.PACMAN,
+                                            description=''
+                                        )
+                            elif line.startswith('    '):
+                                # Description line
+                                if current_pkg:
+                                    current_pkg.description = line.strip()
+                        
+                        # Don't forget the last package
+                        if current_pkg and current_pkg.name:
+                            available_packages.append(current_pkg)
+                except:
+                    pass
+                
+                # Search AUR if enabled
+                if self.aur_toggle.isChecked():
+                    try:
+                        aur_results = search_aur_packages(search_text, limit=50)
+                        for aur_data in aur_results:
+                            available_packages.append(aur_package_to_package(aur_data))
+                    except:
+                        pass
+                
+                # Search Flatpak if enabled
+                if self.flatpak_toggle.isChecked() and self.flatpak_available:
+                    try:
+                        flatpak_results = search_flatpak_apps(search_text, limit=50)
+                        available_packages.extend(flatpak_results)
+                    except:
+                        pass
+                
+                # Cache results (with 5 minute expiry)
+                self.available_packages_cache[cache_key] = available_packages
+                
+                # Update UI
+                QMetaObject.invokeMethod(self, 'add_available_packages_to_search',
+                                        Qt.QueuedConnection,
+                                        Q_ARG(list, available_packages))
+                
+            except Exception as e:
+                logger.error(f"Error searching available packages: {e}")
+        
+        # Start search in background thread
+        import threading
+        thread = threading.Thread(target=search_thread, daemon=True)
+        thread.start()
+    
+    @pyqtSlot(list)
+    def add_available_packages_to_search(self, available_packages: List[Package]):
+        """Add available packages to search results."""
+        search_text = self.search_input.text().lower()
+        
+        if not search_text:
+            return
+        
+        # Filter out packages already shown as installed
+        installed_names = {pkg.name for pkg in self.filtered_packages}
+        new_available = [
+            pkg for pkg in available_packages 
+            if pkg.name not in installed_names
+        ]
+        
+        # Add to current results
+        self.filtered_packages.extend(new_available)
+        
+        # Update model
+        self.package_model.set_packages(self.filtered_packages)
+        
+        # Update counts
+        total_count = len(self.filtered_packages)
+        available_count = len(new_available)
+        
+        if available_count > 0:
+            self.count_label.setText(f"{total_count} packages ({available_count} available)")
+            self.status_label.setText(f"Found {total_count} packages")
+        else:
+            self.count_label.setText(f"{total_count} packages")
+            self.status_label.setText(f"Found {total_count} packages")
+    
+    def clear_search(self):
+        """Clear search and show all packages."""
+        self.search_input.clear()
+        self.filtered_packages = self.packages
+        self.package_model.set_packages(self.filtered_packages)
+        self.count_label.setText(f"{len(self.filtered_packages)} packages")
+        self.status_label.setText("Showing all packages")
+    
+    def on_selection_changed(self, selected, deselected):
+        """Handle package selection changes."""
+        selected_indexes = self.package_table.selectionModel().selectedRows()
+        
+        # Convert to list
+        self.selected_packages = []
+        for idx in selected_indexes:
+            if 0 <= idx.row() < len(self.filtered_packages):
+                self.selected_packages.append(self.filtered_packages[idx.row()])
+        
+        # Update button states
+        can_install = any(not pkg.is_installed for pkg in self.selected_packages)
+        can_remove = any(pkg.is_installed for pkg in self.selected_packages)
+        can_update = any(pkg.status == PackageStatus.UPDATE_AVAILABLE for pkg in self.selected_packages)
+        
+        self.install_btn.setEnabled(can_install)
+        self.remove_btn.setEnabled(can_remove)
+        self.update_btn.setEnabled(can_update)
+        
+        # Update details text
+        if len(self.selected_packages) == 1:
+            pkg = self.selected_packages[0]
+            self.update_details_text(pkg)
+        elif len(self.selected_packages) > 1:
+            self.show_multiple_selection_details()
+        else:
+            self.details_text.clear()
+    
+    def update_details_text(self, pkg: Package):
+        """Update details text for a single package - with lazy loading."""
+        # Show basic info immediately
+        details = []
+        details.append(f"<h2 style='color: #7aa2f7;'>{pkg.display_name}</h2>")
+        details.append(f"<p><b>Version:</b> <span style='color: #9ece6a;'>{pkg.display_version}</span></p>")
+        
+        if pkg.description:
+            details.append(f"<p><b>Description:</b> {pkg.description}</p>")
+        
+        # Repository and status
+        repo_text = pkg.repo.upper() if pkg.repo else "Unknown"
+        status_text = pkg.status.value.capitalize()
+        
+        if pkg.is_flatpak:
+            status_color = "#73daca"  # Teal for Flatpak
+            details.append(f"<p><b>Type:</b> <span style='color: #73daca;'>FLATPAK</span></p>")
+            if pkg.flatpak_id:
+                details.append(f"<p><b>Flatpak ID:</b> {pkg.flatpak_id}</p>")
+            if pkg.flatpak_origin:
+                details.append(f"<p><b>Origin:</b> {pkg.flatpak_origin}</p>")
+        elif pkg.is_aur:
+            status_color = "#bb9af7"  # Purple for AUR
+            details.append(f"<p><b>Type:</b> <span style='color: #bb9af7;'>AUR</span></p>")
+        else:
+            status_color = {
+                "installed": "#9ece6a",
+                "available": "#7aa2f7",
+                "update": "#ff9e64",
+                "orphaned": "#f7768e",
+                "foreign": "#bb9af7"
+            }.get(pkg.status.value, "#c0caf5")
+            details.append(f"<p><b>Type:</b> <span style='color: #7aa2f7;'>PACMAN</span></p>")
+        
+        details.append(f"<p><b>Repository:</b> <span style='color: #7aa2f7;'>{repo_text}</span></p>")
+        details.append(f"<p><b>Status:</b> <span style='color: {status_color};'>{status_text}</span></p>")
+        
+        # AUR specific info
+        if pkg.is_aur:
+            if pkg.votes > 0:
+                details.append(f"<p><b>Votes:</b> <span style='color: #ff9e64;'>{pkg.votes}</span></p>")
+            if pkg.popularity > 0:
+                details.append(f"<p><b>Popularity:</b> <span style='color: #ff9e64;'>{pkg.popularity:.2f}</span></p>")
+        
+        # Loading indicator for additional details
+        if not hasattr(pkg, '_details_loaded') or not pkg._details_loaded:
+            details.append(f"<p><i style='color: #ff9e64;'>Loading additional details...</i></p>")
+        
+        self.details_text.setHtml("\n".join(details))
+        
+        # Load additional details in background
+        if not hasattr(pkg, '_details_loaded'):
+            self.load_package_details(pkg)
+    
+    def load_package_details(self, pkg: Package):
+        """Load detailed package information in background."""
+        def load_details():
+            try:
+                details = {}
+                
+                # For installed packages
+                if pkg.is_installed and not pkg.is_flatpak:
+                    result = safe_subprocess_run(['pacman', '-Qi', pkg.name], timeout=3)
+                    if result.returncode == 0:
+                        details = self.parse_detailed_info(result.stdout)
+                        pkg._details_loaded = True
+                
+                # For available packages
+                elif pkg.status == PackageStatus.AVAILABLE and not pkg.is_flatpak:
+                    result = safe_subprocess_run(['pacman', '-Si', pkg.name], timeout=3)
+                    if result.returncode == 0:
+                        details = self.parse_detailed_info(result.stdout)
+                        pkg._details_loaded = True
+                
+                # For AUR packages
+                elif pkg.is_aur:
+                    # Already have most info from AUR API
+                    pkg._details_loaded = True
+                    if hasattr(pkg, 'dependencies') and pkg.dependencies:
+                        details['dependencies'] = pkg.dependencies
+                    if hasattr(pkg, 'url') and pkg.url:
+                        details['url'] = pkg.url
+                    if hasattr(pkg, 'licenses') and pkg.licenses:
+                        details['licenses'] = pkg.licenses
+                    if hasattr(pkg, 'size') and pkg.size:
+                        details['size'] = pkg.size
+                
+                # For Flatpak packages
+                elif pkg.is_flatpak and pkg.flatpak_id:
+                    try:
+                        # Get Flatpak info
+                        result = safe_subprocess_run(['flatpak', 'info', pkg.flatpak_id], timeout=3)
+                        if result.returncode == 0:
+                            for line in result.stdout.strip().split('\n'):
+                                if ':' in line:
+                                    key, value = line.split(':', 1)
+                                    key = key.strip()
+                                    value = value.strip()
+                                    
+                                    if key == 'Name':
+                                        pkg.name = value
+                                    elif key == 'Description':
+                                        pkg.description = value
+                                    elif key == 'Version':
+                                        pkg.version = value
+                                    elif key == 'Branch':
+                                        pkg.flatpak_branch = value
+                                    elif key == 'Origin':
+                                        pkg.flatpak_origin = value
+                                    elif key == 'Installed':
+                                        pkg.size = value
+                        pkg._details_loaded = True
+                    except:
+                        pass
+                
+                # Update UI in main thread
+                if details:
+                    QMetaObject.invokeMethod(self, 'update_details_with_additional',
+                                            Qt.QueuedConnection,
+                                            Q_ARG(Package, pkg),
+                                            Q_ARG(dict, details))
+                
+            except Exception as e:
+                logger.error(f"Error loading package details: {e}")
+        
+        # Start background thread
+        import threading
+        thread = threading.Thread(target=load_details, daemon=True)
+        thread.start()
+    
+    def parse_detailed_info(self, output: str) -> Dict:
+        """Parse detailed package information."""
+        details = {}
+        
+        for line in output.strip().split('\n'):
+            if ':' in line:
+                key, value = line.split(':', 1)
+                key = key.strip()
+                value = value.strip()
+                
+                if key == 'Depends On':
+                    details['dependencies'] = [d.strip() for d in value.split()] if value else []
+                elif key == 'Required By':
+                    details['required_by'] = [r.strip() for r in value.split()] if value else []
+                elif key == 'Install Size':
+                    details['size'] = value
+                elif key == 'URL':
+                    details['url'] = value
+                elif key == 'Licenses':
+                    details['licenses'] = [l.strip() for l in value.split()] if value else []
+                elif key == 'Packager':
+                    details['packager'] = value
+                elif key == 'Architecture':
+                    details['architecture'] = value
+                elif key == 'Build Date':
+                    details['build_date'] = value
+                elif key == 'Install Date':
+                    details['install_date'] = value
+        
+        return details
+    
+    @pyqtSlot(Package, dict)
+    def update_details_with_additional(self, pkg: Package, details: dict):
+        """Update details with additional information."""
+        # Check if this package is still selected
+        if not self.selected_packages or len(self.selected_packages) != 1 or self.selected_packages[0] != pkg:
+            return
+        
+        current_html = self.details_text.toHtml()
+        
+        # Remove loading indicator if present
+        current_html = current_html.replace('<p><i style="color: #ff9e64;">Loading additional details...</i></p>', '')
+        
+        # Add additional details
+        additional = []
+        
+        if 'size' in details:
+            additional.append(f"<p><b>Size:</b> {details['size']}</p>")
+        
+        if 'url' in details:
+            additional.append(f"<p><b>URL:</b> <a href='{details['url']}' style='color: #7aa2f7;'>{details['url']}</a></p>")
+        
+        if 'dependencies' in details and details['dependencies']:
+            deps = ", ".join(details['dependencies'][:5])
+            if len(details['dependencies']) > 5:
+                deps += f" (+{len(details['dependencies']) - 5} more)"
+            additional.append(f"<p><b>Dependencies:</b> {deps}</p>")
+        
+        if 'licenses' in details and details['licenses']:
+            licenses = ", ".join(details['licenses'])
+            additional.append(f"<p><b>Licenses:</b> {licenses}</p>")
+        
+        if 'packager' in details and details['packager']:
+            additional.append(f"<p><b>Packager:</b> {details['packager']}</p>")
+        
+        if 'architecture' in details and details['architecture']:
+            additional.append(f"<p><b>Architecture:</b> {details['architecture']}</p>")
+        
+        if 'install_date' in details and details['install_date']:
+            additional.append(f"<p><b>Installed:</b> {details['install_date']}</p>")
+        
+        # Update HTML
+        if additional:
+            # Remove closing </body> and </html> tags if present
+            html = current_html.replace('</body>', '').replace('</html>', '')
+            html += "\n".join(additional) + "</body></html>"
+            self.details_text.setHtml(html)
+    
+    def show_multiple_selection_details(self):
+        """Show details for multiple selected packages."""
+        details = []
+        details.append(f"<h3 style='color: #7aa2f7;'>{len(self.selected_packages)} packages selected</h3>")
+        
+        # Group by status
+        by_status = defaultdict(list)
+        for pkg in self.selected_packages:
+            by_status[pkg.status].append(pkg)
+        
+        for status, pkgs in by_status.items():
+            status_text = status.value.capitalize()
+            status_color = {
+                "installed": "#9ece6a",
+                "available": "#7aa2f7",
+                "update": "#ff9e64",
+                "orphaned": "#f7768e",
+                "foreign": "#bb9af7",
+                "aur": "#bb9af7",
+                "flatpak": "#73daca"
+            }.get(status.value, "#c0caf5")
+            
+            details.append(f"<p><b style='color: {status_color};'>{status_text}:</b> {len(pkgs)} packages</p>")
+        
+        # Group by package type
+        by_type = defaultdict(list)
+        for pkg in self.selected_packages:
+            by_type[pkg.package_type].append(pkg)
+        
+        for pkg_type, pkgs in by_type.items():
+            type_text = pkg_type.value.upper()
+            type_color = {
+                "pacman": "#7aa2f7",
+                "aur": "#bb9af7",
+                "flatpak": "#73daca"
+            }.get(pkg_type.value, "#c0caf5")
+            
+            details.append(f"<p><b style='color: {type_color};'>{type_text}:</b> {len(pkgs)} packages</p>")
+        
+        # List package names
+        package_names = [pkg.display_name for pkg in self.selected_packages]
+        details.append(f"<p><b>Selected packages:</b></p><ul>")
+        for name in sorted(package_names)[:10]:  # Show first 10
+            details.append(f"<li>{name}</li>")
+        
+        if len(package_names) > 10:
+            details.append(f"<li>... and {len(package_names) - 10} more</li>")
+        
+        details.append("</ul>")
+        
+        self.details_text.setHtml("\n".join(details))
+    
+    def show_package_details(self, index):
+        """Show detailed package information."""
+        pkg = self.filtered_packages[index.row()]
+        
+        # Create details dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Package Details: {pkg.name}")
+        dialog.setModal(True)
+        dialog.resize(600, 500)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Create scroll area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        
+        # Package info
+        details_text = QTextEdit()
+        details_text.setReadOnly(True)
+        details_text.setHtml(self.get_detailed_package_html(pkg))
+        content_layout.addWidget(details_text)
+        
+        # Check available repositories (not for Flatpak)
+        if not pkg.is_installed and not pkg.is_aur and not pkg.is_flatpak:
+            check_repo_btn = QPushButton("Check Available Repositories")
+            check_repo_btn.clicked.connect(lambda: self.check_repositories(pkg.name))
+            content_layout.addWidget(check_repo_btn)
+        
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+        
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        
+        dialog.exec_()
+    
+    def get_detailed_package_html(self, pkg: Package) -> str:
+        """Get detailed HTML for package information."""
+        html_parts = []
+        
+        # Header
+        html_parts.append(f"<h1 style='color: #7aa2f7;'>{pkg.display_name}</h1>")
+        
+        # Package type badge
+        if pkg.is_flatpak:
+            html_parts.append(f"<span style='background-color: #73daca; color: #1a1b26; padding: 4px 8px; border-radius: 4px; font-weight: bold;'>FLATPAK</span>")
+        elif pkg.is_aur:
+            html_parts.append(f"<span style='background-color: #bb9af7; color: #1a1b26; padding: 4px 8px; border-radius: 4px; font-weight: bold;'>AUR</span>")
+        else:
+            html_parts.append(f"<span style='background-color: #7aa2f7; color: #1a1b26; padding: 4px 8px; border-radius: 4px; font-weight: bold;'>PACMAN</span>")
+        
+        html_parts.append("<br><br>")
+        
+        # Basic info table
+        html_parts.append("<table style='width: 100%; border-collapse: collapse;'>")
+        html_parts.append(f"""
+            <tr>
+                <td style='padding: 8px; font-weight: bold; color: #a9b1d6;'>Version</td>
+                <td style='padding: 8px; color: #9ece6a;'>{pkg.version}</td>
+            </tr>
+        """)
+        
+        if pkg.new_version:
+            html_parts.append(f"""
+                <tr>
+                    <td style='padding: 8px; font-weight: bold; color: #a9b1d6;'>New Version</td>
+                    <td style='padding: 8px; color: #ff9e64;'>{pkg.new_version}</td>
+                </tr>
+            """)
+        
+        html_parts.append(f"""
+            <tr>
+                <td style='padding: 8px; font-weight: bold; color: #a9b1d6;'>Repository</td>
+                <td style='padding: 8px; color: #7aa2f7;'>{pkg.repo.upper() if pkg.repo else 'Unknown'}</td>
+            </tr>
+        """)
+        
+        # Status with color
+        status_color = {
+            "installed": "#9ece6a",
+            "available": "#7aa2f7",
+            "update": "#ff9e64",
+            "orphaned": "#f7768e",
+            "foreign": "#bb9af7",
+            "aur": "#bb9af7",
+            "flatpak": "#73daca"
+        }.get(pkg.status.value, "#c0caf5")
+        
+        html_parts.append(f"""
+            <tr>
+                <td style='padding: 8px; font-weight: bold; color: #a9b1d6;'>Status</td>
+                <td style='padding: 8px; color: {status_color}; font-weight: bold;'>{pkg.status.value.upper()}</td>
+            </tr>
+        """)
+        
+        # Flatpak specific info
+        if pkg.is_flatpak:
+            if pkg.flatpak_id:
+                html_parts.append(f"""
+                    <tr>
+                        <td style='padding: 8px; font-weight: bold; color: #a9b1d6;'>Flatpak ID</td>
+                        <td style='padding: 8px;'>{pkg.flatpak_id}</td>
+                    </tr>
+                """)
+            
+            if pkg.flatpak_origin:
+                html_parts.append(f"""
+                    <tr>
+                        <td style='padding: 8px; font-weight: bold; color: #a9b1d6;'>Origin</td>
+                        <td style='padding: 8px;'>{pkg.flatpak_origin}</td>
+                    </tr>
+                """)
+            
+            if pkg.flatpak_branch:
+                html_parts.append(f"""
+                    <tr>
+                        <td style='padding: 8px; font-weight: bold; color: #a9b1d6;'>Branch</td>
+                        <td style='padding: 8px;'>{pkg.flatpak_branch}</td>
+                    </tr>
+                """)
+        
+        # AUR specific info
+        if pkg.is_aur:
+            html_parts.append(f"""
+                <tr>
+                    <td style='padding: 8px; font-weight: bold; color: #a9b1d6;'>Votes</td>
+                    <td style='padding: 8px; color: #ff9e64;'>{pkg.votes}</td>
+                </tr>
+            """)
+            
+            html_parts.append(f"""
+                <tr>
+                    <td style='padding: 8px; font-weight: bold; color: #a9b1d6;'>Popularity</td>
+                    <td style='padding: 8px; color: #ff9e64;'>{pkg.popularity:.2f}</td>
+                </tr>
+            """)
+        
+        # Close table
+        html_parts.append("</table>")
+        
+        # Description
+        if pkg.description:
+            html_parts.append(f"<h3 style='color: #7aa2f7;'>Description</h3>")
+            html_parts.append(f"<p>{pkg.description}</p>")
+        
+        # Dependencies
+        if pkg.dependencies:
+            html_parts.append(f"<h3 style='color: #7aa2f7;'>Dependencies ({len(pkg.dependencies)})</h3>")
+            html_parts.append("<ul>")
+            for dep in pkg.dependencies[:15]:  # Show first 15
+                html_parts.append(f"<li>{dep}</li>")
+            if len(pkg.dependencies) > 15:
+                html_parts.append(f"<li>... and {len(pkg.dependencies) - 15} more</li>")
+            html_parts.append("</ul>")
+        
+        # Reverse dependencies
+        if pkg.is_required_by:
+            html_parts.append(f"<h3 style='color: #7aa2f7;'>Required By ({len(pkg.is_required_by)})</h3>")
+            html_parts.append("<ul>")
+            for req in pkg.is_required_by[:10]:  # Show first 10
+                html_parts.append(f"<li>{req}</li>")
+            if len(pkg.is_required_by) > 10:
+                html_parts.append(f"<li>... and {len(pkg.is_required_by) - 10} more</li>")
+            html_parts.append("</ul>")
+        
+        # Licenses
+        if pkg.licenses:
+            html_parts.append(f"<h3 style='color: #7aa2f7;'>Licenses</h3>")
+            html_parts.append("<ul>")
+            for license in pkg.licenses:
+                html_parts.append(f"<li>{license}</li>")
+            html_parts.append("</ul>")
+        
+        # URLs
+        if pkg.url:
+            html_parts.append(f"<h3 style='color: #7aa2f7;'>URL</h3>")
+            html_parts.append(f"<p><a href='{pkg.url}' style='color: #7aa2f7;'>{pkg.url}</a></p>")
+        
+        # Additional info
+        html_parts.append(f"<h3 style='color: #7aa2f7;'>Additional Information</h3>")
+        html_parts.append("<table style='width: 100%; border-collapse: collapse;'>")
+        
+        if pkg.size:
+            html_parts.append(f"""
+                <tr>
+                    <td style='padding: 8px; font-weight: bold; color: #a9b1d6;'>Size</td>
+                    <td style='padding: 8px;'>{pkg.size}</td>
+                </tr>
+            """)
+        
+        if pkg.install_date:
+            html_parts.append(f"""
+                <tr>
+                    <td style='padding: 8px; font-weight: bold; color: #a9b1d6;'>Install Date</td>
+                    <td style='padding: 8px;'>{pkg.install_date}</td>
+                </tr>
+            """)
+        
+        if pkg.last_updated:
+            html_parts.append(f"""
+                <tr>
+                    <td style='padding: 8px; font-weight: bold; color: #a9b1d6;'>Last Updated</td>
+                    <td style='padding: 8px;'>{pkg.last_updated}</td>
+                </tr>
+            """)
+        
+        if pkg.packager:
+            html_parts.append(f"""
+                <tr>
+                    <td style='padding: 8px; font-weight: bold; color: #a9b1d6;'>Packager</td>
+                    <td style='padding: 8px;'>{pkg.packager}</td>
+                </tr>
+            """)
+        
+        if pkg.architectures:
+            html_parts.append(f"""
+                <tr>
+                    <td style='padding: 8px; font-weight: bold; color: #a9b1d6;'>Architectures</td>
+                    <td style='padding: 8px;'>{', '.join(pkg.architectures)}</td>
+                </tr>
+            """)
+        
+        html_parts.append("</table>")
+        
+        return "".join(html_parts)
+    
+    def check_repositories(self, package_name: str):
+        """Check which repositories have the package."""
+        self.status_label.setText(f"Checking repositories for {package_name}...")
+        
+        try:
+            repositories = get_package_repositories(package_name)
+            
+            if not repositories:
+                QMessageBox.information(self, "Repository Check", 
+                    f"No repositories found for package: {package_name}")
+            else:
+                dialog = RepositorySelectionDialog(self, package_name, repositories)
+                if dialog.exec_() == QDialog.Accepted:
+                    selected_repo = dialog.get_selected_repository()
+                    if selected_repo:
+                        # Install from selected repository
+                        self.execute_package_operation(
+                            OperationType.INSTALL,
+                            [package_name],
+                            f"Installing {package_name} from {selected_repo['name']}",
+                            extra_args=['--repo', selected_repo['name']] if selected_repo['name'] != 'aur' else []
+                        )
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to check repositories: {str(e)}")
+    
+    # ============================================================================
+    # PACKAGE OPERATIONS WITH TERMINAL OUTPUT
+    # ============================================================================
+    
+    def install_selected(self):
+        """Install selected packages."""
+        packages_to_install = []
+        aur_packages = []
+        flatpak_packages = []
+        
+        for pkg in self.selected_packages:
+            if not pkg.is_installed:
+                if pkg.is_aur:
+                    aur_packages.append(pkg.name)
+                elif pkg.is_flatpak:
+                    if pkg.flatpak_id:
+                        flatpak_packages.append(pkg.flatpak_id)
+                    else:
+                        flatpak_packages.append(pkg.name)
+                else:
+                    packages_to_install.append(pkg.name)
+        
+        if packages_to_install:
+            self.execute_package_operation(
+                OperationType.INSTALL,
+                packages_to_install,
+                f"Installing {len(packages_to_install)} packages"
+            )
+        
+        if aur_packages:
+            self.install_aur_packages(aur_packages)
+        
+        if flatpak_packages:
+            self.install_flatpak_packages(flatpak_packages)
+    
+    def remove_selected(self):
+        """Remove selected packages."""
+        pacman_packages = []
+        flatpak_packages = []
+        
+        for pkg in self.selected_packages:
+            if pkg.is_installed:
+                if pkg.is_flatpak:
+                    if pkg.flatpak_id:
+                        flatpak_packages.append(pkg.flatpak_id)
+                    else:
+                        flatpak_packages.append(pkg.name)
+                else:
+                    pacman_packages.append(pkg.name)
+        
+        if pacman_packages:
+            # Confirm removal
+            reply = QMessageBox.question(
+                self, "Confirm Removal",
+                f"Remove {len(pacman_packages)} pacman packages?\n\n" +
+                "\n".join(pacman_packages[:5]) + 
+                ("\n..." if len(pacman_packages) > 5 else ""),
+                QMessageBox.Yes | QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                self.execute_package_operation(
+                    OperationType.REMOVE,
+                    pacman_packages,
+                    f"Removing {len(pacman_packages)} packages"
+                )
+        
+        if flatpak_packages:
+            # Confirm Flatpak removal
+            reply = QMessageBox.question(
+                self, "Confirm Flatpak Removal",
+                f"Remove {len(flatpak_packages)} Flatpak applications?\n\n" +
+                "\n".join(flatpak_packages[:5]) + 
+                ("\n..." if len(flatpak_packages) > 5 else ""),
+                QMessageBox.Yes | QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                self.uninstall_flatpak_packages(flatpak_packages)
+    
+    def update_selected(self):
+        """Update selected packages."""
+        pacman_packages = []
+        flatpak_packages = []
+        
+        for pkg in self.selected_packages:
+            if pkg.status == PackageStatus.UPDATE_AVAILABLE:
+                if pkg.is_flatpak:
+                    if pkg.flatpak_id:
+                        flatpak_packages.append(pkg.flatpak_id)
+                    else:
+                        flatpak_packages.append(pkg.name)
+                else:
+                    pacman_packages.append(pkg.name)
+        
+        if pacman_packages:
+            self.execute_package_operation(
+                OperationType.UPDATE,
+                pacman_packages,
+                f"Updating {len(pacman_packages)} packages"
+            )
+        
+        if flatpak_packages:
+            self.update_flatpak_packages(flatpak_packages)
+    
+    def update_all(self):
+        """Update all packages."""
+        reply = QMessageBox.question(
+            self, "Confirm Update",
+            "Update all packages?\n\nThis may take several minutes.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # Update pacman packages
+            self.execute_package_operation(
+                OperationType.UPDATE,
+                [],
+                "Updating all packages"
+            )
+            
+            # Update Flatpak packages if available
+            if self.flatpak_available:
+                self.update_flatpak()
+    
+    def update_flatpak(self):
+        """Update all Flatpak applications."""
+        if not self.flatpak_available:
+            QMessageBox.information(self, "Flatpak Not Available", 
+                "Flatpak is not installed on your system.")
+            return
+        
+        reply = QMessageBox.question(
+            self, "Update Flatpak",
+            "Update all Flatpak applications?\n\nThis may download large updates.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            self.execute_flatpak_command(
+                ['flatpak', 'update', '-y'],
+                "Updating Flatpak applications"
+            )
+    
+    def update_flatpak_packages(self, flatpak_ids: List[str]):
+        """Update specific Flatpak packages."""
+        if not self.flatpak_available:
+            return
+        
+        cmd = ['flatpak', 'update', '-y'] + flatpak_ids
+        self.execute_flatpak_command(cmd, f"Updating {len(flatpak_ids)} Flatpak applications")
+    
+    def install_flatpak_packages(self, flatpak_ids: List[str]):
+        """Install Flatpak packages."""
+        if not self.flatpak_available:
+            QMessageBox.information(self, "Flatpak Not Available", 
+                "Flatpak is not installed on your system.")
+            return
+        
+        # Ask for installation method
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Install Flatpak")
+        dialog.setModal(True)
+        dialog.resize(400, 200)
+        
+        layout = QVBoxLayout(dialog)
+        
+        label = QLabel(f"Install {len(flatpak_ids)} Flatpak application(s):")
+        layout.addWidget(label)
+        
+        list_widget = QListWidget()
+        for app_id in flatpak_ids:
+            list_widget.addItem(app_id)
+        layout.addWidget(list_widget)
+        
+        # Remote selection
+        remote_label = QLabel("Select remote:")
+        layout.addWidget(remote_label)
+        
+        remote_combo = QComboBox()
+        remote_combo.addItems(FLATPAK_REMOTES)
+        remote_combo.setCurrentText('flathub')
+        layout.addWidget(remote_combo)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        if dialog.exec_() == QDialog.Accepted:
+            remote = remote_combo.currentText()
+            cmd = ['flatpak', 'install', '-y', remote] + flatpak_ids
+            self.execute_flatpak_command(cmd, f"Installing {len(flatpak_ids)} Flatpak applications")
+    
+    def uninstall_flatpak_packages(self, flatpak_ids: List[str]):
+        """Uninstall Flatpak packages."""
+        if not self.flatpak_available:
+            return
+        
+        cmd = ['flatpak', 'uninstall', '-y'] + flatpak_ids
+        self.execute_flatpak_command(cmd, f"Uninstalling {len(flatpak_ids)} Flatpak applications")
+    
+    def execute_flatpak_command(self, command: List[str], operation_name: str):
+        """Execute a Flatpak command with terminal output."""
+        dialog = CommandExecutionDialog(self, command, operation_name)
+        dialog.exec_()
+        
+        if dialog.success:
+            self.refresh_packages()
+            # Switch to terminal tab to show output
+            self.tab_widget.setCurrentIndex(1)
+    
+    def clean_cache(self):
+        """Clean package cache."""
+        reply = QMessageBox.question(
+            self, "Clean Cache",
+            "Clean package cache?\n\nThis will remove all cached package files.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            self.execute_sudo_command(
+                ["pacman", "-Sc"],
+                "Cleaning package cache"
+            )
+    
+    def execute_package_operation(self, operation: OperationType, packages: List[str], 
+                                 operation_name: str, extra_args: List[str] = None):
+        """Execute a package operation with terminal output."""
+        if not packages and operation != OperationType.UPDATE:
+            return
+        
+        # Build command
+        if operation == OperationType.INSTALL:
+            cmd = ["sudo", "pacman", "-S", "--needed"] + (extra_args or []) + packages
+        
+        elif operation == OperationType.REMOVE:
+            cmd = ["sudo", "pacman", "-Rns"] + packages
+        
+        elif operation == OperationType.UPDATE:
+            cmd = ["sudo", "pacman", "-Syu"] + (extra_args or [])
+        
+        elif operation == OperationType.REINSTALL:
+            cmd = ["sudo", "pacman", "-S"] + packages
+        
+        else:
+            return
+        
+        # Execute command with terminal output dialog
+        dialog = CommandExecutionDialog(self, cmd, operation_name)
+        dialog.exec_()
+        
+        if dialog.success:
+            self.refresh_packages()
+            # Switch to terminal tab to show output
+            self.tab_widget.setCurrentIndex(1)
+    
+    def install_aur_packages(self, aur_packages: List[str]):
+        """Install AUR packages."""
+        if not aur_packages:
+            return
+        
+        # Ask for installation method
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Install AUR Packages")
+        dialog.setModal(True)
+        dialog.resize(500, 300)
+        
+        layout = QVBoxLayout(dialog)
+        
+        label = QLabel(f"Install {len(aur_packages)} AUR package(s):")
+        layout.addWidget(label)
+        
+        list_widget = QListWidget()
+        for pkg in aur_packages:
+            list_widget.addItem(pkg)
+        layout.addWidget(list_widget)
+        
+        # AUR helper selection
+        helper_label = QLabel("Select AUR helper:")
+        layout.addWidget(helper_label)
+        
+        helper_combo = QComboBox()
+        helpers = ["yay", "paru", "pikaur", "trizen"]
+        for helper in helpers:
+            # Check if helper is available
+            try:
+                result = subprocess.run(['which', helper], capture_output=True)
+                if result.returncode == 0:
+                    helper_combo.addItem(helper)
+            except:
+                pass
+        
+        if helper_combo.count() == 0:
+            helper_combo.addItem("yay")
+            QMessageBox.warning(self, "AUR Helper Not Found",
+                              "No AUR helpers found. You may need to install one manually.")
+        
+        layout.addWidget(helper_combo)
+        
+        # Build from source option
+        build_source = QCheckBox("Build from source")
+        layout.addWidget(build_source)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        if dialog.exec_() == QDialog.Accepted:
+            helper = helper_combo.currentText()
+            
+            # Build command
+            cmd = [helper, "-S", "--needed"] + aur_packages
+            
+            if build_source.isChecked():
+                cmd.append("--build")
+            
+            # Execute AUR installation
+            aur_dialog = CommandExecutionDialog(self, cmd, f"Installing {len(aur_packages)} AUR packages")
+            aur_dialog.exec_()
+            
+            if aur_dialog.success:
+                self.refresh_packages()
+                self.tab_widget.setCurrentIndex(1)
+    
+    def execute_sudo_command(self, command: List[str], operation_name: str):
+        """Execute a sudo command with terminal output."""
+        dialog = CommandExecutionDialog(self, command, operation_name)
+        dialog.exec_()
+        
+        if dialog.success:
+            self.refresh_packages()
+            self.tab_widget.setCurrentIndex(1)
+    
+    # ============================================================================
+    # FLATPAK MANAGEMENT METHODS
+    # ============================================================================
+    
+    def open_flatpak_manager(self):
+        """Open Flatpak manager dialog."""
+        if not self.flatpak_available:
+            QMessageBox.information(self, "Flatpak Not Available",
+                                  "Flatpak is not installed on your system.")
+            return
+        
+        self.flatpak_manager_dialog = FlatpakManagerDialog(self)
+        self.flatpak_manager_dialog.exec_()
+    
+    def add_flatpak_remote(self):
+        """Add Flatpak remote - simplified method."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add Flatpak Remote")
+        dialog.setModal(True)
+        dialog.resize(500, 300)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Remote name
+        name_label = QLabel("Remote name:")
+        layout.addWidget(name_label)
+        
+        name_input = QLineEdit()
+        name_input.setPlaceholderText("e.g., flathub-beta")
+        layout.addWidget(name_input)
+        
+        # Remote URL
+        url_label = QLabel("Remote URL:")
+        layout.addWidget(url_label)
+        
+        url_input = QLineEdit()
+        url_input.setPlaceholderText("e.g., https://flathub.org/beta-repo/flathub-beta.flatpakrepo")
+        layout.addWidget(url_input)
+        
+        # Common remotes
+        common_label = QLabel("Common remotes:")
+        layout.addWidget(common_label)
+        
+        common_remotes = QWidget()
+        common_layout = QHBoxLayout(common_remotes)
+        
+        flathub_btn = QPushButton("Flathub")
+        flathub_btn.clicked.connect(lambda: (name_input.setText("flathub"), 
+                                           url_input.setText("https://flathub.org/repo/flathub.flatpakrepo")))
+        common_layout.addWidget(flathub_btn)
+        
+        flathub_beta_btn = QPushButton("Flathub Beta")
+        flathub_beta_btn.clicked.connect(lambda: (name_input.setText("flathub-beta"),
+                                                url_input.setText("https://flathub.org/beta-repo/flathub-beta.flatpakrepo")))
+        common_layout.addWidget(flathub_beta_btn)
+        
+        gnome_btn = QPushButton("GNOME Nightly")
+        gnome_btn.clicked.connect(lambda: (name_input.setText("gnome-nightly"),
+                                         url_input.setText("https://nightly.gnome.org/gnome-nightly.flatpakrepo")))
+        common_layout.addWidget(gnome_btn)
+        
+        layout.addWidget(common_remotes)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        if dialog.exec_() == QDialog.Accepted:
+            name = name_input.text().strip()
+            url = url_input.text().strip()
+            
+            if name and url:
+                self.add_flatpak_remote_execute(name, url)
+    
+    def add_flatpak_remote_execute(self, name: str, url: str):
+        """Execute adding Flatpak remote."""
+        if not self.flatpak_available:
+            QMessageBox.information(self, "Flatpak Not Available",
+                                  "Flatpak is not installed on your system.")
+            return
+        
+        cmd = ['flatpak', 'remote-add', '--if-not-exists', name, url]
+        dialog = CommandExecutionDialog(self, cmd, f"Adding Flatpak remote: {name}")
+        dialog.exec_()
+        
+        if dialog.success:
+            QMessageBox.information(self, "Success", f"Flatpak remote '{name}' added successfully.")
+    
+    # ============================================================================
+    # UTILITY METHODS
+    # ============================================================================
+    
+    def auto_refresh(self):
+        """Auto-refresh package list."""
+        if self.isVisible():
+            self.refresh_packages()
+    
+    def show_about(self):
+        """Show about dialog."""
+        about_text = """
+        <h1>EcoPac Package Manager</h1>
+        <p><b>Version:</b> 2.0 ULTRA-FAST</p>
+        <p><b>Description:</b> Intelligent & Robust Package Manager for Arch Linux</p>
+        <p><b>Features:</b></p>
+        <ul>
+            <li>Ultra-fast package loading</li>
+            <li>AUR support with helper integration</li>
+            <li>Flatpak application management</li>
+            <li>Tokyo Night theme</li>
+            <li>Repository selection dialog</li>
+            <li>Terminal output with real-time display</li>
+            <li>Hybrid loading for optimal performance</li>
+        </ul>
+        <p><b>Author:</b> EcoPac Development Team</p>
+        <p><b>License:</b> GPL v3</p>
+        """
+        
+        QMessageBox.about(self, "About EcoPac", about_text)
+    
+    def closeEvent(self, event):
+        """Handle window close event."""
+        # Stop refresh timer
+        self.refresh_timer.stop()
+        
+        # Confirm exit
+        reply = QMessageBox.question(
+            self, "Exit EcoPac",
+            "Are you sure you want to exit?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            event.accept()
+        else:
+            event.ignore()
+
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
+def main():
+    """Main entry point."""
+    # Check for sudo privileges
+    if os.geteuid() != 0:
+        # Not running as root, check for sudo
+        try:
+            subprocess.run(['sudo', '-n', 'true'], capture_output=True)
+        except:
+            print("EcoPac needs sudo privileges for package operations.")
+            print("Please run with sudo or ensure passwordless sudo is configured.")
+            sys.exit(1)
+    
+    # Create Qt application
+    app = QApplication(sys.argv)
+    app.setApplicationName("EcoPac")
+    app.setOrganizationName("EcoPac")
+    
+    # Set application style
+    app.setStyle("Fusion")
+    
+    # Create and show main window
+    window = EcoPacManager()
+    window.show()
+    
+    # Execute application
+    sys.exit(app.exec_())
+
+if __name__ == "__main__":
+    main()

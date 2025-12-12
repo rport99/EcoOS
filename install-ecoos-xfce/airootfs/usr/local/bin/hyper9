@@ -9777,6 +9777,22 @@ class TokyoNightPanelBar(QMainWindow):
         bt_action.triggered.connect(self.launch_bluetooth_manager)
         menu.addAction(bt_action)
         menu.addSeparator()
+        # Package Managers
+        pkg_menu = menu.addMenu("📦 Package Managers")
+        
+        # EcoPac Package Manager
+        ecopac_action = QAction("🦊 EcoPac Package Manager", self)
+        ecopac_action.triggered.connect(lambda: self.launch_application("eco_pac"))
+        pkg_menu.addAction(ecopac_action)
+        
+        # Pamac Manager (will fail gracefully if not installed)
+        pamac_action = QAction("📦 Pamac Manager", self)
+        pamac_action.triggered.connect(lambda: self.launch_application("pamac-manager"))
+        pkg_menu.addAction(pamac_action)
+        
+
+        
+        menu.addSeparator()
         # System tools
         tools_actions = [
             ("󰍛 System Monitor", "eco_sys"),
