@@ -2,7 +2,7 @@
 """
 EcoPac Enhanced - Intelligent & Robust Package Manager for Arch Linux
 With AUR, Flatpak support, Tokyo Night theme, repository selection, and terminal output.
-ULTRA-FAST VERSION
+ULTRA-FAST VERSION with Removal Options and Widget Safety Fixes
 """
 
 import sys
@@ -85,6 +85,11 @@ class OperationType(Enum):
     REMOVE = "remove"
     UPDATE = "update"
     REINSTALL = "reinstall"
+
+class RemovalType(Enum):
+    THOROUGH = "thorough"   # -Rns (default): remove package and unused dependencies
+    QUICK = "quick"         # -R: remove only the package
+    CASCADE = "cascade"     # -Rsc: remove package and all dependencies (dangerous)
 
 # ============================================================================
 # DATA CLASSES
@@ -192,6 +197,10 @@ def safe_subprocess_run(cmd: List[str], timeout: int = 30, **kwargs) -> subproce
     """Safe subprocess run with timeout and error handling."""
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kwargs)
+    except subprocess.TimeoutExpired as e:
+        logger.warning(f"Command timed out: {' '.join(cmd)} - {e}")
+        # Return a CompletedProcess with a returncode of -1 to indicate timeout
+        return subprocess.CompletedProcess(cmd, -1, stdout='', stderr=str(e))
     except Exception as e:
         logger.error(f"Command failed: {' '.join(cmd)} - {e}")
         raise
@@ -507,7 +516,7 @@ class PackageLoaderUltraFast(QThread):
         
         try:
             # Get all installed packages
-            result = safe_subprocess_run(['pacman', '-Q'], timeout=3)
+            result = safe_subprocess_run(['pacman', '-Q'], timeout=5)  # Increased from 3 to 5
             if result.returncode == 0:
                 lines = result.stdout.strip().split('\n')
                 for line in lines:
@@ -526,20 +535,28 @@ class PackageLoaderUltraFast(QThread):
             # Get orphaned packages
             orphan_names = set()
             try:
-                result = safe_subprocess_run(['pacman', '-Qdtq'], timeout=1)
+                result = safe_subprocess_run(['pacman', '-Qdtq'], timeout=3)  # Increased from 1 to 3
                 if result.returncode == 0 and result.stdout.strip():
                     orphan_names = set(result.stdout.strip().split('\n'))
-            except:
-                pass
+                elif result.returncode != 0:
+                    logger.warning(f"Failed to get orphaned packages, return code: {result.returncode}")
+            except subprocess.TimeoutExpired:
+                logger.warning("Getting orphaned packages timed out, skipping orphan detection")
+            except Exception as e:
+                logger.warning(f"Error getting orphaned packages: {e}")
             
             # Get foreign packages (AUR)
             aur_names = set()
             try:
-                result = safe_subprocess_run(['pacman', '-Qmq'], timeout=1)
+                result = safe_subprocess_run(['pacman', '-Qmq'], timeout=3)  # Increased from 1 to 3
                 if result.returncode == 0 and result.stdout.strip():
                     aur_names = set(result.stdout.strip().split('\n'))
-            except:
-                pass
+                elif result.returncode != 0:
+                    logger.warning(f"Failed to get foreign packages, return code: {result.returncode}")
+            except subprocess.TimeoutExpired:
+                logger.warning("Getting foreign packages timed out, skipping AUR detection")
+            except Exception as e:
+                logger.warning(f"Error getting foreign packages: {e}")
             
             # Update statuses
             for package in packages:
@@ -557,7 +574,7 @@ class PackageLoaderUltraFast(QThread):
                     batch = packages[i:i+batch_size]
                     for package in batch:
                         try:
-                            result = safe_subprocess_run(['pacman', '-Qi', package.name], timeout=0.5)
+                            result = safe_subprocess_run(['pacman', '-Qi', package.name], timeout=1)  # Reduced from 0.5 to 1 for reliability
                             if result.returncode == 0:
                                 for line in result.stdout.strip().split('\n'):
                                     if line.startswith('Description'):
@@ -848,6 +865,209 @@ class RepositorySelectionDialog(QDialog):
     def get_selected_repository(self) -> Optional[Dict]:
         """Get the selected repository."""
         return self.selected_repository
+
+
+# ============================================================================
+# REMOVAL OPTIONS DIALOG - NEW COMPONENT
+# ============================================================================
+class RemovalOptionsDialog(QDialog):
+    """Dialog for selecting removal options."""
+    
+    def __init__(self, parent=None, package_count: int = 1):
+        super().__init__(parent)
+        self.package_count = package_count
+        self.selected_option = RemovalType.THOROUGH  # Default
+        
+        self.init_ui()
+        self.apply_tokyo_night_theme()
+    
+    def init_ui(self):
+        """Initialize the removal options dialog."""
+        self.setWindowTitle("Removal Options")
+        self.setModal(True)
+        self.resize(550, 400)
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        
+        # Header
+        header = QLabel(f"<h3>Remove {self.package_count} package(s)</h3>")
+        header.setStyleSheet("color: #7aa2f7;")
+        layout.addWidget(header)
+        
+        # Description
+        desc = QLabel("Select how you want to remove the package(s):")
+        desc.setStyleSheet("color: #c0caf5; font-size: 13px;")
+        layout.addWidget(desc)
+        
+        # Options group
+        options_group = QGroupBox("Removal Type")
+        options_layout = QVBoxLayout(options_group)
+        
+        # Quick removal option
+        quick_radio = QRadioButton("Quick Removal (-R)")
+        quick_radio.setToolTip("Removes only the selected package(s), leaves dependencies.\nFastest but may leave orphaned packages.")
+        quick_radio.option = RemovalType.QUICK
+        
+        # Thorough removal option (default)
+        thorough_radio = QRadioButton("Thorough Removal (-Rns)")
+        thorough_radio.setToolTip("Removes package(s) and unused dependencies.\nRecommended for clean removal. May be slower.")
+        thorough_radio.option = RemovalType.THOROUGH
+        thorough_radio.setChecked(True)
+        
+        # Cascade removal option (dangerous)
+        cascade_radio = QRadioButton("Cascade Removal (-Rsc)")
+        cascade_radio.setToolTip("Removes package(s) and ALL dependencies (even if used by other packages).\nDANGEROUS: May break other applications.")
+        cascade_radio.option = RemovalType.CASCADE
+        
+        # Connect radio buttons
+        quick_radio.toggled.connect(lambda: self.on_option_selected(RemovalType.QUICK))
+        thorough_radio.toggled.connect(lambda: self.on_option_selected(RemovalType.THOROUGH))
+        cascade_radio.toggled.connect(lambda: self.on_option_selected(RemovalType.CASCADE))
+        
+        options_layout.addWidget(quick_radio)
+        options_layout.addWidget(thorough_radio)
+        options_layout.addWidget(cascade_radio)
+        
+        layout.addWidget(options_group)
+        
+        # Details panel
+        details_group = QGroupBox("Details")
+        details_layout = QVBoxLayout(details_group)
+        
+        self.details_text = QTextEdit()
+        self.details_text.setReadOnly(True)
+        self.details_text.setMaximumHeight(120)
+        details_layout.addWidget(self.details_text)
+        
+        layout.addWidget(details_group)
+        
+        # Update details based on default selection
+        self.update_details(RemovalType.THOROUGH)
+        
+        # Button box
+        button_box = QDialogButtonBox()
+        self.remove_btn = QPushButton("Remove")
+        self.remove_btn.clicked.connect(self.accept)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        
+        button_box.addButton(self.remove_btn, QDialogButtonBox.AcceptRole)
+        button_box.addButton(cancel_btn, QDialogButtonBox.RejectRole)
+        
+        layout.addWidget(button_box)
+    
+    def apply_tokyo_night_theme(self):
+        """Apply Tokyo Night theme to the dialog."""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1a1b26;
+            }
+            QLabel {
+                color: #c0caf5;
+            }
+            QGroupBox {
+                border: 2px solid #292e42;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 10px;
+                color: #7aa2f7;
+                font-weight: bold;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 10px;
+                background-color: #1a1b26;
+            }
+            QRadioButton {
+                color: #c0caf5;
+                font-size: 13px;
+                padding: 8px 0;
+            }
+            QRadioButton::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #292e42;
+                border-radius: 9px;
+                background-color: #16161e;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #7aa2f7;
+                border-color: #7aa2f7;
+            }
+            QRadioButton::indicator:hover {
+                border-color: #7aa2f7;
+            }
+            QTextEdit {
+                background-color: #16161e;
+                color: #c0caf5;
+                border: 1px solid #292e42;
+                border-radius: 4px;
+                padding: 8px;
+                font-size: 12px;
+            }
+            QPushButton {
+                background-color: #292e42;
+                color: #c0caf5;
+                border: 1px solid #3d59a1;
+                border-radius: 4px;
+                padding: 10px 20px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #3d59a1;
+            }
+            QPushButton:disabled {
+                background-color: #1a1b26;
+                color: #565f89;
+                border: 1px solid #292e42;
+            }
+        """)
+    
+    def on_option_selected(self, option: RemovalType):
+        """Handle option selection."""
+        self.selected_option = option
+        self.update_details(option)
+    
+    def update_details(self, option: RemovalType):
+        """Update details text based on selected option."""
+        details = ""
+        
+        if option == RemovalType.QUICK:
+            details = """
+            <b>Quick Removal (-R)</b><br>
+            <span style='color: #9ece6a;'>✓ Fastest removal option</span><br>
+            <span style='color: #ff9e64;'>⚠ Leaves dependencies installed</span><br>
+            <span style='color: #ff9e64;'>⚠ May create orphaned packages</span><br><br>
+            <i>Use this when you want to remove packages quickly and will clean up orphans later.</i>
+            """
+        
+        elif option == RemovalType.THOROUGH:
+            details = """
+            <b>Thorough Removal (-Rns)</b><br>
+            <span style='color: #9ece6a;'>✓ Removes unused dependencies</span><br>
+            <span style='color: #9ece6a;'>✓ Keeps system clean</span><br>
+            <span style='color: #ff9e64;'>⚠ Slower due to dependency analysis</span><br><br>
+            <i>Recommended for most removals. Prevents accumulation of unused packages.</i>
+            """
+        
+        elif option == RemovalType.CASCADE:
+            details = """
+            <b style='color: #f7768e;'>Cascade Removal (-Rsc)</b><br>
+            <span style='color: #f7768e;'>⚠ Removes ALL dependencies</span><br>
+            <span style='color: #f7768e;'>⚠ May break other applications</span><br>
+            <span style='color: #f7768e;'>⚠ Use with extreme caution</span><br><br>
+            <i>Only use when you want to completely remove a package and all its dependencies, even if they're used by other packages.</i>
+            """
+        
+        self.details_text.setHtml(details)
+    
+    def get_selected_option(self) -> RemovalType:
+        """Get the selected removal option."""
+        return self.selected_option
 
 
 # ============================================================================
@@ -1957,7 +2177,7 @@ class EcoPacManager(QMainWindow):
         self.package_table.doubleClicked.connect(self.show_package_details)
     
     def create_details_panel(self):
-        """Create details panel with Tokyo Night styling."""
+        """Create details panel with Tokyo Night styling - with safe widget creation."""
         panel = QWidget()
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(10, 10, 10, 10)
@@ -1968,11 +2188,21 @@ class EcoPacManager(QMainWindow):
         details_layout = QVBoxLayout(details_group)
         
         self.details_text = QTextEdit()
+        self.details_text.setObjectName("packageDetailsText")  # Set object name for debugging
         self.details_text.setReadOnly(True)
         details_font = QFont()
         details_font.setPointSize(12)
         self.details_text.setFont(details_font)
         self.details_text.setMaximumHeight(250)
+        
+        # Connect destroyed signal to cleanup
+        def on_details_text_destroyed():
+            logger.debug("Details text widget destroyed")
+            if hasattr(self, 'details_text'):
+                self.details_text = None
+        
+        self.details_text.destroyed.connect(on_details_text_destroyed)
+        
         details_layout.addWidget(self.details_text)
         
         panel_layout.addWidget(details_group)
@@ -2524,7 +2754,7 @@ class EcoPacManager(QMainWindow):
         self.status_label.setText("Showing all packages")
     
     def on_selection_changed(self, selected, deselected):
-        """Handle package selection changes."""
+        """Handle package selection changes with safe widget access."""
         selected_indexes = self.package_table.selectionModel().selectedRows()
         
         # Convert to list
@@ -2542,17 +2772,31 @@ class EcoPacManager(QMainWindow):
         self.remove_btn.setEnabled(can_remove)
         self.update_btn.setEnabled(can_update)
         
-        # Update details text
-        if len(self.selected_packages) == 1:
-            pkg = self.selected_packages[0]
-            self.update_details_text(pkg)
-        elif len(self.selected_packages) > 1:
-            self.show_multiple_selection_details()
+        # Update details text - check if widget exists
+        if hasattr(self, 'details_text') and self.details_text:
+            if len(self.selected_packages) == 1:
+                pkg = self.selected_packages[0]
+                self.update_details_text(pkg)
+            elif len(self.selected_packages) > 1:
+                self.show_multiple_selection_details()
+            else:
+                try:
+                    self.details_text.clear()
+                except RuntimeError as e:
+                    logger.error(f"Failed to clear details text: {e}")
+                    self.details_text = None
         else:
-            self.details_text.clear()
+            # Widget doesn't exist, log warning
+            logger.warning("Details text widget not available for selection update")
     
     def update_details_text(self, pkg: Package):
-        """Update details text for a single package - with lazy loading."""
+        """Update details text for a single package - with lazy loading and safe widget access."""
+        # Check if the widget still exists
+        if not self.details_text or not hasattr(self.details_text, 'setHtml'):
+            # Widget has been deleted, create a new one or skip
+            logger.warning("Details text widget has been deleted, skipping update")
+            return
+        
         # Show basic info immediately
         details = []
         details.append(f"<h2 style='color: #7aa2f7;'>{pkg.display_name}</h2>")
@@ -2599,7 +2843,12 @@ class EcoPacManager(QMainWindow):
         if not hasattr(pkg, '_details_loaded') or not pkg._details_loaded:
             details.append(f"<p><i style='color: #ff9e64;'>Loading additional details...</i></p>")
         
-        self.details_text.setHtml("\n".join(details))
+        try:
+            self.details_text.setHtml("\n".join(details))
+        except RuntimeError as e:
+            logger.error(f"Failed to update details text: {e}")
+            # Mark widget as deleted
+            self.details_text = None
         
         # Load additional details in background
         if not hasattr(pkg, '_details_loaded'):
@@ -2714,12 +2963,19 @@ class EcoPacManager(QMainWindow):
     
     @pyqtSlot(Package, dict)
     def update_details_with_additional(self, pkg: Package, details: dict):
-        """Update details with additional information."""
-        # Check if this package is still selected
-        if not self.selected_packages or len(self.selected_packages) != 1 or self.selected_packages[0] != pkg:
+        """Update details with additional information - with safe widget access."""
+        # Check if this package is still selected and widget exists
+        if (not self.selected_packages or len(self.selected_packages) != 1 or 
+            self.selected_packages[0] != pkg or 
+            not self.details_text or not hasattr(self.details_text, 'setHtml')):
             return
         
-        current_html = self.details_text.toHtml()
+        try:
+            current_html = self.details_text.toHtml()
+        except RuntimeError as e:
+            logger.error(f"Failed to get current HTML from details text: {e}")
+            self.details_text = None
+            return
         
         # Remove loading indicator if present
         current_html = current_html.replace('<p><i style="color: #ff9e64;">Loading additional details...</i></p>', '')
@@ -2757,10 +3013,20 @@ class EcoPacManager(QMainWindow):
             # Remove closing </body> and </html> tags if present
             html = current_html.replace('</body>', '').replace('</html>', '')
             html += "\n".join(additional) + "</body></html>"
-            self.details_text.setHtml(html)
+            
+            try:
+                self.details_text.setHtml(html)
+            except RuntimeError as e:
+                logger.error(f"Failed to update details with additional info: {e}")
+                self.details_text = None
     
     def show_multiple_selection_details(self):
-        """Show details for multiple selected packages."""
+        """Show details for multiple selected packages - with safe widget access."""
+        # Check if the widget still exists
+        if not self.details_text or not hasattr(self.details_text, 'setHtml'):
+            logger.warning("Details text widget has been deleted, skipping multiple selection update")
+            return
+        
         details = []
         details.append(f"<h3 style='color: #7aa2f7;'>{len(self.selected_packages)} packages selected</h3>")
         
@@ -2809,7 +3075,11 @@ class EcoPacManager(QMainWindow):
         
         details.append("</ul>")
         
-        self.details_text.setHtml("\n".join(details))
+        try:
+            self.details_text.setHtml("\n".join(details))
+        except RuntimeError as e:
+            logger.error(f"Failed to update multiple selection details: {e}")
+            self.details_text = None
     
     def show_package_details(self, index):
         """Show detailed package information."""
@@ -3057,7 +3327,7 @@ class EcoPacManager(QMainWindow):
                     selected_repo = dialog.get_selected_repository()
                     if selected_repo:
                         # Install from selected repository
-                        self.execute_package_operation(
+                        self.execute_package_operation_with_removal(
                             OperationType.INSTALL,
                             [package_name],
                             f"Installing {package_name} from {selected_repo['name']}",
@@ -3067,7 +3337,7 @@ class EcoPacManager(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to check repositories: {str(e)}")
     
     # ============================================================================
-    # PACKAGE OPERATIONS WITH TERMINAL OUTPUT
+    # PACKAGE OPERATIONS WITH REMOVAL OPTIONS AND WIDGET SAFETY
     # ============================================================================
     
     def install_selected(self):
@@ -3089,7 +3359,7 @@ class EcoPacManager(QMainWindow):
                     packages_to_install.append(pkg.name)
         
         if packages_to_install:
-            self.execute_package_operation(
+            self.execute_package_operation_with_removal(
                 OperationType.INSTALL,
                 packages_to_install,
                 f"Installing {len(packages_to_install)} packages"
@@ -3102,7 +3372,7 @@ class EcoPacManager(QMainWindow):
             self.install_flatpak_packages(flatpak_packages)
     
     def remove_selected(self):
-        """Remove selected packages."""
+        """Remove selected packages with removal options dialog."""
         pacman_packages = []
         flatpak_packages = []
         
@@ -3117,20 +3387,15 @@ class EcoPacManager(QMainWindow):
                     pacman_packages.append(pkg.name)
         
         if pacman_packages:
-            # Confirm removal
-            reply = QMessageBox.question(
-                self, "Confirm Removal",
-                f"Remove {len(pacman_packages)} pacman packages?\n\n" +
-                "\n".join(pacman_packages[:5]) + 
-                ("\n..." if len(pacman_packages) > 5 else ""),
-                QMessageBox.Yes | QMessageBox.No
-            )
-            
-            if reply == QMessageBox.Yes:
-                self.execute_package_operation(
+            # Show removal options dialog
+            dialog = RemovalOptionsDialog(self, len(pacman_packages))
+            if dialog.exec_() == QDialog.Accepted:
+                removal_option = dialog.get_selected_option()
+                self.execute_package_operation_with_removal(
                     OperationType.REMOVE,
                     pacman_packages,
-                    f"Removing {len(pacman_packages)} packages"
+                    f"Removing {len(pacman_packages)} packages",
+                    removal_option=removal_option
                 )
         
         if flatpak_packages:
@@ -3138,6 +3403,7 @@ class EcoPacManager(QMainWindow):
             reply = QMessageBox.question(
                 self, "Confirm Flatpak Removal",
                 f"Remove {len(flatpak_packages)} Flatpak applications?\n\n" +
+                "This will uninstall the selected applications.\n\n" +
                 "\n".join(flatpak_packages[:5]) + 
                 ("\n..." if len(flatpak_packages) > 5 else ""),
                 QMessageBox.Yes | QMessageBox.No
@@ -3162,7 +3428,7 @@ class EcoPacManager(QMainWindow):
                     pacman_packages.append(pkg.name)
         
         if pacman_packages:
-            self.execute_package_operation(
+            self.execute_package_operation_with_removal(
                 OperationType.UPDATE,
                 pacman_packages,
                 f"Updating {len(pacman_packages)} packages"
@@ -3181,7 +3447,7 @@ class EcoPacManager(QMainWindow):
         
         if reply == QMessageBox.Yes:
             # Update pacman packages
-            self.execute_package_operation(
+            self.execute_package_operation_with_removal(
                 OperationType.UPDATE,
                 [],
                 "Updating all packages"
@@ -3219,46 +3485,142 @@ class EcoPacManager(QMainWindow):
         self.execute_flatpak_command(cmd, f"Updating {len(flatpak_ids)} Flatpak applications")
     
     def install_flatpak_packages(self, flatpak_ids: List[str]):
-        """Install Flatpak packages."""
+        """Install Flatpak packages with proper ID validation."""
         if not self.flatpak_available:
             QMessageBox.information(self, "Flatpak Not Available", 
                 "Flatpak is not installed on your system.")
             return
         
-        # Ask for installation method
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Install Flatpak")
-        dialog.setModal(True)
-        dialog.resize(400, 200)
+        # Validate or transform package names to full Flatpak IDs
+        validated_ids = []
+        mapping_used = False
         
-        layout = QVBoxLayout(dialog)
-        
-        label = QLabel(f"Install {len(flatpak_ids)} Flatpak application(s):")
-        layout.addWidget(label)
-        
-        list_widget = QListWidget()
         for app_id in flatpak_ids:
-            list_widget.addItem(app_id)
-        layout.addWidget(list_widget)
+            original_id = app_id
+            
+            # If it doesn't look like a proper Flatpak ID (needs at least 2 periods)
+            # Common Flatpak ID pattern: domain.name.app (e.g., com.vivaldi.Vivaldi)
+            if app_id.count('.') < 2:
+                # Try to map common application names to their Flatpak IDs
+                app_lower = app_id.lower()
+                
+                # Common application mappings
+                app_mappings = {
+                    "vivaldi": "com.vivaldi.Vivaldi",
+                    "firefox": "org.mozilla.firefox",
+                    "chromium": "org.chromium.Chromium",
+                    "brave": "com.brave.Browser",
+                    "spotify": "com.spotify.Client",
+                    "vlc": "org.videolan.VLC",
+                    "gimp": "org.gimp.GIMP",
+                    "inkscape": "org.inkscape.Inkscape",
+                    "libreoffice": "org.libreoffice.LibreOffice",
+                    "thunderbird": "org.mozilla.Thunderbird",
+                    "telegram": "org.telegram.desktop",
+                    "discord": "com.discordapp.Discord",
+                    "steam": "com.valvesoftware.Steam",
+                    "obs": "com.obsproject.Studio",
+                    "kdenlive": "org.kde.kdenlive",
+                    "audacity": "org.audacityteam.Audacity",
+                    "handbrake": "fr.handbrake.ghb",
+                    "transmission": "com.transmissionbt.Transmission",
+                    "qbittorrent": "org.qbittorrent.qBittorrent",
+                    "filezilla": "org.filezillaproject.Filezilla",
+                    "virtualbox": "org.virtualbox.VirtualBox",
+                    "zoom": "us.zoom.Zoom",
+                    "slack": "com.slack.Slack",
+                    "skype": "com.skype.Client",
+                    "teams": "com.microsoft.Teams",
+                    "signal": "org.signal.Signal",
+                    "element": "im.riot.Riot",
+                    "blender": "org.blender.Blender",
+                    "godot": "org.godotengine.Godot",
+                    "code": "com.visualstudio.code",
+                    "androidstudio": "com.google.AndroidStudio",
+                    "pycharm": "com.jetbrains.PyCharm-Professional",
+                    "clion": "com.jetbrains.CLion",
+                    "intellij": "com.jetbrains.IntelliJ-IDEA-Ultimate",
+                    "phpstorm": "com.jetbrains.PhpStorm",
+                    "webstorm": "com.jetbrains.WebStorm",
+                    "rider": "com.jetbrains.Rider",
+                    "datagrip": "com.jetbrains.DataGrip",
+                    "dataspell": "com.jetbrains.DataSpell",
+                    "rubymine": "com.jetbrains.RubyMine",
+                    "goland": "com.jetbrains.GoLand",
+                }
+                
+                if app_lower in app_mappings:
+                    validated_ids.append(app_mappings[app_lower])  # FIXED: Was app_mappings[app_lapp_mappings[app_lower]
+                    mapping_used = True
+                    logger.info(f"Mapped '{original_id}' to '{validated_ids[-1]}' for Flatpak installation")
+                else:
+                    # Try searching for the app
+                    logger.info(f"Searching for Flatpak app: {original_id}")
+                    search_results = search_flatpak_apps(original_id, limit=5)
+                    if search_results:
+                        # Show selection dialog
+                        dialog = QDialog(self)
+                        dialog.setWindowTitle(f"Select Flatpak Application: {original_id}")
+                        dialog.setModal(True)
+                        dialog.resize(500, 300)
+                        
+                        layout = QVBoxLayout(dialog)
+                        
+                        label = QLabel(f"Multiple matches found for '{original_id}'. Select one:")
+                        layout.addWidget(label)
+                        
+                        list_widget = QListWidget()
+                        for result in search_results:
+                            item_text = f"{result.flatpak_id}\n{result.description[:60]}..."
+                            item = QListWidgetItem(item_text)
+                            item.setData(Qt.UserRole, result.flatpak_id)
+                            list_widget.addItem(item)
+                        
+                        layout.addWidget(list_widget)
+                        
+                        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+                        button_box.accepted.connect(dialog.accept)
+                        button_box.rejected.connect(dialog.reject)
+                        layout.addWidget(button_box)
+                        
+                        if dialog.exec_() == QDialog.Accepted:
+                            selected_items = list_widget.selectedItems()
+                            if selected_items:
+                                selected_id = selected_items[0].data(Qt.UserRole)
+                                validated_ids.append(selected_id)
+                                mapping_used = True
+                                logger.info(f"Selected '{selected_id}' for Flatpak installation")
+                    else:
+                        # Try with .desktop suffix
+                        desktop_id = f"{original_id}.desktop"
+                        validated_ids.append(desktop_id)
+                        mapping_used = True
+                        logger.info(f"Trying '{desktop_id}' as Flatpak ID")
+            else:
+                # Already looks like a proper Flatpak ID
+                validated_ids.append(app_id)
         
-        # Remote selection
-        remote_label = QLabel("Select remote:")
-        layout.addWidget(remote_label)
+        if not validated_ids:
+            return
         
-        remote_combo = QComboBox()
-        remote_combo.addItems(FLATPAK_REMOTES)
-        remote_combo.setCurrentText('flathub')
-        layout.addWidget(remote_combo)
+        # Confirm installation
+        if mapping_used:
+            message = f"Install the following Flatpak applications?\n\n" + \
+                      "\n".join(validated_ids[:5])
+            if len(validated_ids) > 5:
+                message += f"\n... and {len(validated_ids) - 5} more"
+            
+            reply = QMessageBox.question(
+                self, "Confirm Flatpak Installation",
+                message,
+                QMessageBox.Yes | QMessageBox.No
+            )
+            
+            if reply != QMessageBox.Yes:
+                return
         
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.accepted.connect(dialog.accept)
-        button_box.rejected.connect(dialog.reject)
-        layout.addWidget(button_box)
-        
-        if dialog.exec_() == QDialog.Accepted:
-            remote = remote_combo.currentText()
-            cmd = ['flatpak', 'install', '-y', remote] + flatpak_ids
-            self.execute_flatpak_command(cmd, f"Installing {len(flatpak_ids)} Flatpak applications")
+        cmd = ['flatpak', 'install', '-y', 'flathub'] + validated_ids
+        self.execute_flatpak_command(cmd, f"Installing {len(validated_ids)} Flatpak applications")
     
     def uninstall_flatpak_packages(self, flatpak_ids: List[str]):
         """Uninstall Flatpak packages."""
@@ -3266,157 +3628,171 @@ class EcoPacManager(QMainWindow):
             return
         
         cmd = ['flatpak', 'uninstall', '-y'] + flatpak_ids
-        self.execute_flatpak_command(cmd, f"Uninstalling {len(flatpak_ids)} Flatpak applications")
+        self.execute_flatpak_command(cmd, f"Removing {len(flatpak_ids)} Flatpak applications")
     
-    def execute_flatpak_command(self, command: List[str], operation_name: str):
-        """Execute a Flatpak command with terminal output."""
-        dialog = CommandExecutionDialog(self, command, operation_name)
+    def execute_flatpak_command(self, command: List[str], description: str):
+        """Execute a Flatpak command with progress dialog."""
+        dialog = CommandExecutionDialog(self, command, description)
         dialog.exec_()
         
         if dialog.success:
             self.refresh_packages()
-            # Switch to terminal tab to show output
-            self.tab_widget.setCurrentIndex(1)
+    
+    def install_aur_packages(self, aur_packages: List[str]):
+        """Install AUR packages with yay or paru."""
+        # Check for AUR helpers
+        aur_helpers = ['yay', 'paru']
+        selected_helper = None
+        
+        for helper in aur_helpers:
+            result = safe_subprocess_run(['which', helper], timeout=2)
+            if result.returncode == 0:
+                selected_helper = helper
+                break
+        
+        if not selected_helper:
+            # Ask user to install an AUR helper
+            reply = QMessageBox.question(
+                self, "AUR Helper Required",
+                "No AUR helper (yay or paru) found. Would you like to install yay?\n\n"
+                "This requires manual installation. Please run:\n\n"
+                "git clone https://aur.archlinux.org/yay.git\n"
+                "cd yay\n"
+                "makepkg -si\n\n"
+                "After installation, restart EcoPac.",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                # Open terminal command in dialog
+                self.show_terminal_command("git clone https://aur.archlinux.org/yay.git && cd yay && makepkg -si")
+            return
+        
+        # Confirm AUR installation
+        reply = QMessageBox.question(
+            self, "Confirm AUR Installation",
+            f"Install {len(aur_packages)} AUR packages using {selected_helper}?\n\n"
+            "This may take several minutes and requires building packages.\n\n" +
+            "\n".join(aur_packages[:5]) +
+            ("\n..." if len(aur_packages) > 5 else ""),
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # Execute AUR installation
+            cmd = [selected_helper, '-S', '--noconfirm'] + aur_packages
+            dialog = CommandExecutionDialog(self, cmd, f"Installing {len(aur_packages)} AUR packages")
+            dialog.exec_()
+            
+            if dialog.success:
+                self.refresh_packages()
+    
+    def show_terminal_command(self, command: str):
+        """Show a terminal command for manual execution."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Manual Installation Required")
+        dialog.setModal(True)
+        dialog.resize(600, 300)
+        
+        layout = QVBoxLayout(dialog)
+        
+        label = QLabel("Please run the following command in your terminal:")
+        layout.addWidget(label)
+        
+        command_text = QTextEdit()
+        command_text.setText(command)
+        command_text.setReadOnly(True)
+        command_text.setFont(QFont("Monospace", 10))
+        layout.addWidget(command_text)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok)
+        button_box.accepted.connect(dialog.accept)
+        layout.addWidget(button_box)
+        
+        dialog.exec_()
+    
+    def execute_package_operation_with_removal(
+        self, 
+        operation: OperationType, 
+        packages: List[str], 
+        description: str,
+        removal_option: RemovalType = RemovalType.THOROUGH,
+        extra_args: List[str] = None
+    ):
+        """Execute a package operation with removal options and proper error handling."""
+        if not packages and operation != OperationType.UPDATE:
+            QMessageBox.warning(self, "No Packages", "No packages selected for operation.")
+            return
+        
+        try:
+            # Build command
+            if operation == OperationType.INSTALL:
+                cmd = ['sudo', 'pacman', '-S', '--noconfirm'] + (extra_args or []) + packages
+            
+            elif operation == OperationType.REMOVE:
+                cmd = ['sudo', 'pacman', '-R', '--noconfirm']
+                
+                # Add removal option flags
+                if removal_option == RemovalType.THOROUGH:
+                    cmd.extend(['-ns'])  # Remove with dependencies (-Rns)
+                elif removal_option == RemovalType.QUICK:
+                    # Just -R flag (already part of cmd)
+                    pass
+                elif removal_option == RemovalType.CASCADE:
+                    cmd.extend(['-sc'])  # Remove with cascade (-Rsc)
+                
+                cmd.extend(packages)
+            
+            elif operation == OperationType.UPDATE:
+                cmd = ['sudo', 'pacman', '-Syu', '--noconfirm']
+            
+            elif operation == OperationType.REINSTALL:
+                cmd = ['sudo', 'pacman', '-S', '--noconfirm', '--needed'] + packages
+            
+            else:
+                logger.error(f"Unknown operation: {operation}")
+                return
+            
+            # Execute command
+            dialog = CommandExecutionDialog(self, cmd, description)
+            dialog.exec_()
+            
+            if dialog.success:
+                self.refresh_packages()
+                self.status_label.setText(f"{description} completed successfully")
+            else:
+                self.status_label.setText(f"{description} failed")
+        
+        except Exception as e:
+            logger.error(f"Error executing package operation: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to execute operation: {str(e)}")
     
     def clean_cache(self):
         """Clean package cache."""
         reply = QMessageBox.question(
             self, "Clean Cache",
-            "Clean package cache?\n\nThis will remove all cached package files.",
+            "Clean package cache?\n\n"
+            "This will remove all cached package files except for the most recent version of each package.",
             QMessageBox.Yes | QMessageBox.No
         )
         
         if reply == QMessageBox.Yes:
-            self.execute_sudo_command(
-                ["pacman", "-Sc"],
-                "Cleaning package cache"
-            )
-    
-    def execute_package_operation(self, operation: OperationType, packages: List[str], 
-                                 operation_name: str, extra_args: List[str] = None):
-        """Execute a package operation with terminal output."""
-        if not packages and operation != OperationType.UPDATE:
-            return
-        
-        # Build command
-        if operation == OperationType.INSTALL:
-            cmd = ["sudo", "pacman", "-S", "--needed"] + (extra_args or []) + packages
-        
-        elif operation == OperationType.REMOVE:
-            cmd = ["sudo", "pacman", "-Rns"] + packages
-        
-        elif operation == OperationType.UPDATE:
-            cmd = ["sudo", "pacman", "-Syu"] + (extra_args or [])
-        
-        elif operation == OperationType.REINSTALL:
-            cmd = ["sudo", "pacman", "-S"] + packages
-        
-        else:
-            return
-        
-        # Execute command with terminal output dialog
-        dialog = CommandExecutionDialog(self, cmd, operation_name)
-        dialog.exec_()
-        
-        if dialog.success:
-            self.refresh_packages()
-            # Switch to terminal tab to show output
-            self.tab_widget.setCurrentIndex(1)
-    
-    def install_aur_packages(self, aur_packages: List[str]):
-        """Install AUR packages."""
-        if not aur_packages:
-            return
-        
-        # Ask for installation method
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Install AUR Packages")
-        dialog.setModal(True)
-        dialog.resize(500, 300)
-        
-        layout = QVBoxLayout(dialog)
-        
-        label = QLabel(f"Install {len(aur_packages)} AUR package(s):")
-        layout.addWidget(label)
-        
-        list_widget = QListWidget()
-        for pkg in aur_packages:
-            list_widget.addItem(pkg)
-        layout.addWidget(list_widget)
-        
-        # AUR helper selection
-        helper_label = QLabel("Select AUR helper:")
-        layout.addWidget(helper_label)
-        
-        helper_combo = QComboBox()
-        helpers = ["yay", "paru", "pikaur", "trizen"]
-        for helper in helpers:
-            # Check if helper is available
-            try:
-                result = subprocess.run(['which', helper], capture_output=True)
-                if result.returncode == 0:
-                    helper_combo.addItem(helper)
-            except:
-                pass
-        
-        if helper_combo.count() == 0:
-            helper_combo.addItem("yay")
-            QMessageBox.warning(self, "AUR Helper Not Found",
-                              "No AUR helpers found. You may need to install one manually.")
-        
-        layout.addWidget(helper_combo)
-        
-        # Build from source option
-        build_source = QCheckBox("Build from source")
-        layout.addWidget(build_source)
-        
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.accepted.connect(dialog.accept)
-        button_box.rejected.connect(dialog.reject)
-        layout.addWidget(button_box)
-        
-        if dialog.exec_() == QDialog.Accepted:
-            helper = helper_combo.currentText()
-            
-            # Build command
-            cmd = [helper, "-S", "--needed"] + aur_packages
-            
-            if build_source.isChecked():
-                cmd.append("--build")
-            
-            # Execute AUR installation
-            aur_dialog = CommandExecutionDialog(self, cmd, f"Installing {len(aur_packages)} AUR packages")
-            aur_dialog.exec_()
-            
-            if aur_dialog.success:
-                self.refresh_packages()
-                self.tab_widget.setCurrentIndex(1)
-    
-    def execute_sudo_command(self, command: List[str], operation_name: str):
-        """Execute a sudo command with terminal output."""
-        dialog = CommandExecutionDialog(self, command, operation_name)
-        dialog.exec_()
-        
-        if dialog.success:
-            self.refresh_packages()
-            self.tab_widget.setCurrentIndex(1)
-    
-    # ============================================================================
-    # FLATPAK MANAGEMENT METHODS
-    # ============================================================================
+            cmd = ['sudo', 'paccache', '-r']
+            dialog = CommandExecutionDialog(self, cmd, "Cleaning package cache")
+            dialog.exec_()
     
     def open_flatpak_manager(self):
         """Open Flatpak manager dialog."""
-        if not self.flatpak_available:
-            QMessageBox.information(self, "Flatpak Not Available",
-                                  "Flatpak is not installed on your system.")
-            return
-        
         self.flatpak_manager_dialog = FlatpakManagerDialog(self)
         self.flatpak_manager_dialog.exec_()
     
     def add_flatpak_remote(self):
-        """Add Flatpak remote - simplified method."""
+        """Add a Flatpak remote."""
+        if not self.flatpak_available:
+            QMessageBox.information(self, "Flatpak Not Available", 
+                "Flatpak is not installed on your system.")
+            return
+        
         dialog = QDialog(self)
         dialog.setWindowTitle("Add Flatpak Remote")
         dialog.setModal(True)
@@ -3425,44 +3801,53 @@ class EcoPacManager(QMainWindow):
         layout = QVBoxLayout(dialog)
         
         # Remote name
-        name_label = QLabel("Remote name:")
+        name_label = QLabel("Remote name (e.g., flathub-beta):")
         layout.addWidget(name_label)
         
         name_input = QLineEdit()
-        name_input.setPlaceholderText("e.g., flathub-beta")
+        name_input.setPlaceholderText("flathub-beta")
         layout.addWidget(name_input)
         
         # Remote URL
-        url_label = QLabel("Remote URL:")
+        url_label = QLabel("Remote URL (e.g., https://flathub.org/beta-repo/flathub-beta.flatpakrepo):")
         layout.addWidget(url_label)
         
         url_input = QLineEdit()
-        url_input.setPlaceholderText("e.g., https://flathub.org/beta-repo/flathub-beta.flatpakrepo")
+        url_input.setPlaceholderText("https://flathub.org/beta-repo/flathub-beta.flatpakrepo")
         layout.addWidget(url_input)
         
         # Common remotes
         common_label = QLabel("Common remotes:")
         layout.addWidget(common_label)
         
-        common_remotes = QWidget()
-        common_layout = QHBoxLayout(common_remotes)
+        common_widget = QWidget()
+        common_layout = QHBoxLayout(common_widget)
         
         flathub_btn = QPushButton("Flathub")
-        flathub_btn.clicked.connect(lambda: (name_input.setText("flathub"), 
-                                           url_input.setText("https://flathub.org/repo/flathub.flatpakrepo")))
+        flathub_btn.clicked.connect(lambda: self.set_remote_fields(name_input, url_input, 
+                                                                  "flathub", 
+                                                                  "https://flathub.org/repo/flathub.flatpakrepo"))
         common_layout.addWidget(flathub_btn)
         
         flathub_beta_btn = QPushButton("Flathub Beta")
-        flathub_beta_btn.clicked.connect(lambda: (name_input.setText("flathub-beta"),
-                                                url_input.setText("https://flathub.org/beta-repo/flathub-beta.flatpakrepo")))
+        flathub_beta_btn.clicked.connect(lambda: self.set_remote_fields(name_input, url_input,
+                                                                       "flathub-beta",
+                                                                       "https://flathub.org/beta-repo/flathub-beta.flatpakrepo"))
         common_layout.addWidget(flathub_beta_btn)
         
         gnome_btn = QPushButton("GNOME Nightly")
-        gnome_btn.clicked.connect(lambda: (name_input.setText("gnome-nightly"),
-                                         url_input.setText("https://nightly.gnome.org/gnome-nightly.flatpakrepo")))
+        gnome_btn.clicked.connect(lambda: self.set_remote_fields(name_input, url_input,
+                                                                "gnome-nightly",
+                                                                "https://nightly.gnome.org/gnome-nightly.flatpakrepo"))
         common_layout.addWidget(gnome_btn)
         
-        layout.addWidget(common_remotes)
+        kde_btn = QPushButton("KDE Apps")
+        kde_btn.clicked.connect(lambda: self.set_remote_fields(name_input, url_input,
+                                                              "kdeapps",
+                                                              "https://distribute.kde.org/kdeapps.flatpakrepo"))
+        common_layout.addWidget(kde_btn)
+        
+        layout.addWidget(common_widget)
         
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         button_box.accepted.connect(dialog.accept)
@@ -3474,101 +3859,131 @@ class EcoPacManager(QMainWindow):
             url = url_input.text().strip()
             
             if name and url:
-                self.add_flatpak_remote_execute(name, url)
+                cmd = ['flatpak', 'remote-add', '--if-not-exists', name, url]
+                exec_dialog = CommandExecutionDialog(self, cmd, f"Adding Flatpak remote: {name}")
+                exec_dialog.exec_()
+                
+                if exec_dialog.success:
+                    self.status_label.setText(f"Added Flatpak remote: {name}")
     
-    def add_flatpak_remote_execute(self, name: str, url: str):
-        """Execute adding Flatpak remote."""
-        if not self.flatpak_available:
-            QMessageBox.information(self, "Flatpak Not Available",
-                                  "Flatpak is not installed on your system.")
-            return
-        
-        cmd = ['flatpak', 'remote-add', '--if-not-exists', name, url]
-        dialog = CommandExecutionDialog(self, cmd, f"Adding Flatpak remote: {name}")
-        dialog.exec_()
-        
-        if dialog.success:
-            QMessageBox.information(self, "Success", f"Flatpak remote '{name}' added successfully.")
-    
-    # ============================================================================
-    # UTILITY METHODS
-    # ============================================================================
+    def set_remote_fields(self, name_input: QLineEdit, url_input: QLineEdit, name: str, url: str):
+        """Set remote name and URL fields."""
+        name_input.setText(name)
+        url_input.setText(url)
     
     def auto_refresh(self):
-        """Auto-refresh package list."""
-        if self.isVisible():
+        """Auto-refresh packages periodically."""
+        if not self.isHidden():
+            logger.info("Auto-refreshing packages...")
             self.refresh_packages()
     
     def show_about(self):
         """Show about dialog."""
         about_text = """
         <h1>EcoPac Package Manager</h1>
-        <p><b>Version:</b> 2.0 ULTRA-FAST</p>
+        <p><b>Version:</b> Ultra-Fast 1.0</p>
         <p><b>Description:</b> Intelligent & Robust Package Manager for Arch Linux</p>
         <p><b>Features:</b></p>
         <ul>
             <li>Ultra-fast package loading</li>
-            <li>AUR support with helper integration</li>
-            <li>Flatpak application management</li>
+            <li>AUR support with voting and popularity</li>
+            <li>Flatpak support with dedicated manager</li>
             <li>Tokyo Night theme</li>
-            <li>Repository selection dialog</li>
+            <li>Repository selection for packages</li>
             <li>Terminal output with real-time display</li>
-            <li>Hybrid loading for optimal performance</li>
+            <li>Removal options (Quick, Thorough, Cascade)</li>
+            <li>Widget safety fixes</li>
+            <li>Auto-refresh every 5 minutes</li>
         </ul>
-        <p><b>Author:</b> EcoPac Development Team</p>
-        <p><b>License:</b> GPL v3</p>
+        <p><b>Package Types Supported:</b></p>
+        <ul>
+            <li>📦 Official Pacman packages</li>
+            <li>⭐ AUR packages</li>
+            <li>📦 Flatpak applications</li>
+        </ul>
+        <p><b>Architecture:</b> x86_64</p>
+        <p><b>License:</b> MIT</p>
+        <p><b>GitHub:</b> <a href="https://github.com">EcoPac Repository</a></p>
+        <hr>
+        <p><i>Designed for Arch Linux enthusiasts who value speed and aesthetics.</i></p>
         """
         
         QMessageBox.about(self, "About EcoPac", about_text)
     
     def closeEvent(self, event):
         """Handle window close event."""
-        # Stop refresh timer
-        self.refresh_timer.stop()
+        # Stop auto-refresh timer
+        if hasattr(self, 'refresh_timer') and self.refresh_timer.isActive():
+            self.refresh_timer.stop()
         
-        # Confirm exit
-        reply = QMessageBox.question(
-            self, "Exit EcoPac",
-            "Are you sure you want to exit?",
+        # Clean up any running threads
+        if hasattr(self, 'loader') and self.loader.isRunning():
+            reply = QMessageBox.question(
+                self, "Operation in Progress",
+                "Package loading is in progress. Do you want to cancel it?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                self.loader.terminate()
+                self.loader.wait(1000)
+        
+        # Close any open dialogs
+        if hasattr(self, 'flatpak_manager_dialog') and self.flatpak_manager_dialog:
+            self.flatpak_manager_dialog.close()
+        
+        event.accept()
+
+
+# ============================================================================
+# MAIN FUNCTION
+# ============================================================================
+def main():
+    """Main function to run the application."""
+    # Check if running as root
+    if os.geteuid() == 0:
+        logger.warning("Running as root is not recommended. Please run as regular user.")
+        
+        reply = QMessageBox.warning(
+            None, "Running as Root",
+            "EcoPac is running as root. This is not recommended for security reasons.\n\n"
+            "Do you want to continue?",
             QMessageBox.Yes | QMessageBox.No
         )
         
-        if reply == QMessageBox.Yes:
-            event.accept()
-        else:
-            event.ignore()
-
-
-# ============================================================================
-# MAIN ENTRY POINT
-# ============================================================================
-
-def main():
-    """Main entry point."""
-    # Check for sudo privileges
-    if os.geteuid() != 0:
-        # Not running as root, check for sudo
-        try:
-            subprocess.run(['sudo', '-n', 'true'], capture_output=True)
-        except:
-            print("EcoPac needs sudo privileges for package operations.")
-            print("Please run with sudo or ensure passwordless sudo is configured.")
+        if reply != QMessageBox.Yes:
             sys.exit(1)
     
-    # Create Qt application
+    # Create application
     app = QApplication(sys.argv)
     app.setApplicationName("EcoPac")
-    app.setOrganizationName("EcoPac")
+    app.setApplicationDisplayName("EcoPac Package Manager")
+    app.setStyle('Fusion')  # Use Fusion style for better theming
     
-    # Set application style
-    app.setStyle("Fusion")
+    # Check for required commands
+    required_commands = ['pacman']
+    missing_commands = []
+    
+    for cmd in required_commands:
+        result = safe_subprocess_run(['which', cmd], timeout=2)
+        if result.returncode != 0:
+            missing_commands.append(cmd)
+    
+    if missing_commands:
+        QMessageBox.critical(
+            None, "Missing Dependencies",
+            f"Missing required commands: {', '.join(missing_commands)}\n\n"
+            "Please install these packages and try again."
+        )
+        sys.exit(1)
     
     # Create and show main window
     window = EcoPacManager()
     window.show()
     
-    # Execute application
+    # Start the application
     sys.exit(app.exec_())
+
 
 if __name__ == "__main__":
     main()
