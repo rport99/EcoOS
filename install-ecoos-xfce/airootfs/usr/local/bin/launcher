@@ -433,10 +433,14 @@ class CleanLauncher(QWidget):
     # =========================================================================
     
     def load_apps(self):
-        """Load applications from desktop files."""
+        """Load applications from desktop files including Flatpak apps."""
+        # Existing desktop directories
         desktop_dirs = [
             Path("/usr/share/applications"),
-            Path.home() / ".local/share/applications"
+            Path.home() / ".local/share/applications",
+            # Add Flatpak desktop directories
+            Path("/var/lib/flatpak/exports/share/applications"),
+            Path.home() / ".local/share/flatpak/exports/share/applications"
         ]
         
         cat_map = {
@@ -453,8 +457,8 @@ class CleanLauncher(QWidget):
             if desktop_dir.exists():
                 for desktop_file in desktop_dir.glob("*.desktop"):
                     try:
-                        content = desktop_file.read_text()
-                        if "NoDisplay=true" in content:
+                        content = desktop_file.read_text(encoding='utf-8', errors='ignore')
+                        if "NoDisplay=true" in content or "Hidden=true" in content:
                             continue
                             
                         name = re.search(r'^Name=(.+)$', content, re.M)
@@ -473,19 +477,28 @@ class CleanLauncher(QWidget):
                                 if cat in cat_map:
                                     app_category = cat_map[cat]
                                     break
-                                    
+                        
+                        # Special handling for Flatpak applications
+                        exec_str = exec_cmd.group(1)
+                        if "flatpak run" in exec_str.lower():
+                            # This is a Flatpak application
+                            # Extract the actual command for launching
+                            exec_str = exec_str.strip()
+                        
                         app_data = {
                             "name": name.group(1),
-                            "exec": exec_cmd.group(1),
+                            "exec": exec_str,
                             "icon": icon.group(1) if icon else None,
                             "comment": comment.group(1) if comment else "",
                             "category": app_category,
+                            "is_flatpak": "flatpak" in str(desktop_dir)  # Add flag for Flatpak apps
                         }
                         
                         self.apps.append(app_data)
                         self.categories[app_category].append(app_data)
                         
-                    except Exception:
+                    except Exception as e:
+                        print(f"Error reading {desktop_file}: {e}")
                         continue
                         
         self.switch_category(self.current_category)

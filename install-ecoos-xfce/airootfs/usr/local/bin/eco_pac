@@ -258,38 +258,159 @@ def aur_package_to_package(aur_data: Dict) -> Package:
     )
 
 def search_flatpak_apps(query: str, limit: int = 50) -> List[Package]:
-    """Search for Flatpak applications."""
+    """Search for Flatpak applications with multiple fallback strategies."""
     packages = []
     
     if not check_flatpak_installed():
+        logger.warning("Flatpak is not installed")
         return packages
     
-    try:
-        result = safe_subprocess_run(['flatpak', 'search', query, '--columns=all'], timeout=10)
-        if result.returncode == 0:
-            lines = result.stdout.strip().split('\n')
-            for line in lines:
-                if line and '\t' in line:
-                    parts = line.split('\t')
-                    if len(parts) >= 5:
-                        flatpak_id = parts[0]
-                        name = parts[1] if parts[1] else flatpak_id.split('.')[-1]
-                        description = parts[2]
-                        version = parts[4] if len(parts) > 4 else 'unknown'
-                        origin = parts[3] if len(parts) > 3 else 'flathub'
+    logger.info(f"Starting Flatpak search for: '{query}'")
+    
+    search_attempts = [
+        # Try user search first (fastest if user remotes exist)
+        (['flatpak', 'search', '--user', query, '--columns=all'], "user"),
+        
+        # Try system search (might require sudo, but usually works for reading)
+        (['flatpak', 'search', query, '--columns=all'], "system"),
+        
+        # Try with specific remote if others fail
+        (['flatpak', 'search', '--columns=all', query], "default"),
+    ]
+    
+    for cmd, attempt_type in search_attempts:
+        try:
+            logger.info(f"Attempting Flatpak search ({attempt_type}): {' '.join(cmd)}")
+            
+            result = safe_subprocess_run(cmd, timeout=10)
+            
+            # Log the result for debugging
+            logger.info(f"Flatpak search return code: {result.returncode}")
+            if result.stderr:
+                logger.warning(f"Flatpak search stderr: {result.stderr[:200]}")
+            if result.stdout:
+                logger.info(f"Flatpak search returned {len(result.stdout.splitlines())} lines")
+            
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split('\n')
+                logger.info(f"Processing {len(lines)} lines from Flatpak search")
+                
+                for line_num, line in enumerate(lines):
+                    if line and '\t' in line:
+                        parts = line.split('\t')
                         
-                        packages.append(Package(
-                            name=name,
-                            version=version,
-                            description=description,
-                            repo='flatpak',
-                            status=PackageStatus.AVAILABLE,
-                            package_type=PackageType.FLATPAK,
-                            flatpak_id=flatpak_id,
-                            flatpak_origin=origin
-                        ))
-    except Exception as e:
-        logger.error(f"Error searching Flatpak: {e}")
+                        # Debug: log first few lines
+                        if line_num < 3:
+                            logger.debug(f"Line {line_num}: {line[:100]}")
+                            logger.debug(f"Parts count: {len(parts)}")
+                        
+                        if len(parts) >= 4:  # Need at least ID, Name, Description, Origin
+                            flatpak_id = parts[0].strip()
+                            name = parts[1].strip() if len(parts) > 1 and parts[1].strip() else flatpak_id.split('.')[-1]
+                            description = parts[2].strip() if len(parts) > 2 else ""
+                            
+                            # Find version - it might be in different columns
+                            version = "unknown"
+                            origin = "flathub"
+                            
+                            # Look for version in remaining columns
+                            for i in range(3, min(6, len(parts))):
+                                part = parts[i].strip()
+                                # Version usually looks like numbers and dots
+                                if part and any(c.isdigit() for c in part) and '.' in part:
+                                    version = part
+                                elif part and not origin:  # Use first non-empty as origin if origin not set
+                                    origin = part
+                            
+                            # If we couldn't find version, check if it's in description
+                            if version == "unknown" and description:
+                                # Try to extract version from description
+                                import re
+                                version_match = re.search(r'(\d+\.\d+(\.\d+)*)', description)
+                                if version_match:
+                                    version = version_match.group(1)
+                            
+                            packages.append(Package(
+                                name=name,
+                                version=version,
+                                description=description[:100] if description else "",
+                                repo='flatpak',
+                                status=PackageStatus.AVAILABLE,
+                                package_type=PackageType.FLATPAK,
+                                flatpak_id=flatpak_id,
+                                flatpak_origin=origin
+                            ))
+                            
+                            # Stop if we have enough packages
+                            if len(packages) >= limit:
+                                logger.info(f"Found {len(packages)} packages, stopping search")
+                                break
+                
+                # If we found packages, break out of attempts
+                if packages:
+                    logger.info(f"Successfully found {len(packages)} packages using {attempt_type} search")
+                    break
+                else:
+                    logger.info(f"No packages found with {attempt_type} search")
+            
+            elif result.returncode != 0:
+                logger.warning(f"Flatpak search failed with return code {result.returncode}")
+                if result.stderr:
+                    logger.warning(f"Error: {result.stderr[:200]}")
+        
+        except Exception as e:
+            logger.error(f"Error during {attempt_type} Flatpak search: {e}")
+            continue
+    
+    # If still no packages, try a more aggressive search
+    if not packages:
+        try:
+            logger.info("Trying alternative search method...")
+            # List all available packages and filter locally
+            cmd = ['flatpak', 'remote-ls', '--all', '--columns=all']
+            result = safe_subprocess_run(cmd, timeout=15)
+            
+            if result.returncode == 0 and result.stdout:
+                lines = result.stdout.strip().split('\n')
+                for line in lines:
+                    if line and query.lower() in line.lower():
+                        parts = line.split('\t')
+                        if len(parts) >= 4:
+                            flatpak_id = parts[0].strip()
+                            name = parts[1].strip() if parts[1].strip() else flatpak_id.split('.')[-1]
+                            description = parts[2].strip() if len(parts) > 2 else ""
+                            version = parts[3].strip() if len(parts) > 3 else "unknown"
+                            origin = "unknown"
+                            
+                            if len(parts) > 4:
+                                origin = parts[4].strip()
+                            
+                            packages.append(Package(
+                                name=name,
+                                version=version,
+                                description=description[:100] if description else "",
+                                repo='flatpak',
+                                status=PackageStatus.AVAILABLE,
+                                package_type=PackageType.FLATPAK,
+                                flatpak_id=flatpak_id,
+                                flatpak_origin=origin
+                            ))
+                            
+                            if len(packages) >= limit:
+                                break
+                
+                logger.info(f"Found {len(packages)} packages via remote-ls")
+        
+        except Exception as e:
+            logger.error(f"Error in alternative search: {e}")
+    
+    # Log final results
+    if packages:
+        logger.info(f"Total Flatpak packages found for '{query}': {len(packages)}")
+        for i, pkg in enumerate(packages[:3]):
+            logger.debug(f"  {i+1}. {pkg.name} ({pkg.flatpak_id})")
+    else:
+        logger.warning(f"No Flatpak packages found for query: '{query}'")
     
     return packages[:limit]
 
@@ -1962,7 +2083,7 @@ class EcoPacManager(QMainWindow):
     
     def init_ui(self):
         """Initialize the user interface with terminal tab."""
-        self.setWindowTitle("EcoPac Package Manager")
+        self.setWindowTitle("EcoOS Package Manager")
         
         # Set window size
         screen = QApplication.primaryScreen().availableGeometry()
@@ -2007,7 +2128,7 @@ class EcoPacManager(QMainWindow):
         header_layout.setContentsMargins(0, 0, 0, 10)
         
         # Title with Tokyo Night accent color
-        title_label = QLabel("📦 EcoPac Package Manager")
+        title_label = QLabel("📦 EcoOS Package Manager")
         title_font = QFont()
         title_font.setPointSize(18)
         title_font.setBold(True)
@@ -2627,24 +2748,35 @@ class EcoPacManager(QMainWindow):
     
     def load_available_packages_for_search(self, search_text: str):
         """Load available packages matching search in background."""
+        current_search_text = search_text  # Capture the current search text
+        
         def search_thread():
             try:
+                # Check if user is still searching for the same text
+                if self.search_input.text().lower() != current_search_text:
+                    return  # User has changed the search, abort
+                
                 # Check cache first
-                cache_key = f"search_{search_text}_{self.aur_toggle.isChecked()}_{self.flatpak_toggle.isChecked()}"
+                cache_key = f"search_{current_search_text}_{self.aur_toggle.isChecked()}_{self.flatpak_toggle.isChecked()}"
                 cached = self.available_packages_cache.get(cache_key)
                 
                 if cached is not None:
-                    # Use cached results
-                    QMetaObject.invokeMethod(self, 'add_available_packages_to_search',
-                                            Qt.QueuedConnection,
-                                            Q_ARG(list, cached))
+                    # Check again if search hasn't changed
+                    if self.search_input.text().lower() == current_search_text:
+                        QMetaObject.invokeMethod(self, 'add_available_packages_to_search',
+                                                Qt.QueuedConnection,
+                                                Q_ARG(list, cached))
                     return
+                
+                # Get the current filter state
+                search_aur = self.aur_toggle.isChecked()
+                search_flatpak = self.flatpak_toggle.isChecked()
                 
                 available_packages = []
                 
                 # Search in official repositories
                 try:
-                    result = safe_subprocess_run(['pacman', '-Ss', search_text], timeout=5)
+                    result = safe_subprocess_run(['pacman', '-Ss', current_search_text], timeout=5)
                     if result.returncode == 0:
                         current_pkg = None
                         for line in result.stdout.strip().split('\n'):
@@ -2677,73 +2809,88 @@ class EcoPacManager(QMainWindow):
                         # Don't forget the last package
                         if current_pkg and current_pkg.name:
                             available_packages.append(current_pkg)
-                except:
-                    pass
+                except Exception as e:
+                    logger.error(f"Error searching pacman: {e}")
                 
                 # Search AUR if enabled
-                if self.aur_toggle.isChecked():
+                if search_aur:
                     try:
-                        aur_results = search_aur_packages(search_text, limit=50)
+                        aur_results = search_aur_packages(current_search_text, limit=50)
                         for aur_data in aur_results:
                             available_packages.append(aur_package_to_package(aur_data))
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.error(f"Error searching AUR: {e}")
                 
                 # Search Flatpak if enabled
-                if self.flatpak_toggle.isChecked() and self.flatpak_available:
+                if search_flatpak and self.flatpak_available:
                     try:
-                        flatpak_results = search_flatpak_apps(search_text, limit=50)
+                        flatpak_results = search_flatpak_apps(current_search_text, limit=50)
                         available_packages.extend(flatpak_results)
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.error(f"Error searching Flatpak: {e}")
                 
                 # Cache results (with 5 minute expiry)
                 self.available_packages_cache[cache_key] = available_packages
                 
-                # Update UI
-                QMetaObject.invokeMethod(self, 'add_available_packages_to_search',
-                                        Qt.QueuedConnection,
-                                        Q_ARG(list, available_packages))
+                # Check once more if the search hasn't changed
+                if self.search_input.text().lower() == current_search_text:
+                    QMetaObject.invokeMethod(self, 'add_available_packages_to_search',
+                                            Qt.QueuedConnection,
+                                            Q_ARG(list, available_packages))
                 
             except Exception as e:
                 logger.error(f"Error searching available packages: {e}")
         
+        # Cancel any previous search thread
+        if hasattr(self, '_search_thread'):
+            # We can't actually stop the thread, but we can track if it's for the same search
+            pass
+        
         # Start search in background thread
         import threading
         thread = threading.Thread(target=search_thread, daemon=True)
+        self._current_search_thread = (current_search_text, thread)  # Track the thread
         thread.start()
     
     @pyqtSlot(list)
     def add_available_packages_to_search(self, available_packages: List[Package]):
         """Add available packages to search results."""
-        search_text = self.search_input.text().lower()
-        
-        if not search_text:
+        current_search = self.search_input.text().lower()
+        if not current_search:
             return
-        
+
         # Filter out packages already shown as installed
-        installed_names = {pkg.name for pkg in self.filtered_packages}
+        installed_names = {pkg.name for pkg in self.filtered_packages if hasattr(pkg, 'name')}
         new_available = [
             pkg for pkg in available_packages 
-            if pkg.name not in installed_names
+            if hasattr(pkg, 'name') and pkg.name not in installed_names
         ]
-        
-        # Add to current results
-        self.filtered_packages.extend(new_available)
-        
-        # Update model
-        self.package_model.set_packages(self.filtered_packages)
-        
-        # Update counts
-        total_count = len(self.filtered_packages)
-        available_count = len(new_available)
-        
-        if available_count > 0:
-            self.count_label.setText(f"{total_count} packages ({available_count} available)")
-            self.status_label.setText(f"Found {total_count} packages")
+
+        # Log what we found
+        flatpak_count = sum(1 for p in new_available if p.is_flatpak)
+        aur_count = sum(1 for p in new_available if p.is_aur)
+        pacman_count = sum(1 for p in new_available if not p.is_flatpak and not p.is_aur)
+        logger.info(f"Search results - Flatpak: {flatpak_count}, AUR: {aur_count}, Pacman: {pacman_count}")
+
+        # Only update if we have new packages to show
+        if new_available:
+            # Add to current results
+            self.filtered_packages.extend(new_available)
+            # Update model
+            self.package_model.set_packages(self.filtered_packages)
+            # Update counts
+            total_count = len(self.filtered_packages)
+            available_count = len(new_available)
+            if available_count > 0:
+                self.count_label.setText(f"{total_count} packages ({available_count} available)")
+                self.status_label.setText(f"Found {total_count} packages")
+            else:
+                self.count_label.setText(f"{total_count} packages")
+                self.status_label.setText(f"Found {total_count} packages")
+            # Log success
+            logger.info(f"Updated search results with {available_count} new packages")
         else:
-            self.count_label.setText(f"{total_count} packages")
-            self.status_label.setText(f"Found {total_count} packages")
+            logger.info(f"No new available packages to add for search: '{current_search}'")
     
     def clear_search(self):
         """Clear search and show all packages."""
@@ -3484,8 +3631,14 @@ class EcoPacManager(QMainWindow):
         cmd = ['flatpak', 'update', '-y'] + flatpak_ids
         self.execute_flatpak_command(cmd, f"Updating {len(flatpak_ids)} Flatpak applications")
     
+
+
+
+
+
+
     def install_flatpak_packages(self, flatpak_ids: List[str]):
-        """Install Flatpak packages with proper ID validation."""
+        """Install Flatpak packages with intelligent ID discovery and multiple fallback strategies."""
         if not self.flatpak_available:
             QMessageBox.information(self, "Flatpak Not Available", 
                 "Flatpak is not installed on your system.")
@@ -3493,134 +3646,570 @@ class EcoPacManager(QMainWindow):
         
         # Validate or transform package names to full Flatpak IDs
         validated_ids = []
-        mapping_used = False
+        mapping_sources = []  # Track where each ID came from
+        failed_mappings = []
         
         for app_id in flatpak_ids:
             original_id = app_id
+            logger.info(f"Processing Flatpak ID: {original_id}")
             
-            # If it doesn't look like a proper Flatpak ID (needs at least 2 periods)
-            # Common Flatpak ID pattern: domain.name.app (e.g., com.vivaldi.Vivaldi)
-            if app_id.count('.') < 2:
-                # Try to map common application names to their Flatpak IDs
-                app_lower = app_id.lower()
-                
-                # Common application mappings
-                app_mappings = {
-                    "vivaldi": "com.vivaldi.Vivaldi",
-                    "firefox": "org.mozilla.firefox",
-                    "chromium": "org.chromium.Chromium",
-                    "brave": "com.brave.Browser",
-                    "spotify": "com.spotify.Client",
-                    "vlc": "org.videolan.VLC",
-                    "gimp": "org.gimp.GIMP",
-                    "inkscape": "org.inkscape.Inkscape",
-                    "libreoffice": "org.libreoffice.LibreOffice",
-                    "thunderbird": "org.mozilla.Thunderbird",
-                    "telegram": "org.telegram.desktop",
-                    "discord": "com.discordapp.Discord",
-                    "steam": "com.valvesoftware.Steam",
-                    "obs": "com.obsproject.Studio",
-                    "kdenlive": "org.kde.kdenlive",
-                    "audacity": "org.audacityteam.Audacity",
-                    "handbrake": "fr.handbrake.ghb",
-                    "transmission": "com.transmissionbt.Transmission",
-                    "qbittorrent": "org.qbittorrent.qBittorrent",
-                    "filezilla": "org.filezillaproject.Filezilla",
-                    "virtualbox": "org.virtualbox.VirtualBox",
-                    "zoom": "us.zoom.Zoom",
-                    "slack": "com.slack.Slack",
-                    "skype": "com.skype.Client",
-                    "teams": "com.microsoft.Teams",
-                    "signal": "org.signal.Signal",
-                    "element": "im.riot.Riot",
-                    "blender": "org.blender.Blender",
-                    "godot": "org.godotengine.Godot",
-                    "code": "com.visualstudio.code",
-                    "androidstudio": "com.google.AndroidStudio",
-                    "pycharm": "com.jetbrains.PyCharm-Professional",
-                    "clion": "com.jetbrains.CLion",
-                    "intellij": "com.jetbrains.IntelliJ-IDEA-Ultimate",
-                    "phpstorm": "com.jetbrains.PhpStorm",
-                    "webstorm": "com.jetbrains.WebStorm",
-                    "rider": "com.jetbrains.Rider",
-                    "datagrip": "com.jetbrains.DataGrip",
-                    "dataspell": "com.jetbrains.DataSpell",
-                    "rubymine": "com.jetbrains.RubyMine",
-                    "goland": "com.jetbrains.GoLand",
-                }
-                
-                if app_lower in app_mappings:
-                    validated_ids.append(app_mappings[app_lower])  # FIXED: Was app_mappings[app_lapp_mappings[app_lower]
-                    mapping_used = True
-                    logger.info(f"Mapped '{original_id}' to '{validated_ids[-1]}' for Flatpak installation")
-                else:
-                    # Try searching for the app
-                    logger.info(f"Searching for Flatpak app: {original_id}")
-                    search_results = search_flatpak_apps(original_id, limit=5)
-                    if search_results:
-                        # Show selection dialog
-                        dialog = QDialog(self)
-                        dialog.setWindowTitle(f"Select Flatpak Application: {original_id}")
-                        dialog.setModal(True)
-                        dialog.resize(500, 300)
-                        
-                        layout = QVBoxLayout(dialog)
-                        
-                        label = QLabel(f"Multiple matches found for '{original_id}'. Select one:")
-                        layout.addWidget(label)
-                        
-                        list_widget = QListWidget()
-                        for result in search_results:
-                            item_text = f"{result.flatpak_id}\n{result.description[:60]}..."
-                            item = QListWidgetItem(item_text)
-                            item.setData(Qt.UserRole, result.flatpak_id)
-                            list_widget.addItem(item)
-                        
-                        layout.addWidget(list_widget)
-                        
-                        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-                        button_box.accepted.connect(dialog.accept)
-                        button_box.rejected.connect(dialog.reject)
-                        layout.addWidget(button_box)
-                        
-                        if dialog.exec_() == QDialog.Accepted:
-                            selected_items = list_widget.selectedItems()
-                            if selected_items:
-                                selected_id = selected_items[0].data(Qt.UserRole)
-                                validated_ids.append(selected_id)
-                                mapping_used = True
-                                logger.info(f"Selected '{selected_id}' for Flatpak installation")
-                    else:
-                        # Try with .desktop suffix
-                        desktop_id = f"{original_id}.desktop"
-                        validated_ids.append(desktop_id)
-                        mapping_used = True
-                        logger.info(f"Trying '{desktop_id}' as Flatpak ID")
-            else:
-                # Already looks like a proper Flatpak ID
+            # Check if it's already a valid Flatpak ID (has at least 2 periods)
+            if app_id.count('.') >= 2:
                 validated_ids.append(app_id)
-        
-        if not validated_ids:
-            return
-        
-        # Confirm installation
-        if mapping_used:
-            message = f"Install the following Flatpak applications?\n\n" + \
-                      "\n".join(validated_ids[:5])
-            if len(validated_ids) > 5:
-                message += f"\n... and {len(validated_ids) - 5} more"
+                mapping_sources.append("direct")
+                logger.info(f"'{original_id}' is already a valid Flatpak ID")
+                continue
             
-            reply = QMessageBox.question(
-                self, "Confirm Flatpak Installation",
-                message,
-                QMessageBox.Yes | QMessageBox.No
-            )
+            # STRATEGY 1: Check common mappings
+            app_lower = app_id.lower()
+            common_mappings = {
+                "vivaldi": "com.vivaldi.Vivaldi",
+                "firefox": "org.mozilla.firefox",
+                "chromium": "org.chromium.Chromium",
+                "brave": "com.brave.Browser",
+                "spotify": "com.spotify.Client",
+                "vlc": "org.videolan.VLC",
+                "gimp": "org.gimp.GIMP",
+                "inkscape": "org.inkscape.Inkscape",
+                "libreoffice": "org.libreoffice.LibreOffice",
+                "thunderbird": "org.mozilla.Thunderbird",
+                "telegram": "org.telegram.desktop",
+                "discord": "com.discordapp.Discord",
+                "steam": "com.valvesoftware.Steam",
+                "obs": "com.obsproject.Studio",
+                "kdenlive": "org.kde.kdenlive",
+                "audacity": "org.audacityteam.Audacity",
+                "handbrake": "fr.handbrake.ghb",
+                "transmission": "com.transmissionbt.Transmission",
+                "qbittorrent": "org.qbittorrent.qBittorrent",
+                "filezilla": "org.filezillaproject.Filezilla",
+                "virtualbox": "org.virtualbox.VirtualBox",
+                "zoom": "us.zoom.Zoom",
+                "slack": "com.slack.Slack",
+                "skype": "com.skype.Client",
+                "teams": "com.microsoft.Teams",
+                "signal": "org.signal.Signal",
+                "element": "im.riot.Riot",
+                "blender": "org.blender.Blender",
+                "godot": "org.godotengine.Godot",
+                "code": "com.visualstudio.code",
+                "androidstudio": "com.google.AndroidStudio",
+                "pycharm": "com.jetbrains.PyCharm-Professional",
+                "clion": "com.jetbrains.CLion",
+                "intellij": "com.jetbrains.IntelliJ-IDEA-Ultimate",
+                "phpstorm": "com.jetbrains.PhpStorm",
+                "webstorm": "com.jetbrains.WebStorm",
+                "rider": "com.jetbrains.Rider",
+                "datagrip": "com.jetbrains.DataGrip",
+                "dataspell": "com.jetbrains.DataSpell",
+                "rubymine": "com.jetbrains.RubyMine",
+                "goland": "com.jetbrains.GoLand",
+                "parabolic": "com.github.gdessard._parabolic",
+                "kooha": "io.github.seadve.Kooha",
+                "keepassxc": "org.keepassxc.KeePassXC",
+                "qalculate": "io.github.Qalculate",
+                "gparted": "org.gparted.GParted",
+                "wine": "org.winehq.Wine",
+                "protontricks": "com.github.Matoking.protontricks",
+                "bottles": "com.usebottles.bottles",
+                "lutris": "net.lutris.Lutris",
+                "heroic": "com.heroicgameslauncher.hgl",
+                "minetest": "net.minetest.Minetest",
+                "freecad": "org.freecadweb.FreeCAD",
+                "openscad": "org.openscad.OpenSCAD",
+                "arduino": "cc.arduino.arduinoide",
+                "kicad": "org.kicad.KiCad",
+                "foliate": "com.github.johnfactotum.Foliate",
+                "calibre": "com.calibre_ebook.calibre",
+                "cheese": "org.gnome.Cheese",
+                "simplescreenrecorder": "com.obsproject.Studio",
+                "krita": "org.kde.krita",
+                "darktable": "org.darktable.Darktable",
+                "rawtherapee": "com.rawtherapee.RawTherapee",
+                "digikam": "org.kde.digikam",
+                "shotwell": "org.gnome.Shotwell",
+                "gthumb": "org.gnome.gThumb",
+                "easytag": "org.gnome.EasyTAG",
+                "kid3": "org.kde.kid3",
+                "soundconverter": "org.soundconverter.SoundConverter",
+                "pavucontrol": "org.pulseaudio.pavucontrol",
+                "easyeffects": "com.github.wwmm.easyeffects",
+            }
             
-            if reply != QMessageBox.Yes:
+            if app_lower in common_mappings:
+                validated_ids.append(common_mappings[app_lower])
+                mapping_sources.append("common_mapping")
+                logger.info(f"Mapped '{original_id}' to '{common_mappings[app_lower]}' via common mapping")
+                continue
+            
+            # STRATEGY 2: Try intelligent guessing patterns
+            guessed_ids = self.guess_flatpak_id(app_id)
+            if guessed_ids:
+                # Show dialog to select from guessed IDs
+                selected_id = self.show_selection_dialog(f"Select Flatpak ID for '{original_id}'", 
+                                                        guessed_ids, 
+                                                        "Multiple possible Flatpak IDs found:")
+                if selected_id:
+                    validated_ids.append(selected_id)
+                    mapping_sources.append("intelligent_guess")
+                    logger.info(f"Selected '{selected_id}' for '{original_id}' from guessed IDs")
+                    continue
+            
+            # STRATEGY 3: Search with multiple approaches
+            search_results = self.search_flatpak_multiple_methods(app_id)
+            if search_results:
+                # Show dialog to select from search results
+                selected_id = self.show_selection_dialog(f"Select Flatpak Application: '{original_id}'", 
+                                                        search_results, 
+                                                        "Search results:")
+                if selected_id:
+                    validated_ids.append(selected_id)
+                    mapping_sources.append("search_result")
+                    logger.info(f"Selected '{selected_id}' for '{original_id}' from search")
+                    continue
+            
+            # STRATEGY 4: Try to find similar apps in installed packages
+            similar_ids = self.find_similar_installed_flatpaks(app_id)
+            if similar_ids:
+                selected_id = self.show_selection_dialog(f"Similar installed Flatpaks for '{original_id}'", 
+                                                        similar_ids, 
+                                                        "Similar installed applications:")
+                if selected_id:
+                    validated_ids.append(selected_id)
+                    mapping_sources.append("similar_installed")
+                    logger.info(f"Selected '{selected_id}' for '{original_id}' from similar installed")
+                    continue
+            
+            # STRATEGY 5: Try Flathub API (if available)
+            flathub_id = self.query_flathub_api(app_id)
+            if flathub_id:
+                validated_ids.append(flathub_id)
+                mapping_sources.append("flathub_api")
+                logger.info(f"Found '{flathub_id}' for '{original_id}' via Flathub API")
+                continue
+            
+            # STRATEGY 6: Last resort - try common patterns
+            last_resort_ids = [
+                f"org.{app_id}.{app_id}",
+                f"com.{app_id}.{app_id}",
+                f"io.github.{app_id}",
+                f"org.gnome.{app_id}",
+                f"org.kde.{app_id}",
+                f"com.github.{app_id}",
+                f"io.{app_id}.{app_id}",
+                f"net.{app_id}.{app_id}",
+                f"app.{app_id}.{app_id}",
+            ]
+            
+            # Test which patterns might work by checking if they exist
+            existing_patterns = []
+            for pattern_id in last_resort_ids:
+                if self.check_flatpak_exists(pattern_id):
+                    existing_patterns.append(pattern_id)
+            
+            if existing_patterns:
+                selected_id = self.show_selection_dialog(f"Possible patterns for '{original_id}'", 
+                                                        existing_patterns, 
+                                                        "Possible Flatpak ID patterns:")
+                if selected_id:
+                    validated_ids.append(selected_id)
+                    mapping_sources.append("pattern_guess")
+                    logger.info(f"Selected '{selected_id}' for '{original_id}' from pattern guess")
+                    continue
+            
+            # If all strategies fail
+            failed_mappings.append(original_id)
+            logger.warning(f"All strategies failed for '{original_id}'")
+        
+        # Handle failed mappings
+        if failed_mappings:
+            self.handle_failed_mappings(failed_mappings)
+            
+            # If ALL mappings failed, return
+            if not validated_ids:
                 return
         
-        cmd = ['flatpak', 'install', '-y', 'flathub'] + validated_ids
+        if not validated_ids:
+            QMessageBox.warning(self, "No Valid Packages", 
+                "No valid Flatpak package IDs could be determined.")
+            return
+        
+        # Proceed with installation
+        self.proceed_with_flatpak_installation(validated_ids, mapping_sources, failed_mappings)
+
+
+    def guess_flatpak_id(self, app_name: str) -> List[str]:
+        """Intelligently guess possible Flatpak IDs based on app name patterns."""
+        guesses = []
+        
+        # Common transformations
+        app_lower = app_name.lower()
+        app_title = app_name.title()
+        app_camel = app_lower.capitalize()
+        
+        # Pattern 1: Standard reverse domain (most common)
+        guesses.extend([
+            f"com.{app_lower}.{app_title}",
+            f"org.{app_lower}.{app_title}",
+            f"io.{app_lower}.{app_title}",
+            f"net.{app_lower}.{app_title}",
+            f"app.{app_lower}.{app_title}",
+        ])
+        
+        # Pattern 2: GitHub projects
+        guesses.extend([
+            f"com.github.{app_lower}",
+            f"io.github.{app_lower}",
+            f"org.github.{app_lower}",
+            f"com.github.{app_lower}.{app_title}",
+            f"io.github.{app_lower}.{app_title}",
+        ])
+        
+        # Pattern 3: GNOME/KDE applications
+        guesses.extend([
+            f"org.gnome.{app_title}",
+            f"org.kde.{app_title}",
+            f"org.xfce.{app_title}",
+        ])
+        
+        # Pattern 4: Common suffixes
+        for suffix in ["desktop", "app", "client", "studio", "editor", "viewer", "player"]:
+            guesses.extend([
+                f"com.{app_lower}.{app_title}{suffix.title()}",
+                f"org.{app_lower}.{app_title}{suffix.title()}",
+                f"io.{app_lower}.{app_title}{suffix.title()}",
+            ])
+        
+        # Remove duplicates and empty strings
+        guesses = list(set([g for g in guesses if g]))
+        
+        logger.info(f"Generated {len(guesses)} guesses for '{app_name}'")
+        return guesses[:10]  # Return top 10 guesses
+
+
+    def search_flatpak_multiple_methods(self, query: str) -> List[str]:
+        """Search for Flatpak apps using multiple methods."""
+        results = []
+        
+        # Method 1: Standard flatpak search
+        try:
+            cmd = ['flatpak', 'search', query, '--columns=application']
+            result = safe_subprocess_run(cmd, timeout=10)
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split('\n')
+                for line in lines:
+                    if line.strip():
+                        results.append(line.strip())
+        except Exception as e:
+            logger.warning(f"Standard search failed for '{query}': {e}")
+        
+        # Method 2: Search in all remotes
+        try:
+            cmd = ['flatpak', 'remote-ls', '--all', '--columns=application,name,description']
+            result = safe_subprocess_run(cmd, timeout=15)
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split('\n')
+                for line in lines:
+                    if query.lower() in line.lower():
+                        parts = line.split('\t')
+                        if parts and parts[0].strip():
+                            results.append(parts[0].strip())
+        except Exception as e:
+            logger.warning(f"Remote-ls search failed for '{query}': {e}")
+        
+        # Method 3: Search installed packages
+        try:
+            cmd = ['flatpak', 'list', '--columns=application,name']
+            result = safe_subprocess_run(cmd, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split('\n')
+                for line in lines:
+                    if query.lower() in line.lower():
+                        parts = line.split('\t')
+                        if parts and parts[0].strip():
+                            results.append(parts[0].strip())
+        except Exception as e:
+            logger.warning(f"List search failed for '{query}': {e}")
+        
+        # Remove duplicates
+        results = list(set(results))
+        logger.info(f"Found {len(results)} results for '{query}' via multiple methods")
+        return results
+
+
+    def find_similar_installed_flatpaks(self, app_name: str) -> List[str]:
+        """Find similar installed Flatpak applications."""
+        similar = []
+        
+        try:
+            cmd = ['flatpak', 'list', '--columns=application,name']
+            result = safe_subprocess_run(cmd, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split('\n')
+                for line in lines:
+                    parts = line.split('\t')
+                    if len(parts) >= 2:
+                        flatpak_id = parts[0].strip()
+                        display_name = parts[1].strip().lower()
+                        
+                        # Check for similarity
+                        app_lower = app_name.lower()
+                        if (app_lower in display_name or 
+                            display_name in app_lower or
+                            self.string_similarity(app_lower, display_name) > 0.7):
+                            similar.append(flatpak_id)
+        except Exception as e:
+            logger.warning(f"Failed to find similar installed flatpaks: {e}")
+        
+        return similar
+
+
+    def string_similarity(self, str1: str, str2: str) -> float:
+        """Calculate string similarity (simple implementation)."""
+        # Simple similarity check
+        if not str1 or not str2:
+            return 0.0
+        
+        set1 = set(str1)
+        set2 = set(str2)
+        intersection = set1.intersection(set2)
+        union = set1.union(set2)
+        
+        if not union:
+            return 0.0
+        
+        return len(intersection) / len(union)
+
+
+    def query_flathub_api(self, app_name: str) -> Optional[str]:
+        """Query Flathub API to find application ID."""
+        try:
+            import requests
+            url = f"https://flathub.org/api/v1/apps?query={app_name}"
+            response = requests.get(url, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data and len(data) > 0:
+                    # Return the first (most relevant) result
+                    return data[0].get('flatpakAppId')
+        except Exception as e:
+            logger.warning(f"Flathub API query failed: {e}")
+        
+        return None
+
+
+    def check_flatpak_exists(self, flatpak_id: str) -> bool:
+        """Check if a Flatpak ID exists in any remote."""
+        try:
+            # Try to get info about the package
+            cmd = ['flatpak', 'info', flatpak_id]
+            result = safe_subprocess_run(cmd, timeout=5)
+            
+            # Return code 0 means it exists (or at least info command succeeded)
+            return result.returncode == 0
+        except:
+            return False
+
+
+    def show_selection_dialog(self, title: str, items: List[str], description: str) -> Optional[str]:
+        """Show a dialog to select from a list of items."""
+        if not items:
+            return None
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setModal(True)
+        dialog.resize(600, 400)
+        
+        layout = QVBoxLayout(dialog)
+        
+        label = QLabel(description)
+        layout.addWidget(label)
+        
+        list_widget = QListWidget()
+        for item in items:
+            # Try to get description if it's a Flatpak ID
+            description_text = self.get_flatpak_description(item) if '.' in item else item
+            display_text = f"{item}\n{description_text[:100]}..."
+            
+            list_item = QListWidgetItem(display_text)
+            list_item.setData(Qt.UserRole, item)
+            list_widget.addItem(list_item)
+        
+        layout.addWidget(list_widget)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        if dialog.exec_() == QDialog.Accepted:
+            selected_items = list_widget.selectedItems()
+            if selected_items:
+                return selected_items[0].data(Qt.UserRole)
+        
+        return None
+
+
+    def get_flatpak_description(self, flatpak_id: str) -> str:
+        """Get description for a Flatpak ID."""
+        try:
+            cmd = ['flatpak', 'info', flatpak_id]
+            result = safe_subprocess_run(cmd, timeout=5)
+            if result.returncode == 0:
+                for line in result.stdout.split('\n'):
+                    if line.startswith('Description:'):
+                        return line.split(':', 1)[1].strip()
+        except:
+            pass
+        
+        return "No description available"
+
+
+    def handle_failed_mappings(self, failed_mappings: List[str]):
+        """Handle packages that couldn't be mapped to Flatpak IDs."""
+        if not failed_mappings:
+            return
+        
+        error_msg = f"Could not find valid Flatpak IDs for {len(failed_mappings)} package(s):\n\n"
+        for app in failed_mappings:
+            error_msg += f"• {app}\n"
+        
+        error_msg += "\nSuggestions:\n"
+        error_msg += "1. Search for the application in the GUI first\n"
+        error_msg += "2. Check if the app is available on Flathub: https://flathub.org\n"
+        error_msg += "3. Try installing with terminal: flatpak search <app_name>\n"
+        error_msg += "4. The app might not be available as Flatpak\n"
+        
+        QMessageBox.warning(self, "Package Resolution Failed", error_msg)
+
+
+    def proceed_with_flatpak_installation(self, validated_ids: List[str], mapping_sources: List[str], failed_mappings: List[str]):
+        """Proceed with Flatpak installation after validation."""
+        # Check available remotes
+        try:
+            # Try user remotes first
+            result = safe_subprocess_run(['flatpak', 'remotes', '--user'], timeout=5)
+            user_remotes = []
+            if result.returncode == 0 and result.stdout.strip():
+                for line in result.stdout.strip().split('\n'):
+                    if line and '\t' in line:
+                        remote_name = line.split('\t')[0]
+                        user_remotes.append(remote_name)
+            
+            # If no user remotes, check system remotes
+            if not user_remotes:
+                result = safe_subprocess_run(['flatpak', 'remotes'], timeout=5)
+                system_remotes = []
+                if result.returncode == 0 and result.stdout.strip():
+                    for line in result.stdout.strip().split('\n'):
+                        if line and '\t' in line:
+                            remote_name = line.split('\t')[0]
+                            system_remotes.append(remote_name)
+                
+                if not system_remotes:
+                    # No remotes found, install flathub
+                    self.install_flathub_remote()
+                    remote = 'flathub'
+                    install_type = 'system'
+                else:
+                    remote = system_remotes[0]
+                    install_type = 'system'
+                    if 'flathub' in system_remotes:
+                        remote = 'flathub'
+            else:
+                remote = user_remotes[0]
+                install_type = 'user'
+                if 'flathub' in user_remotes:
+                    remote = 'flathub'
+        
+        except Exception as e:
+            logger.error(f"Error checking Flatpak remotes: {e}")
+            remote = 'flathub'
+            install_type = 'user'
+        
+        # Prepare summary message
+        summary = f"Install {len(validated_ids)} Flatpak application(s) from '{remote}'?\n\n"
+        
+        for i, (app_id, source) in enumerate(zip(validated_ids[:5], mapping_sources[:5])):
+            summary += f"{i+1}. {app_id}"
+            if source != "direct":
+                summary += f" (from {source.replace('_', ' ')})"
+            summary += "\n"
+        
+        if len(validated_ids) > 5:
+            summary += f"... and {len(validated_ids) - 5} more\n"
+        
+        if failed_mappings:
+            summary += f"\nNote: {len(failed_mappings)} package(s) could not be resolved and were skipped."
+        
+        reply = QMessageBox.question(
+            self, "Confirm Flatpak Installation",
+            summary,
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # Build installation command
+        if install_type == 'user':
+            cmd = ['flatpak', 'install', '--user', '-y', remote] + validated_ids
+        else:
+            cmd = ['sudo', 'flatpak', 'install', '-y', remote] + validated_ids
+        
+        # Execute
         self.execute_flatpak_command(cmd, f"Installing {len(validated_ids)} Flatpak applications")
+
+
+    def install_flathub_remote(self):
+        """Install Flathub remote if not available."""
+        reply = QMessageBox.question(
+            self, "Install Flathub Remote",
+            "Flathub remote is not installed. Would you like to install it now?\n\n"
+            "Flathub is the primary repository for Flatpak applications.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # Try system installation first
+            cmd_system = ['sudo', 'flatpak', 'remote-add', '--if-not-exists', 'flathub',
+                         'https://flathub.org/repo/flathub.flatpakrepo']
+            dialog_system = CommandExecutionDialog(self, cmd_system, "Adding Flathub remote (system)")
+            dialog_system.exec_()
+            
+            if not dialog_system.success:
+                # Try user installation as fallback
+                cmd_user = ['flatpak', 'remote-add', '--user', '--if-not-exists', 'flathub',
+                           'https://flathub.org/repo/flathub.flatpakrepo']
+                dialog_user = CommandExecutionDialog(self, cmd_user, "Adding Flathub remote (user)")
+                dialog_user.exec_()
+                
+                if not dialog_user.success:
+                    QMessageBox.critical(self, "Error", 
+                        "Failed to add Flathub remote. Please install it manually:\n\n"
+                        "For system-wide:\n"
+                        "sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo\n\n"
+                        "For user-only:\n"
+                        "flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo")
+                    return False
+            
+            return True
+        
+        return False
+
+
+
+
+
+
+
+
+
+
+
+
     
     def uninstall_flatpak_packages(self, flatpak_ids: List[str]):
         """Uninstall Flatpak packages."""
@@ -3880,7 +4469,7 @@ class EcoPacManager(QMainWindow):
     def show_about(self):
         """Show about dialog."""
         about_text = """
-        <h1>EcoPac Package Manager</h1>
+        <h1>EcoOS Package Manager</h1>
         <p><b>Version:</b> Ultra-Fast 1.0</p>
         <p><b>Description:</b> Intelligent & Robust Package Manager for Arch Linux</p>
         <p><b>Features:</b></p>
@@ -3903,7 +4492,7 @@ class EcoPacManager(QMainWindow):
         </ul>
         <p><b>Architecture:</b> x86_64</p>
         <p><b>License:</b> MIT</p>
-        <p><b>GitHub:</b> <a href="https://github.com">EcoPac Repository</a></p>
+        
         <hr>
         <p><i>Designed for Arch Linux enthusiasts who value speed and aesthetics.</i></p>
         """

@@ -9781,7 +9781,7 @@ class TokyoNightPanelBar(QMainWindow):
         pkg_menu = menu.addMenu("📦 Package Managers")
         
         # EcoPac Package Manager
-        ecopac_action = QAction("🦊 EcoPac Package Manager", self)
+        ecopac_action = QAction("🦊 EcoOS Package Manager", self)
         ecopac_action.triggered.connect(lambda: self.launch_application("eco_pac"))
         pkg_menu.addAction(ecopac_action)
         

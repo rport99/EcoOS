@@ -142,7 +142,7 @@ bluez
 blueman
 networkmanager
 network-manager-applet
-pamac-all
+pamac
 xfce4
 xfce4-goodies
 firefox
@@ -239,3 +239,4 @@ vulkan-intel
 ffmpeg
 rustdesk-bin
 onlyoffice-bin
+ocrmypdf
