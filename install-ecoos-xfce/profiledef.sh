@@ -4,7 +4,7 @@
 iso_name="EcoOS"
 iso_label="Eco_Release"
 iso_publisher="EcoOS"
-iso_application="StormOS Install Media"
+iso_application="EcoOS Install Media"
 iso_version="v2"
 install_dir="arch"
 buildmodes=('iso')

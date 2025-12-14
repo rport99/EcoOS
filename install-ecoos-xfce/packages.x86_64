@@ -142,7 +142,7 @@ bluez
 blueman
 networkmanager
 network-manager-applet
-pamac
+#pamac
 xfce4
 xfce4-goodies
 firefox
@@ -158,7 +158,7 @@ unzip
 p7zip
 unrar
 engrampa
-yay-bin
+#yay-bin
 cups
 cups-pdf
 ghostscript
@@ -198,7 +198,7 @@ mintstick-git
 ffmpegthumbnailer
 system-config-printer
 pavucontrol
-zram-generator
+
 ttf-jetbrains-mono-nerd
 localsend
 brightnessctl
@@ -239,4 +239,5 @@ vulkan-intel
 ffmpeg
 rustdesk-bin
 onlyoffice-bin
-ocrmypdf
+ecoos/yay
+flatpak

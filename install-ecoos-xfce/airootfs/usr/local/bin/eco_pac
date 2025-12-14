@@ -3,6 +3,7 @@
 EcoPac Enhanced - Intelligent & Robust Package Manager for Arch Linux
 With AUR, Flatpak support, Tokyo Night theme, repository selection, and terminal output.
 ULTRA-FAST VERSION with Removal Options and Widget Safety Fixes
+Includes Obscure Flatpak Discovery functionality
 """
 
 import sys
@@ -257,6 +258,10 @@ def aur_package_to_package(aur_data: Dict) -> Package:
         last_updated=str(aur_data.get('LastModified', ''))
     )
 
+# ============================================================================
+# FLATPAK UTILITY FUNCTIONS - COMPLETE VERSION
+# ============================================================================
+
 def search_flatpak_apps(query: str, limit: int = 50) -> List[Package]:
     """Search for Flatpak applications with multiple fallback strategies."""
     packages = []
@@ -413,6 +418,222 @@ def search_flatpak_apps(query: str, limit: int = 50) -> List[Package]:
         logger.warning(f"No Flatpak packages found for query: '{query}'")
     
     return packages[:limit]
+
+def get_obscure_flatpaks(limit=50):
+    """
+    Find and return obscure Flatpak applications that actually exist.
+    Uses multiple reliable strategies to find lesser-known packages.
+    """
+    obscure_packages = []
+    
+    if not check_flatpak_installed():
+        logger.warning("Flatpak is not installed")
+        return obscure_packages
+    
+    try:
+        logger.info("Finding obscure Flatpak applications...")
+        
+        # Strategy 1: Look for packages with unconventional naming patterns
+        logger.info("Strategy 1: Searching for unconventional package names...")
+        try:
+            # Get all apps from flathub
+            result = safe_subprocess_run(
+                ['flatpak', 'remote-ls', 'flathub', '--app', '--columns=application,name,description'],
+                timeout=15
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split('\n')
+                unconventional_patterns = [
+                    'io.github.', 'com.github.', 'app.', 'dev.', 'xyz.', 
+                    'net.', 'site.', 'test.', 'demo.', 'tool.', 'utility.'
+                ]
+                
+                for line in lines:
+                    if line and '\t' in line:
+                        parts = line.split('\t')
+                        if len(parts) >= 2:
+                            flatpak_id = parts[0].strip()
+                            
+                            # Check for unconventional patterns
+                            if any(pattern in flatpak_id for pattern in unconventional_patterns):
+                                name = parts[1].strip() if parts[1].strip() else flatpak_id.split('.')[-1]
+                                description = parts[2].strip() if len(parts) > 2 else ""
+                                
+                                pkg = Package(
+                                    name=name,
+                                    version="unknown",  # We'll get this later if needed
+                                    description=description[:100] if description else "",
+                                    repo='flatpak',
+                                    status=PackageStatus.AVAILABLE,
+                                    package_type=PackageType.FLATPAK,
+                                    flatpak_id=flatpak_id,
+                                    flatpak_origin='flathub'
+                                )
+                                obscure_packages.append(pkg)
+                                
+                                if len(obscure_packages) >= limit:
+                                    break
+        
+        except Exception as e:
+            logger.warning(f"Strategy 1 failed: {e}")
+        
+        # Strategy 2: If not enough, try browsing categories
+        if len(obscure_packages) < limit//2:
+            logger.info("Strategy 2: Browsing by categories...")
+            try:
+                categories = ['Terminal', 'Editor', 'Tool', 'Utility', 'Development', 'Education']
+                
+                for category in categories:
+                    result = safe_subprocess_run(
+                        ['flatpak', 'search', category, '--columns=application,name,description'],
+                        timeout=10
+                    )
+                    
+                    if result.returncode == 0 and result.stdout.strip():
+                        lines = result.stdout.strip().split('\n')
+                        for line in lines:
+                            if line and '\t' in line and len(obscure_packages) < limit:
+                                parts = line.split('\t')
+                                if len(parts) >= 2:
+                                    flatpak_id = parts[0].strip()
+                                    
+                                    # Skip duplicates
+                                    if any(p.flatpak_id == flatpak_id for p in obscure_packages):
+                                        continue
+                                    
+                                    name = parts[1].strip() if parts[1].strip() else flatpak_id.split('.')[-1]
+                                    description = parts[2].strip() if len(parts) > 2 else ""
+                                    
+                                    pkg = Package(
+                                        name=name,
+                                        version="unknown",
+                                        description=description[:100] if description else "",
+                                        repo='flatpak',
+                                        status=PackageStatus.AVAILABLE,
+                                        package_type=PackageType.FLATPAK,
+                                        flatpak_id=flatpak_id,
+                                        flatpak_origin='flathub'
+                                    )
+                                    obscure_packages.append(pkg)
+            except Exception as e:
+                logger.warning(f"Strategy 2 failed: {e}")
+        
+        # Strategy 3: Get actual working obscure packages (curated list)
+        if len(obscure_packages) < 10:
+            logger.info("Strategy 3: Using curated list of working obscure packages...")
+            
+            # Curated list of actually existing obscure Flatpaks
+            curated_packages = [
+                # Text editors & IDEs
+                ("io.github.hluk.copyq", "CopyQ", "Clipboard manager with advanced features"),
+                ("com.uploadedlobster.peek", "Peek", "Simple screen recorder for GIF/WebM"),
+                ("com.github.jeromerobert.pdfarranger", "PDF Arranger", "Merge, split, rotate PDFs"),
+                ("com.github.maoschanz.drawing", "Drawing", "Simple drawing application"),
+                ("com.github.rafostar.Clapper", "Clapper", "Simple media player"),
+                ("io.github.seadve.Kooha", "Kooha", "Simple screen recorder"),
+                ("com.github.tchx84.Flatseal", "Flatseal", "Manage Flatpak permissions"),
+                ("com.github.unrud.VideoDownloader", "Video Downloader", "Download videos from websites"),
+                ("io.github.mmstick.FontFinder", "Font Finder", "Browse and install fonts"),
+                ("com.github.ADBeveridge.Raider", "Raider", "File search utility"),
+                
+                # Development tools
+                ("dev.geopjr.Collision", "Collision", "Hash checker"),
+                ("io.otsaloma.nfoview", "NFO Viewer", "NFO file viewer"),
+                ("com.belmoussaoui.Obfuscate", "Obfuscate", "Censor private information"),
+                ("io.github.realmazharhussain.GdmSettings", "GDM Settings", "Configure login screen"),
+                ("com.github.needleandthread.vocal", "Vocal", "Podcast client"),
+                
+                # System utilities
+                ("org.gustavoperedo.FontDownloader", "Font Downloader", "Download fonts from Google"),
+                ("io.github.lainsce.Quilter", "Quilter", "Markdown editor"),
+                ("com.github.needleandthread.vocal", "Vocal", "Podcast client"),
+                ("net.nokyan.Resources", "Resources", "Monitor system resources"),
+                ("com.github.needleandthread.vocal", "Vocal", "Podcast client"),
+            ]
+            
+            for flatpak_id, name, description in curated_packages:
+                if len(obscure_packages) >= limit:
+                    break
+                
+                # Verify the package actually exists before adding
+                try:
+                    result = safe_subprocess_run(['flatpak', 'info', flatpak_id], timeout=3)
+                    if result.returncode != 0:
+                        # Try searching for it
+                        search_result = safe_subprocess_run(['flatpak', 'search', name], timeout=3)
+                        if search_result.returncode != 0:
+                            continue  # Skip if not found
+                
+                except:
+                    continue
+                
+                pkg = Package(
+                    name=name,
+                    version="unknown",
+                    description=description,
+                    repo='flatpak',
+                    status=PackageStatus.AVAILABLE,
+                    package_type=PackageType.FLATPAK,
+                    flatpak_id=flatpak_id,
+                    flatpak_origin='flathub'
+                )
+                obscure_packages.append(pkg)
+        
+        logger.info(f"Found {len(obscure_packages)} obscure Flatpak packages")
+        
+    except Exception as e:
+        logger.error(f"Error finding obscure flatpaks: {e}")
+    
+    return obscure_packages
+
+def guess_flatpak_id(app_name: str) -> List[str]:
+    """Intelligently guess possible Flatpak IDs based on app name patterns."""
+    guesses = []
+    
+    # Common transformations
+    app_lower = app_name.lower()
+    app_title = app_name.title()
+    app_camel = app_lower.capitalize()
+    
+    # Pattern 1: Standard reverse domain (most common)
+    guesses.extend([
+        f"com.{app_lower}.{app_title}",
+        f"org.{app_lower}.{app_title}",
+        f"io.{app_lower}.{app_title}",
+        f"net.{app_lower}.{app_title}",
+        f"app.{app_lower}.{app_title}",
+    ])
+    
+    # Pattern 2: GitHub projects
+    guesses.extend([
+        f"com.github.{app_lower}",
+        f"io.github.{app_lower}",
+        f"org.github.{app_lower}",
+        f"com.github.{app_lower}.{app_title}",
+        f"io.github.{app_lower}.{app_title}",
+    ])
+    
+    # Pattern 3: GNOME/KDE applications
+    guesses.extend([
+        f"org.gnome.{app_title}",
+        f"org.kde.{app_title}",
+        f"org.xfce.{app_title}",
+    ])
+    
+    # Pattern 4: Common suffixes
+    for suffix in ["desktop", "app", "client", "studio", "editor", "viewer", "player"]:
+        guesses.extend([
+            f"com.{app_lower}.{app_title}{suffix.title()}",
+            f"org.{app_lower}.{app_title}{suffix.title()}",
+            f"io.{app_lower}.{app_title}{suffix.title()}",
+        ])
+    
+    # Remove duplicates and empty strings
+    guesses = list(set([g for g in guesses if g]))
+    
+    logger.info(f"Generated {len(guesses)} guesses for '{app_name}'")
+    return guesses[:10]  # Return top 10 guesses
 
 def get_package_repositories(package_name: str) -> List[Dict]:
     """Get all repositories that contain a package."""
@@ -637,7 +858,7 @@ class PackageLoaderUltraFast(QThread):
         
         try:
             # Get all installed packages
-            result = safe_subprocess_run(['pacman', '-Q'], timeout=5)  # Increased from 3 to 5
+            result = safe_subprocess_run(['pacman', '-Q'], timeout=5)
             if result.returncode == 0:
                 lines = result.stdout.strip().split('\n')
                 for line in lines:
@@ -656,7 +877,7 @@ class PackageLoaderUltraFast(QThread):
             # Get orphaned packages
             orphan_names = set()
             try:
-                result = safe_subprocess_run(['pacman', '-Qdtq'], timeout=3)  # Increased from 1 to 3
+                result = safe_subprocess_run(['pacman', '-Qdtq'], timeout=3)
                 if result.returncode == 0 and result.stdout.strip():
                     orphan_names = set(result.stdout.strip().split('\n'))
                 elif result.returncode != 0:
@@ -669,7 +890,7 @@ class PackageLoaderUltraFast(QThread):
             # Get foreign packages (AUR)
             aur_names = set()
             try:
-                result = safe_subprocess_run(['pacman', '-Qmq'], timeout=3)  # Increased from 1 to 3
+                result = safe_subprocess_run(['pacman', '-Qmq'], timeout=3)
                 if result.returncode == 0 and result.stdout.strip():
                     aur_names = set(result.stdout.strip().split('\n'))
                 elif result.returncode != 0:
@@ -695,7 +916,7 @@ class PackageLoaderUltraFast(QThread):
                     batch = packages[i:i+batch_size]
                     for package in batch:
                         try:
-                            result = safe_subprocess_run(['pacman', '-Qi', package.name], timeout=1)  # Reduced from 0.5 to 1 for reliability
+                            result = safe_subprocess_run(['pacman', '-Qi', package.name], timeout=1)
                             if result.returncode == 0:
                                 for line in result.stdout.strip().split('\n'):
                                     if line.startswith('Description'):
@@ -3631,12 +3852,6 @@ class EcoPacManager(QMainWindow):
         cmd = ['flatpak', 'update', '-y'] + flatpak_ids
         self.execute_flatpak_command(cmd, f"Updating {len(flatpak_ids)} Flatpak applications")
     
-
-
-
-
-
-
     def install_flatpak_packages(self, flatpak_ids: List[str]):
         """Install Flatpak packages with intelligent ID discovery and multiple fallback strategies."""
         if not self.flatpak_available:
@@ -3655,10 +3870,13 @@ class EcoPacManager(QMainWindow):
             
             # Check if it's already a valid Flatpak ID (has at least 2 periods)
             if app_id.count('.') >= 2:
-                validated_ids.append(app_id)
-                mapping_sources.append("direct")
-                logger.info(f"'{original_id}' is already a valid Flatpak ID")
-                continue
+                if self.verify_flatpak_exists(app_id):
+                    validated_ids.append(app_id)
+                    mapping_sources.append("direct")
+                    logger.info(f"'{original_id}' is a valid existing Flatpak ID")
+                    continue
+                else:
+                    logger.warning(f"'{original_id}' looks like a Flatpak ID but doesn't exist")
             
             # STRATEGY 1: Check common mappings
             app_lower = app_id.lower()
@@ -3704,7 +3922,8 @@ class EcoPacManager(QMainWindow):
                 "dataspell": "com.jetbrains.DataSpell",
                 "rubymine": "com.jetbrains.RubyMine",
                 "goland": "com.jetbrains.GoLand",
-                "parabolic": "com.github.gdessard._parabolic",
+                "parabolic": "org.nickvision.tubeconverter",  # CORRECTED
+                "tubeconverter": "org.nickvision.tubeconverter",  # ADDED
                 "kooha": "io.github.seadve.Kooha",
                 "keepassxc": "org.keepassxc.KeePassXC",
                 "qalculate": "io.github.Qalculate",
@@ -3737,13 +3956,17 @@ class EcoPacManager(QMainWindow):
             }
             
             if app_lower in common_mappings:
-                validated_ids.append(common_mappings[app_lower])
-                mapping_sources.append("common_mapping")
-                logger.info(f"Mapped '{original_id}' to '{common_mappings[app_lower]}' via common mapping")
-                continue
+                flatpak_id = common_mappings[app_lower]
+                if self.verify_flatpak_exists(flatpak_id):
+                    validated_ids.append(flatpak_id)
+                    mapping_sources.append("common_mapping")
+                    logger.info(f"Mapped '{original_id}' to '{flatpak_id}' via common mapping")
+                    continue
+                else:
+                    logger.warning(f"Common mapping '{flatpak_id}' for '{original_id}' doesn't exist")
             
             # STRATEGY 2: Try intelligent guessing patterns
-            guessed_ids = self.guess_flatpak_id(app_id)
+            guessed_ids = guess_flatpak_id(app_id)
             if guessed_ids:
                 # Show dialog to select from guessed IDs
                 selected_id = self.show_selection_dialog(f"Select Flatpak ID for '{original_id}'", 
@@ -3836,57 +4059,116 @@ class EcoPacManager(QMainWindow):
         
         # Proceed with installation
         self.proceed_with_flatpak_installation(validated_ids, mapping_sources, failed_mappings)
-
-
-    def guess_flatpak_id(self, app_name: str) -> List[str]:
-        """Intelligently guess possible Flatpak IDs based on app name patterns."""
-        guesses = []
+    
+    def verify_flatpak_exists(self, flatpak_id: str) -> bool:
+        """Verify that a Flatpak ID actually exists before installation."""
+        try:
+            # First check if it's already installed
+            result = safe_subprocess_run(['flatpak', 'info', flatpak_id], timeout=5)
+            if result.returncode == 0:
+                return True
+            
+            # Try to search for it
+            search_result = safe_subprocess_run(['flatpak', 'search', flatpak_id], timeout=5)
+            if search_result.returncode == 0 and flatpak_id in search_result.stdout:
+                return True
+            
+            # Try remote-ls
+            remote_result = safe_subprocess_run(['flatpak', 'remote-ls', 'flathub'], timeout=5)
+            if remote_result.returncode == 0 and flatpak_id in remote_result.stdout:
+                return True
+                
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error verifying Flatpak {flatpak_id}: {e}")
+            return False
+    
+    def get_flatpak_description(self, flatpak_id: str) -> str:
+        """Get description for a Flatpak ID."""
+        try:
+            cmd = ['flatpak', 'info', flatpak_id]
+            result = safe_subprocess_run(cmd, timeout=5)
+            if result.returncode == 0:
+                for line in result.stdout.split('\n'):
+                    if line.startswith('Description:'):
+                        return line.split(':', 1)[1].strip()
+        except:
+            pass
         
-        # Common transformations
-        app_lower = app_name.lower()
-        app_title = app_name.title()
-        app_camel = app_lower.capitalize()
+        return "No description available"
+    
+    def query_flathub_api(self, app_name: str) -> Optional[str]:
+        """Query Flathub API to find application ID."""
+        try:
+            import requests
+            url = f"https://flathub.org/api/v1/apps?query={app_name}"
+            response = requests.get(url, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data and len(data) > 0:
+                    # Return the first (most relevant) result
+                    return data[0].get('flatpakAppId')
+        except Exception as e:
+            logger.warning(f"Flathub API query failed: {e}")
         
-        # Pattern 1: Standard reverse domain (most common)
-        guesses.extend([
-            f"com.{app_lower}.{app_title}",
-            f"org.{app_lower}.{app_title}",
-            f"io.{app_lower}.{app_title}",
-            f"net.{app_lower}.{app_title}",
-            f"app.{app_lower}.{app_title}",
-        ])
+        return None
+    
+    def check_flatpak_exists(self, flatpak_id: str) -> bool:
+        """Check if a Flatpak ID exists in any remote."""
+        try:
+            # Try to get info about the package
+            cmd = ['flatpak', 'info', flatpak_id]
+            result = safe_subprocess_run(cmd, timeout=5)
+            
+            # Return code 0 means it exists (or at least info command succeeded)
+            return result.returncode == 0
+        except:
+            return False
+    
+    def string_similarity(self, str1: str, str2: str) -> float:
+        """Calculate string similarity (simple implementation)."""
+        # Simple similarity check
+        if not str1 or not str2:
+            return 0.0
         
-        # Pattern 2: GitHub projects
-        guesses.extend([
-            f"com.github.{app_lower}",
-            f"io.github.{app_lower}",
-            f"org.github.{app_lower}",
-            f"com.github.{app_lower}.{app_title}",
-            f"io.github.{app_lower}.{app_title}",
-        ])
+        set1 = set(str1)
+        set2 = set(str2)
+        intersection = set1.intersection(set2)
+        union = set1.union(set2)
         
-        # Pattern 3: GNOME/KDE applications
-        guesses.extend([
-            f"org.gnome.{app_title}",
-            f"org.kde.{app_title}",
-            f"org.xfce.{app_title}",
-        ])
+        if not union:
+            return 0.0
         
-        # Pattern 4: Common suffixes
-        for suffix in ["desktop", "app", "client", "studio", "editor", "viewer", "player"]:
-            guesses.extend([
-                f"com.{app_lower}.{app_title}{suffix.title()}",
-                f"org.{app_lower}.{app_title}{suffix.title()}",
-                f"io.{app_lower}.{app_title}{suffix.title()}",
-            ])
+        return len(intersection) / len(union)
+    
+    def find_similar_installed_flatpaks(self, app_name: str) -> List[str]:
+        """Find similar installed Flatpak applications."""
+        similar = []
         
-        # Remove duplicates and empty strings
-        guesses = list(set([g for g in guesses if g]))
+        try:
+            cmd = ['flatpak', 'list', '--columns=application,name']
+            result = safe_subprocess_run(cmd, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split('\n')
+                for line in lines:
+                    parts = line.split('\t')
+                    if len(parts) >= 2:
+                        flatpak_id = parts[0].strip()
+                        display_name = parts[1].strip().lower()
+                        
+                        # Check for similarity
+                        app_lower = app_name.lower()
+                        if (app_lower in display_name or 
+                            display_name in app_lower or
+                            self.string_similarity(app_lower, display_name) > 0.7):
+                            similar.append(flatpak_id)
+        except Exception as e:
+            logger.warning(f"Failed to find similar installed flatpaks: {e}")
         
-        logger.info(f"Generated {len(guesses)} guesses for '{app_name}'")
-        return guesses[:10]  # Return top 10 guesses
-
-
+        return similar
+    
     def search_flatpak_multiple_methods(self, query: str) -> List[str]:
         """Search for Flatpak apps using multiple methods."""
         results = []
@@ -3935,83 +4217,7 @@ class EcoPacManager(QMainWindow):
         results = list(set(results))
         logger.info(f"Found {len(results)} results for '{query}' via multiple methods")
         return results
-
-
-    def find_similar_installed_flatpaks(self, app_name: str) -> List[str]:
-        """Find similar installed Flatpak applications."""
-        similar = []
-        
-        try:
-            cmd = ['flatpak', 'list', '--columns=application,name']
-            result = safe_subprocess_run(cmd, timeout=5)
-            if result.returncode == 0 and result.stdout.strip():
-                lines = result.stdout.strip().split('\n')
-                for line in lines:
-                    parts = line.split('\t')
-                    if len(parts) >= 2:
-                        flatpak_id = parts[0].strip()
-                        display_name = parts[1].strip().lower()
-                        
-                        # Check for similarity
-                        app_lower = app_name.lower()
-                        if (app_lower in display_name or 
-                            display_name in app_lower or
-                            self.string_similarity(app_lower, display_name) > 0.7):
-                            similar.append(flatpak_id)
-        except Exception as e:
-            logger.warning(f"Failed to find similar installed flatpaks: {e}")
-        
-        return similar
-
-
-    def string_similarity(self, str1: str, str2: str) -> float:
-        """Calculate string similarity (simple implementation)."""
-        # Simple similarity check
-        if not str1 or not str2:
-            return 0.0
-        
-        set1 = set(str1)
-        set2 = set(str2)
-        intersection = set1.intersection(set2)
-        union = set1.union(set2)
-        
-        if not union:
-            return 0.0
-        
-        return len(intersection) / len(union)
-
-
-    def query_flathub_api(self, app_name: str) -> Optional[str]:
-        """Query Flathub API to find application ID."""
-        try:
-            import requests
-            url = f"https://flathub.org/api/v1/apps?query={app_name}"
-            response = requests.get(url, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data and len(data) > 0:
-                    # Return the first (most relevant) result
-                    return data[0].get('flatpakAppId')
-        except Exception as e:
-            logger.warning(f"Flathub API query failed: {e}")
-        
-        return None
-
-
-    def check_flatpak_exists(self, flatpak_id: str) -> bool:
-        """Check if a Flatpak ID exists in any remote."""
-        try:
-            # Try to get info about the package
-            cmd = ['flatpak', 'info', flatpak_id]
-            result = safe_subprocess_run(cmd, timeout=5)
-            
-            # Return code 0 means it exists (or at least info command succeeded)
-            return result.returncode == 0
-        except:
-            return False
-
-
+    
     def show_selection_dialog(self, title: str, items: List[str], description: str) -> Optional[str]:
         """Show a dialog to select from a list of items."""
         if not items:
@@ -4050,23 +4256,7 @@ class EcoPacManager(QMainWindow):
                 return selected_items[0].data(Qt.UserRole)
         
         return None
-
-
-    def get_flatpak_description(self, flatpak_id: str) -> str:
-        """Get description for a Flatpak ID."""
-        try:
-            cmd = ['flatpak', 'info', flatpak_id]
-            result = safe_subprocess_run(cmd, timeout=5)
-            if result.returncode == 0:
-                for line in result.stdout.split('\n'):
-                    if line.startswith('Description:'):
-                        return line.split(':', 1)[1].strip()
-        except:
-            pass
-        
-        return "No description available"
-
-
+    
     def handle_failed_mappings(self, failed_mappings: List[str]):
         """Handle packages that couldn't be mapped to Flatpak IDs."""
         if not failed_mappings:
@@ -4083,8 +4273,7 @@ class EcoPacManager(QMainWindow):
         error_msg += "4. The app might not be available as Flatpak\n"
         
         QMessageBox.warning(self, "Package Resolution Failed", error_msg)
-
-
+    
     def proceed_with_flatpak_installation(self, validated_ids: List[str], mapping_sources: List[str], failed_mappings: List[str]):
         """Proceed with Flatpak installation after validation."""
         # Check available remotes
@@ -4161,8 +4350,7 @@ class EcoPacManager(QMainWindow):
         
         # Execute
         self.execute_flatpak_command(cmd, f"Installing {len(validated_ids)} Flatpak applications")
-
-
+    
     def install_flathub_remote(self):
         """Install Flathub remote if not available."""
         reply = QMessageBox.question(
@@ -4198,34 +4386,6 @@ class EcoPacManager(QMainWindow):
             return True
         
         return False
-
-
-
-
-
-
-
-
-
-
-
-
-    
-    def uninstall_flatpak_packages(self, flatpak_ids: List[str]):
-        """Uninstall Flatpak packages."""
-        if not self.flatpak_available:
-            return
-        
-        cmd = ['flatpak', 'uninstall', '-y'] + flatpak_ids
-        self.execute_flatpak_command(cmd, f"Removing {len(flatpak_ids)} Flatpak applications")
-    
-    def execute_flatpak_command(self, command: List[str], description: str):
-        """Execute a Flatpak command with progress dialog."""
-        dialog = CommandExecutionDialog(self, command, description)
-        dialog.exec_()
-        
-        if dialog.success:
-            self.refresh_packages()
     
     def install_aur_packages(self, aur_packages: List[str]):
         """Install AUR packages with yay or paru."""
@@ -4498,6 +4658,22 @@ class EcoPacManager(QMainWindow):
         """
         
         QMessageBox.about(self, "About EcoPac", about_text)
+    
+    def execute_flatpak_command(self, command: List[str], description: str):
+        """Execute a Flatpak command with progress dialog."""
+        dialog = CommandExecutionDialog(self, command, description)
+        dialog.exec_()
+        
+        if dialog.success:
+            self.refresh_packages()
+    
+    def uninstall_flatpak_packages(self, flatpak_ids: List[str]):
+        """Uninstall Flatpak packages."""
+        if not self.flatpak_available:
+            return
+        
+        cmd = ['flatpak', 'uninstall', '-y'] + flatpak_ids
+        self.execute_flatpak_command(cmd, f"Removing {len(flatpak_ids)} Flatpak applications")
     
     def closeEvent(self, event):
         """Handle window close event."""
