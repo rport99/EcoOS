@@ -44,6 +44,8 @@ file_permissions=(
   #["/usr/local/bin/onlyoffice"]="0:0:755"
   ["/usr/local/bin/eco_rec"]="0:0:755"
   ["/usr/local/bin/eco_sys"]="0:0:755"
+  ["/usr/local/bin/eco_doc"]="0:0:755"
   ["/usr/local/bin/eco_pac"]="0:0:755"
   ["/usr/local/bin/eco_planner"]="0:0:755"
+  ["/usr/local/bin/eco_exp"]="0:0:755"
 )
