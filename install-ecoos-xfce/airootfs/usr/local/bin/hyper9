@@ -6733,7 +6733,7 @@ class SettingsDialog(QDialog):
         apps = [
             ("Terminal:", "terminal_edit", self.config.terminal_command, "eco_term"),
             ("File Manager:", "file_manager_edit", self.config.file_manager_command, "eco_fm"),
-            ("Web Browser:", "browser_edit", self.config.browser_command, "firefox, chromium, google-chrome"),
+            ("Web Browser:", "browser_edit", self.config.browser_command, "browseros, chromium, google-chrome"),
             ("Text Editor:", "text_editor_edit", self.config.text_editor_command, "mousepad, gedit, kate"),
             ("Settings:", "settings_edit", self.config.settings_command, "xfce4-settings-manager, gnome-control-center"),
             ("Calculator:", "calculator_edit", self.config.calculator_command, "gnome-calculator, kcalc"),
@@ -9924,7 +9924,7 @@ class TokyoNightPanelBar(QMainWindow):
     def load_applications(self):
         """Load common applications"""
         self.applications = [
-            Application("Web Browser", "firefox", "🌐"),
+            Application("Web Browser", "browseros", "🌐"),
             Application("Text Editor", "mousepad", "📝"),
             Application("Calculator", "gnome-calculator", "🧮"),
         ]
@@ -11777,7 +11777,7 @@ class ConfigManager:
         # Load built-in launcher commands - CHANGED DEFAULTS HERE
         config.terminal_command = self.settings.value("terminal_command", "eco_term", type=str)  # Changed from xfce4-terminal
         config.file_manager_command = self.settings.value("file_manager_command", "eco_fm", type=str)  # Changed from thunar
-        config.browser_command = self.settings.value("browser_command", "firefox", type=str)
+        config.browser_command = self.settings.value("browser_command", "browseros", type=str)
         config.text_editor_command = self.settings.value("text_editor_command", "mousepad", type=str)
         config.settings_command = self.settings.value("settings_command", "xfce4-settings-manager", type=str)
         config.calculator_command = self.settings.value("calculator_command", "gnome-calculator", type=str)
