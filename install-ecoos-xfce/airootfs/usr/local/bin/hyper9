@@ -5669,7 +5669,7 @@ class PanelConfig:
     # Built-in launcher configurations - CHANGED DEFAULTS HERE
     terminal_command: str = "eco_term"  # Changed from "xfce4-terminal"
     file_manager_command: str = "eco_fm"  # Changed from "thunar"
-    browser_command: str = "firefox"
+    browser_command: str = "browseros"
     text_editor_command: str = "mousepad"
     settings_command: str = "xfce4-settings-manager"
     calculator_command: str = "gnome-calculator"
@@ -9781,7 +9781,7 @@ class TokyoNightPanelBar(QMainWindow):
         pkg_menu = menu.addMenu("📦 EcoOS Utilities")
         
         # EcoPac Package Manager
-        ecopac_action = QAction("🦊 EcoOS Package Manager", self)
+        ecopac_action = QAction("🦊 Eco Package Manager", self)
         ecopac_action.triggered.connect(lambda: self.launch_application("eco_pac"))
         pkg_menu.addAction(ecopac_action)
         
@@ -9798,6 +9798,12 @@ class TokyoNightPanelBar(QMainWindow):
         pamac_action.triggered.connect(lambda: self.launch_application("eco_planner"))
         pkg_menu.addAction(pamac_action)
         
+
+
+        # Pamac Manager (will fail gracefully if not installed)
+        pamac_action = QAction("📦 Eco System Monitor", self)
+        pamac_action.triggered.connect(lambda: self.launch_application("eco_sys"))
+        pkg_menu.addAction(pamac_action)
 
         # Pamac Manager (will fail gracefully if not installed)
         pamac_action = QAction("📦 Eco Expenses Tracker", self)

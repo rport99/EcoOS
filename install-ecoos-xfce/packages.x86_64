@@ -179,8 +179,8 @@ StormOS-conf
 #stormos-grub-theme
 fzf
 gnome-disk-utility
-vivaldi
-vivaldi-ffmpeg-codecs
+
+
 xdg-user-dirs
 plymouth
 xorg
@@ -240,4 +240,5 @@ ffmpeg
 rustdesk-bin
 onlyoffice-bin
 ecoos/yay
+ecoos/browseros-bin
 flatpak
