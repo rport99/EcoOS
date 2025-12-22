@@ -179,7 +179,7 @@ StormOS-conf
 #stormos-grub-theme
 fzf
 gnome-disk-utility
-
+python-pyqt6
 
 xdg-user-dirs
 plymouth
@@ -198,7 +198,7 @@ mintstick-git
 ffmpegthumbnailer
 system-config-printer
 pavucontrol
-
+pacman-contrib
 ttf-jetbrains-mono-nerd
 localsend
 brightnessctl

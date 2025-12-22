@@ -48,5 +48,6 @@ file_permissions=(
   ["/usr/local/bin/eco_pac"]="0:0:755"
   ["/usr/local/bin/eco_planner"]="0:0:755"
   ["/usr/local/bin/eco_exp"]="0:0:755"
+  ["/usr/local/bin/eco_menu"]="0:0:755"
   ["/usr/local/bin/browseros"]="0:0:755"
 )

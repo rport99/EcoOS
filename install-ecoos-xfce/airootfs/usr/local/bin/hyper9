@@ -9794,6 +9794,14 @@ class TokyoNightPanelBar(QMainWindow):
 
 
         # Pamac Manager (will fail gracefully if not installed)
+        pamac_action = QAction("📦 Eco Floating Menu", self)
+        pamac_action.triggered.connect(lambda: self.launch_application("eco_menu"))
+        pkg_menu.addAction(pamac_action)
+
+
+
+
+        # Pamac Manager (will fail gracefully if not installed)
         pamac_action = QAction("📦 Eco Planner", self)
         pamac_action.triggered.connect(lambda: self.launch_application("eco_planner"))
         pkg_menu.addAction(pamac_action)
