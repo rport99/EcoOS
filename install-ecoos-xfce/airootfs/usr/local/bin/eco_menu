@@ -1095,7 +1095,7 @@ class FloatingMenu(QMainWindow):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.dragging = False
         self.drag_position = QPoint()
-        self.setFixedSize(320, 450)
+        self.setFixedSize(280, 450)
         screen_geometry = QApplication.primaryScreen().geometry()
         self.move(screen_geometry.width() - 340, 50)
     
