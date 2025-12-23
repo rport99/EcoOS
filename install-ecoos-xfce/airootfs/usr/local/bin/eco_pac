@@ -2,7 +2,7 @@
 """
 EcoPac Enhanced - Intelligent & Robust Package Manager for Arch Linux
 With AUR, Flatpak support, Tokyo Night theme, repository selection, and terminal output.
-ULTRA-FAST VERSION with Removal Options and Widget Safety Fixes
+ULTRA-FAST VERSION with Removal Options, Widget Safety Fixes, and Column Organization
 Includes Obscure Flatpak Discovery functionality
 """
 
@@ -62,6 +62,74 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# ============================================================================
+# COLUMN CONFIGURATION
+# ============================================================================
+class ColumnConfig:
+    """Column configuration for package table."""
+    
+    COLUMNS = {
+        'name': {'id': 0, 'display': 'Package', 'visible': True, 'width': 250},
+        'version': {'id': 1, 'display': 'Version', 'visible': True, 'width': 150},
+        'repo': {'id': 2, 'display': 'Repository', 'visible': True, 'width': 120},
+        'status': {'id': 3, 'display': 'Status', 'visible': True, 'width': 100},
+        'type': {'id': 4, 'display': 'Type', 'visible': True, 'width': 80},
+        'votes': {'id': 5, 'display': 'Votes', 'visible': False, 'width': 80},
+        'popularity': {'id': 6, 'display': 'Popularity', 'visible': False, 'width': 100},
+        'size': {'id': 7, 'display': 'Size', 'visible': False, 'width': 100},
+        'install_date': {'id': 8, 'display': 'Installed', 'visible': False, 'width': 120},
+        'description': {'id': 9, 'display': 'Description', 'visible': False, 'width': 300}
+    }
+    
+    @classmethod
+    def get_visible_columns(cls):
+        """Get list of visible column IDs."""
+        return [col['id'] for col in cls.COLUMNS.values() if col['visible']]
+    
+    @classmethod
+    def get_column_name(cls, column_id):
+        """Get display name for column ID."""
+        for col in cls.COLUMNS.values():
+            if col['id'] == column_id:
+                return col['display']
+        return f"Column {column_id}"
+    
+    @classmethod
+    def get_column_by_id(cls, column_id):
+        """Get column config by ID."""
+        for key, col in cls.COLUMNS.items():
+            if col['id'] == column_id:
+                return key, col
+        return None, None
+    
+    @classmethod
+    def save_config(cls):
+        """Save column configuration to file."""
+        config_file = CONFIG_DIR / "columns.json"
+        try:
+            with open(config_file, 'w') as f:
+                json.dump(cls.COLUMNS, f, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving column config: {e}")
+    
+    @classmethod
+    def load_config(cls):
+        """Load column configuration from file."""
+        config_file = CONFIG_DIR / "columns.json"
+        try:
+            if config_file.exists():
+                with open(config_file, 'r') as f:
+                    loaded_config = json.load(f)
+                    # Update only if keys match
+                    for key in cls.COLUMNS.keys():
+                        if key in loaded_config:
+                            cls.COLUMNS[key].update(loaded_config[key])
+        except Exception as e:
+            logger.error(f"Error loading column config: {e}")
+
+# Load column config on startup
+ColumnConfig.load_config()
 
 # ============================================================================
 # ENUMS
@@ -221,7 +289,11 @@ def search_aur_packages(query: str, limit: int = 100) -> List[Dict]:
         if response.status_code == 200:
             data = response.json()
             if data.get('resultcount', 0) > 0:
-                return data.get('results', [])[:limit]
+                results = data.get('results', [])[:limit]
+                # Ensure all AUR results have repo='aur'
+                for result in results:
+                    result['repo'] = 'aur'
+                return results
     except Exception as e:
         logger.error(f"Error searching AUR: {e}")
     return []
@@ -243,11 +315,15 @@ def get_aur_info(package_names: List[str]) -> List[Dict]:
 
 def aur_package_to_package(aur_data: Dict) -> Package:
     """Convert AUR API data to Package object."""
+    # Ensure repo is set to 'aur'
+    if 'repo' not in aur_data:
+        aur_data['repo'] = 'aur'
+    
     return Package(
         name=aur_data.get('Name', ''),
         version=aur_data.get('Version', ''),
         description=aur_data.get('Description', ''),
-        repo='aur',
+        repo=aur_data.get('repo', 'aur'),  # Explicitly set repo
         status=PackageStatus.AUR,
         package_type=PackageType.AUR,
         url=aur_data.get('URL', ''),
@@ -710,69 +786,35 @@ class PackageCache:
 
 
 class PackageManagerModel(QAbstractTableModel):
-    """Model for displaying packages in a table view."""
+    """Model for displaying packages in a table view with customizable columns."""
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.packages = []
-        self.headers = ["Package", "Version", "Repository", "Status", "Type", "Votes", "Popularity"]
+        ColumnConfig.load_config()  # Load saved column configuration
     
     def rowCount(self, parent=None):
         return len(self.packages)
     
     def columnCount(self, parent=None):
-        return len(self.headers)
+        return len(ColumnConfig.get_visible_columns())
     
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid():
             return None
         
         pkg = self.packages[index.row()]
-        col = index.column()
+        visible_columns = ColumnConfig.get_visible_columns()
+        if index.column() >= len(visible_columns):
+            return None
+        
+        column_id = visible_columns[index.column()]
         
         if role == Qt.DisplayRole:
-            if col == 0:
-                return pkg.display_name
-            elif col == 1:
-                return pkg.display_version
-            elif col == 2:
-                return pkg.repo_display
-            elif col == 3:
-                return pkg.status.value.capitalize()
-            elif col == 4:
-                return pkg.package_type.value.upper()
-            elif col == 5:
-                return str(pkg.votes) if pkg.is_aur else ""
-            elif col == 6:
-                return f"{pkg.popularity:.2f}" if pkg.is_aur else ""
+            return self.get_display_data(pkg, column_id)
         
         elif role == Qt.ForegroundRole:
-            # Color coding based on status
-            if col == 3:  # Status column
-                if pkg.status == PackageStatus.INSTALLED:
-                    return QColor("#9ece6a")  # Green
-                elif pkg.status == PackageStatus.UPDATE_AVAILABLE:
-                    return QColor("#ff9e64")  # Orange
-                elif pkg.status == PackageStatus.ORPHANED:
-                    return QColor("#f7768e")  # Red
-                elif pkg.status == PackageStatus.AUR:
-                    return QColor("#bb9af7")  # Purple
-                elif pkg.status == PackageStatus.FLATPAK:
-                    return QColor("#73daca")  # Teal for Flatpak
-                elif pkg.status == PackageStatus.FOREIGN:
-                    return QColor("#bb9af7")  # Purple
-            elif col == 2:  # Repository column
-                if pkg.is_aur:
-                    return QColor("#bb9af7")  # Purple for AUR
-                elif pkg.is_flatpak:
-                    return QColor("#73daca")  # Teal for Flatpak
-                else:
-                    return QColor("#7aa2f7")  # Blue for official
-            elif col == 4:  # Type column
-                if pkg.is_flatpak:
-                    return QColor("#73daca")  # Teal for Flatpak
-                elif pkg.is_aur:
-                    return QColor("#bb9af7")  # Purple for AUR
+            return self.get_foreground_color(pkg, column_id)
         
         elif role == Qt.FontRole:
             font = QFont()
@@ -781,24 +823,173 @@ class PackageManagerModel(QAbstractTableModel):
             return font
         
         elif role == Qt.ToolTipRole:
-            tooltip = f"{pkg.name}\n\n{pkg.description}\n"
-            if pkg.is_aur:
-                tooltip += f"\nVotes: {pkg.votes}\nPopularity: {pkg.popularity:.2f}"
-            elif pkg.is_flatpak and pkg.flatpak_id:
-                tooltip += f"\nFlatpak ID: {pkg.flatpak_id}"
-                if pkg.flatpak_origin:
-                    tooltip += f"\nOrigin: {pkg.flatpak_origin}"
-            return tooltip
+            return self.get_tooltip(pkg, column_id)
         
         elif role == Qt.UserRole:
             # Return the actual Package object
             return pkg
         
+        elif role == Qt.TextAlignmentRole:
+            # Align numeric columns to the right
+            if column_id in [5, 6]:  # Votes, Popularity
+                return Qt.AlignRight | Qt.AlignVCenter
+            return Qt.AlignLeft | Qt.AlignVCenter
+        
         return None
+    
+    def get_display_data(self, pkg: Package, column_id: int) -> str:
+        """Get display data for a specific column."""
+        if column_id == 0:  # Package
+            return pkg.display_name
+        elif column_id == 1:  # Version
+            return pkg.display_version
+        elif column_id == 2:  # Repository
+            # Handle repository display properly
+            if pkg.is_aur:
+                return "AUR"
+            elif pkg.is_flatpak:
+                return "FLATPAK"
+            elif pkg.repo:
+                return pkg.repo.upper()
+            else:
+                # Try to determine repo from other properties
+                if pkg.package_type == PackageType.AUR:
+                    return "AUR"
+                elif pkg.package_type == PackageType.FLATPAK:
+                    return "FLATPAK"
+                elif pkg.status == PackageStatus.AUR:
+                    return "AUR"
+                else:
+                    return "UNKNOWN"
+        elif column_id == 3:  # Status
+            return pkg.status.value.capitalize()
+        elif column_id == 4:  # Type
+            return pkg.package_type.value.upper()
+        elif column_id == 5:  # Votes
+            return str(pkg.votes) if pkg.is_aur else ""
+        elif column_id == 6:  # Popularity
+            return f"{pkg.popularity:.2f}" if pkg.is_aur else ""
+        elif column_id == 7:  # Size
+            return pkg.size if pkg.size else ""
+        elif column_id == 8:  # Install Date
+            return pkg.install_date if pkg.install_date else ""
+        elif column_id == 9:  # Description
+            return pkg.description if pkg.description else ""
+        return ""
+    
+    def get_foreground_color(self, pkg: Package, column_id: int) -> QColor:
+        """Get foreground color for a specific column."""
+        if column_id == 3:  # Status column
+            if pkg.status == PackageStatus.INSTALLED:
+                return QColor("#9ece6a")  # Green
+            elif pkg.status == PackageStatus.UPDATE_AVAILABLE:
+                return QColor("#ff9e64")  # Orange
+            elif pkg.status == PackageStatus.ORPHANED:
+                return QColor("#f7768e")  # Red
+            elif pkg.status == PackageStatus.AUR:
+                return QColor("#bb9af7")  # Purple
+            elif pkg.status == PackageStatus.FLATPAK:
+                return QColor("#73daca")  # Teal for Flatpak
+            elif pkg.status == PackageStatus.FOREIGN:
+                return QColor("#bb9af7")  # Purple
+        
+        elif column_id == 2:  # Repository column
+            if pkg.is_aur:
+                return QColor("#bb9af7")  # Purple for AUR
+            elif pkg.is_flatpak:
+                return QColor("#73daca")  # Teal for Flatpak
+            else:
+                return QColor("#7aa2f7")  # Blue for official
+        
+        elif column_id == 4:  # Type column
+            if pkg.is_flatpak:
+                return QColor("#73daca")  # Teal for Flatpak
+            elif pkg.is_aur:
+                return QColor("#bb9af7")  # Purple for AUR
+        
+        elif column_id in [5, 6]:  # Votes and Popularity
+            if pkg.votes > 0 or pkg.popularity > 0:
+                return QColor("#ff9e64")  # Orange for high values
+        
+        return QColor("#c0caf5")  # Default text color
+    
+    def get_tooltip(self, pkg: Package, column_id: int) -> str:
+        """Get tooltip for a specific column."""
+        tooltip = f"{pkg.name}\n\n"
+        
+        if column_id == 0:  # Package
+            tooltip += f"Name: {pkg.name}"
+            if pkg.is_aur:
+                tooltip += f"\nType: AUR Package"
+            elif pkg.is_flatpak:
+                tooltip += f"\nType: Flatpak Application"
+                if pkg.flatpak_id:
+                    tooltip += f"\nFlatpak ID: {pkg.flatpak_id}"
+            else:
+                tooltip += f"\nType: Official Package"
+        
+        elif column_id == 1:  # Version
+            tooltip += f"Version: {pkg.version}"
+            if pkg.new_version:
+                tooltip += f"\nUpdate available: {pkg.new_version}"
+        
+        elif column_id == 2:  # Repository
+            tooltip += f"Repository: {pkg.repo if pkg.repo else 'Unknown'}"
+            if pkg.is_aur:
+                tooltip += f"\nAUR Package"
+            elif pkg.is_flatpak:
+                tooltip += f"\nFlatpak Application"
+                if pkg.flatpak_origin:
+                    tooltip += f"\nOrigin: {pkg.flatpak_origin}"
+        
+        elif column_id == 3:  # Status
+            tooltip += f"Status: {pkg.status.value}"
+            if pkg.status == PackageStatus.UPDATE_AVAILABLE:
+                tooltip += f"\nUpdate available: {pkg.new_version}"
+            elif pkg.status == PackageStatus.ORPHANED:
+                tooltip += "\nThis package is no longer required by any other package"
+        
+        elif column_id == 4:  # Type
+            tooltip += f"Package Type: {pkg.package_type.value}"
+        
+        elif column_id == 5:  # Votes
+            if pkg.is_aur:
+                tooltip += f"Votes: {pkg.votes}"
+            else:
+                tooltip += "Votes only available for AUR packages"
+        
+        elif column_id == 6:  # Popularity
+            if pkg.is_aur:
+                tooltip += f"Popularity: {pkg.popularity:.2f}"
+            else:
+                tooltip += "Popularity only available for AUR packages"
+        
+        elif column_id == 7:  # Size
+            if pkg.size:
+                tooltip += f"Size: {pkg.size}"
+            else:
+                tooltip += "Size information not available"
+        
+        elif column_id == 8:  # Install Date
+            if pkg.install_date:
+                tooltip += f"Installed: {pkg.install_date}"
+            else:
+                tooltip += "Install date not available"
+        
+        elif column_id == 9:  # Description
+            if pkg.description:
+                tooltip += f"Description: {pkg.description}"
+            else:
+                tooltip += "No description available"
+        
+        return tooltip
     
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if orientation == Qt.Horizontal and role == Qt.DisplayRole:
-            return self.headers[section]
+            visible_columns = ColumnConfig.get_visible_columns()
+            if section < len(visible_columns):
+                column_id = visible_columns[section]
+                return ColumnConfig.get_column_name(column_id)
         return None
     
     def set_packages(self, packages):
@@ -865,14 +1056,49 @@ class PackageLoaderUltraFast(QThread):
                     if line:
                         try:
                             name, version = line.split()
-                            packages.append(Package(
+                            # Initialize package
+                            package = Package(
                                 name=name,
                                 version=version,
                                 status=PackageStatus.INSTALLED,
-                                package_type=PackageType.PACMAN
-                            ))
+                                package_type=PackageType.PACMAN,
+                                repo='Unknown'  # Default value
+                            )
+                            
+                            packages.append(package)
                         except:
                             continue
+            
+            # Get detailed info for packages to determine repository
+            if packages:
+                batch_size = 20
+                for i in range(0, len(packages), batch_size):
+                    batch = packages[i:i+batch_size]
+                    for package in batch:
+                        try:
+                            # Use pacman -Qi to get repository info
+                            result = safe_subprocess_run(['pacman', '-Qi', package.name], timeout=2)
+                            if result.returncode == 0:
+                                for line in result.stdout.strip().split('\n'):
+                                    if line.startswith('Repository'):
+                                        repo = line.split(':', 1)[1].strip()
+                                        package.repo = repo
+                                        
+                                        # Determine package type based on repository
+                                        if repo.lower() == 'aur':
+                                            package.package_type = PackageType.AUR
+                                            package.status = PackageStatus.AUR
+                                        elif repo.lower() not in [r.lower() for r in OFFICIAL_REPOS]:
+                                            # Custom repository
+                                            package.repo = repo
+                                        break
+                                    elif line.startswith('Description'):
+                                        package.description = line.split(':', 1)[1].strip()[:80]
+                        except:
+                            continue
+                    
+                    progress = 10 + int(i/len(packages) * 30)
+                    self.progress_updated.emit(progress, f"Loading package info {i+len(batch)}/{len(packages)}")
             
             # Get orphaned packages
             orphan_names = set()
@@ -887,7 +1113,7 @@ class PackageLoaderUltraFast(QThread):
             except Exception as e:
                 logger.warning(f"Error getting orphaned packages: {e}")
             
-            # Get foreign packages (AUR)
+            # Get foreign packages (AUR) - cross-check
             aur_names = set()
             try:
                 result = safe_subprocess_run(['pacman', '-Qmq'], timeout=3)
@@ -900,33 +1126,34 @@ class PackageLoaderUltraFast(QThread):
             except Exception as e:
                 logger.warning(f"Error getting foreign packages: {e}")
             
-            # Update statuses
+            # Update statuses based on additional checks
             for package in packages:
                 if package.name in orphan_names:
                     package.status = PackageStatus.ORPHANED
                 elif package.name in aur_names:
+                    # If pacman -Qmq says it's AUR, override any previous classification
                     package.status = PackageStatus.AUR
                     package.repo = 'aur'
                     package.package_type = PackageType.AUR
+                
+                # Final validation
+                if package.repo == 'Unknown' and package.name in aur_names:
+                    package.repo = 'aur'
+                    package.package_type = PackageType.AUR
+                    package.status = PackageStatus.AUR
             
-            # Get descriptions for first 50 packages (for display)
-            if packages:
-                batch_size = 10
-                for i in range(0, min(50, len(packages)), batch_size):
-                    batch = packages[i:i+batch_size]
-                    for package in batch:
-                        try:
-                            result = safe_subprocess_run(['pacman', '-Qi', package.name], timeout=1)
-                            if result.returncode == 0:
-                                for line in result.stdout.strip().split('\n'):
-                                    if line.startswith('Description'):
-                                        package.description = line.split(':', 1)[1].strip()[:60]
-                                        break
-                        except:
-                            continue
-                    
-                    progress = 10 + int(i/50 * 30)
-                    self.progress_updated.emit(progress, f"Loading descriptions {i+batch_size}/50")
+            # Load additional descriptions if needed
+            for package in packages:
+                if not package.description:
+                    try:
+                        result = safe_subprocess_run(['pacman', '-Qi', package.name], timeout=1)
+                        if result.returncode == 0:
+                            for line in result.stdout.strip().split('\n'):
+                                if line.startswith('Description'):
+                                    package.description = line.split(':', 1)[1].strip()[:80]
+                                    break
+                    except:
+                        continue
         
         except Exception as e:
             logger.error(f"Error getting installed packages: {e}")
@@ -1787,6 +2014,314 @@ class CommandExecutionDialog(QDialog):
 
 
 # ============================================================================
+# COLUMN CONFIGURATION DIALOG
+# ============================================================================
+class ColumnConfigurationDialog(QDialog):
+    """Dialog for configuring table columns."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_window = parent
+        self.init_ui()
+        self.apply_tokyo_night_theme()
+        self.load_current_config()
+    
+    def init_ui(self):
+        """Initialize the column configuration dialog."""
+        self.setWindowTitle("Configure Columns")
+        self.setModal(True)
+        self.resize(500, 400)
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        
+        # Header
+        header = QLabel("Configure Table Columns")
+        header_font = QFont()
+        header_font.setPointSize(14)
+        header_font.setBold(True)
+        header.setFont(header_font)
+        header.setStyleSheet("color: #7aa2f7;")
+        layout.addWidget(header)
+        
+        # Description
+        desc = QLabel("Select which columns to display and adjust their order:")
+        desc.setStyleSheet("color: #c0caf5; font-size: 13px;")
+        layout.addWidget(desc)
+        
+        # Create a scroll area for the column list
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        # Column list widget
+        self.column_list = QListWidget()
+        self.column_list.setSelectionMode(QListWidget.SingleSelection)
+        self.column_list.setDragDropMode(QListWidget.InternalMove)
+        self.column_list.setAlternatingRowColors(True)
+        
+        scroll.setWidget(self.column_list)
+        layout.addWidget(scroll)
+        
+        # Column width controls
+        width_group = QGroupBox("Column Width")
+        width_layout = QHBoxLayout(width_group)
+        
+        width_label = QLabel("Width:")
+        width_layout.addWidget(width_label)
+        
+        self.width_spin = QSpinBox()
+        self.width_spin.setRange(50, 500)
+        self.width_spin.setValue(150)
+        self.width_spin.valueChanged.connect(self.on_width_changed)
+        width_layout.addWidget(self.width_spin)
+        
+        width_layout.addStretch()
+        layout.addWidget(width_group)
+        
+        # Button group
+        button_widget = QWidget()
+        button_layout = QHBoxLayout(button_widget)
+        
+        self.move_up_btn = QPushButton("Move Up")
+        self.move_up_btn.clicked.connect(self.move_column_up)
+        button_layout.addWidget(self.move_up_btn)
+        
+        self.move_down_btn = QPushButton("Move Down")
+        self.move_down_btn.clicked.connect(self.move_column_down)
+        button_layout.addWidget(self.move_down_btn)
+        
+        button_layout.addStretch()
+        
+        self.reset_btn = QPushButton("Reset to Default")
+        self.reset_btn.clicked.connect(self.reset_to_default)
+        button_layout.addWidget(self.reset_btn)
+        
+        layout.addWidget(button_widget)
+        
+        # Button box
+        button_box = QDialogButtonBox()
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(self.save_config)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        
+        button_box.addButton(save_btn, QDialogButtonBox.AcceptRole)
+        button_box.addButton(cancel_btn, QDialogButtonBox.RejectRole)
+        
+        layout.addWidget(button_box)
+        
+        # Connect signals
+        self.column_list.itemSelectionChanged.connect(self.on_selection_changed)
+        self.column_list.itemChanged.connect(self.on_item_changed)
+    
+    def apply_tokyo_night_theme(self):
+        """Apply Tokyo Night theme to the dialog."""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1a1b26;
+            }
+            QLabel {
+                color: #c0caf5;
+            }
+            QListWidget {
+                background-color: #16161e;
+                color: #c0caf5;
+                border: 1px solid #292e42;
+                border-radius: 4px;
+                alternate-background-color: #1a1b26;
+                font-size: 12px;
+            }
+            QListWidget::item {
+                padding: 10px;
+                border-bottom: 1px solid #292e42;
+            }
+            QListWidget::item:selected {
+                background-color: #3d59a1;
+                color: #c0caf5;
+            }
+            QListWidget::item:hover {
+                background-color: #292e42;
+            }
+            QCheckBox {
+                color: #c0caf5;
+                font-size: 12px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border: 2px solid #292e42;
+                border-radius: 4px;
+                background-color: #16161e;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #7aa2f7;
+                border-color: #7aa2f7;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #7aa2f7;
+            }
+            QGroupBox {
+                border: 1px solid #292e42;
+                border-radius: 6px;
+                margin-top: 10px;
+                padding-top: 10px;
+                color: #7aa2f7;
+                font-weight: bold;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 10px;
+                background-color: #1a1b26;
+            }
+            QSpinBox {
+                background-color: #16161e;
+                color: #c0caf5;
+                border: 1px solid #292e42;
+                border-radius: 4px;
+                padding: 5px;
+                min-width: 80px;
+            }
+            QSpinBox::up-button, QSpinBox::down-button {
+                width: 20px;
+                border: 1px solid #292e42;
+                background-color: #1a1b26;
+            }
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                background-color: #292e42;
+            }
+            QPushButton {
+                background-color: #292e42;
+                color: #c0caf5;
+                border: 1px solid #3d59a1;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #3d59a1;
+            }
+            QPushButton:disabled {
+                background-color: #1a1b26;
+                color: #565f89;
+                border: 1px solid #292e42;
+            }
+        """)
+    
+    def load_current_config(self):
+        """Load current column configuration."""
+        self.column_list.clear()
+        
+        # Get visible columns in current order
+        visible_columns = ColumnConfig.get_visible_columns()
+        
+        # Add all columns, showing visible ones first
+        for column_key, column_config in ColumnConfig.COLUMNS.items():
+            item = QListWidgetItem()
+            item.setText(f"{column_config['display']}")
+            item.setData(Qt.UserRole, column_key)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDragEnabled | Qt.ItemIsEnabled)
+            item.setCheckState(Qt.Checked if column_config['visible'] else Qt.Unchecked)
+            
+            # Store width for later use
+            item.setData(Qt.UserRole + 1, column_config['width'])
+            
+            self.column_list.addItem(item)
+        
+        # Select first item
+        if self.column_list.count() > 0:
+            self.column_list.setCurrentRow(0)
+    
+    def on_selection_changed(self):
+        """Handle column selection change."""
+        selected_items = self.column_list.selectedItems()
+        if selected_items:
+            item = selected_items[0]
+            width = item.data(Qt.UserRole + 1)
+            if width:
+                self.width_spin.setValue(width)
+    
+    def on_item_changed(self, item):
+        """Handle item change (checkbox toggle)."""
+        column_key = item.data(Qt.UserRole)
+        if column_key in ColumnConfig.COLUMNS:
+            ColumnConfig.COLUMNS[column_key]['visible'] = (item.checkState() == Qt.Checked)
+    
+    def on_width_changed(self, width):
+        """Handle width change."""
+        selected_items = self.column_list.selectedItems()
+        if selected_items:
+            item = selected_items[0]
+            column_key = item.data(Qt.UserRole)
+            if column_key in ColumnConfig.COLUMNS:
+                ColumnConfig.COLUMNS[column_key]['width'] = width
+                item.setData(Qt.UserRole + 1, width)
+    
+    def move_column_up(self):
+        """Move selected column up."""
+        current_row = self.column_list.currentRow()
+        if current_row > 0:
+            item = self.column_list.takeItem(current_row)
+            self.column_list.insertItem(current_row - 1, item)
+            self.column_list.setCurrentRow(current_row - 1)
+    
+    def move_column_down(self):
+        """Move selected column down."""
+        current_row = self.column_list.currentRow()
+        if current_row < self.column_list.count() - 1:
+            item = self.column_list.takeItem(current_row)
+            self.column_list.insertItem(current_row + 1, item)
+            self.column_list.setCurrentRow(current_row + 1)
+    
+    def reset_to_default(self):
+        """Reset column configuration to default."""
+        reply = QMessageBox.question(
+            self, "Reset Configuration",
+            "Reset all columns to default settings?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # Reset to hardcoded defaults
+            ColumnConfig.COLUMNS = {
+                'name': {'id': 0, 'display': 'Package', 'visible': True, 'width': 250},
+                'version': {'id': 1, 'display': 'Version', 'visible': True, 'width': 150},
+                'repo': {'id': 2, 'display': 'Repository', 'visible': True, 'width': 120},
+                'status': {'id': 3, 'display': 'Status', 'visible': True, 'width': 100},
+                'type': {'id': 4, 'display': 'Type', 'visible': True, 'width': 80},
+                'votes': {'id': 5, 'display': 'Votes', 'visible': False, 'width': 80},
+                'popularity': {'id': 6, 'display': 'Popularity', 'visible': False, 'width': 100},
+                'size': {'id': 7, 'display': 'Size', 'visible': False, 'width': 100},
+                'install_date': {'id': 8, 'display': 'Installed', 'visible': False, 'width': 120},
+                'description': {'id': 9, 'display': 'Description', 'visible': False, 'width': 300}
+            }
+            
+            self.load_current_config()
+    
+    def save_config(self):
+        """Save column configuration."""
+        # Update column order based on list order
+        for i in range(self.column_list.count()):
+            item = self.column_list.item(i)
+            column_key = item.data(Qt.UserRole)
+            if column_key in ColumnConfig.COLUMNS:
+                # Update column ID to reflect new order
+                ColumnConfig.COLUMNS[column_key]['id'] = i
+        
+        # Save to file
+        ColumnConfig.save_config()
+        
+        # Refresh parent window if it exists
+        if self.parent_window:
+            self.parent_window.refresh_table_columns()
+        
+        self.accept()
+
+
+# ============================================================================
 # FLATPAK MANAGER DIALOG
 # ============================================================================
 class FlatpakManagerDialog(QDialog):
@@ -2295,8 +2830,21 @@ class EcoPacManager(QMainWindow):
         self.init_ui()
         self.apply_tokyo_night_theme()
         
-        self.refresh_packages()
+        #self.refresh_packages()
         
+
+        # Show empty state or just show a welcome message
+        self.status_label.setText("Ready - Search for packages to begin")
+        self.filtered_packages = []
+        self.package_model.set_packages([])
+
+
+
+
+
+
+
+
         # Auto-refresh timer
         self.refresh_timer = QTimer()
         self.refresh_timer.timeout.connect(self.auto_refresh)
@@ -2342,6 +2890,16 @@ class EcoPacManager(QMainWindow):
         # Set minimum size
         self.setMinimumSize(1000, 600)
     
+
+
+
+
+
+
+
+
+
+
     def create_header(self, layout):
         """Create header with Tokyo Night colors."""
         header = QWidget()
@@ -2413,6 +2971,11 @@ class EcoPacManager(QMainWindow):
         # Search input
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search packages... (Press Enter to search)")
+        self.search_input.setToolTip(
+            "Search for packages in all repositories.\n\n"
+            "Use 'aur/' prefix to search only AUR (e.g., 'aur/package-name').\n"
+            "Toggle checkboxes to include/exclude AUR and Flatpak results."
+        )
         self.search_input.setClearButtonEnabled(True)
         self.search_input.returnPressed.connect(self.on_search)
         
@@ -2427,6 +2990,7 @@ class EcoPacManager(QMainWindow):
         self.aur_toggle = QCheckBox("Search AUR")
         self.aur_toggle.setFont(search_font)
         self.aur_toggle.setChecked(True)  # Default to searching AUR
+        self.aur_toggle.setToolTip("Include AUR packages in search results")
         search_layout.addWidget(self.aur_toggle)
         
         # Flatpak search toggle
@@ -2434,6 +2998,7 @@ class EcoPacManager(QMainWindow):
         self.flatpak_toggle.setFont(search_font)
         self.flatpak_toggle.setChecked(self.flatpak_available)
         self.flatpak_toggle.setEnabled(self.flatpak_available)
+        self.flatpak_toggle.setToolTip("Include Flatpak packages in search results")
         search_layout.addWidget(self.flatpak_toggle)
         
         # Search button
@@ -2484,7 +3049,7 @@ class EcoPacManager(QMainWindow):
         layout.addWidget(self.tab_widget)
     
     def create_package_table(self):
-        """Create package table with Tokyo Night styling."""
+        """Create package table with Tokyo Night styling and customizable columns."""
         self.package_table = QTableView()
         self.package_model = PackageManagerModel()
         self.package_table.setModel(self.package_model)
@@ -2497,15 +3062,13 @@ class EcoPacManager(QMainWindow):
         table_font.setPointSize(11)
         self.package_table.setFont(table_font)
         
-        # Set column widths
+        # Set up header with context menu
         header = self.package_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)  # Package name
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # Version
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # Repository
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Status
-        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)  # Type
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)  # Votes
-        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)  # Popularity
+        header.setContextMenuPolicy(Qt.CustomContextMenu)
+        header.customContextMenuRequested.connect(self.show_header_context_menu)
+        
+        # Set column widths based on configuration
+        self.refresh_table_columns()
         
         # Styling
         self.package_table.setAlternatingRowColors(True)
@@ -2517,6 +3080,71 @@ class EcoPacManager(QMainWindow):
         # Connect signals
         self.package_table.selectionModel().selectionChanged.connect(self.on_selection_changed)
         self.package_table.doubleClicked.connect(self.show_package_details)
+    
+    def refresh_table_columns(self):
+        """Refresh table columns based on configuration."""
+        header = self.package_table.horizontalHeader()
+        
+        # Set section resize modes
+        visible_columns = ColumnConfig.get_visible_columns()
+        
+        for i, column_id in enumerate(visible_columns):
+            column_key, column_config = ColumnConfig.get_column_by_id(column_id)
+            if column_config:
+                # Set column width
+                header.resizeSection(i, column_config['width'])
+                
+                # Set resize mode
+                if column_key == 'name' or column_key == 'description':
+                    header.setSectionResizeMode(i, QHeaderView.Stretch)
+                else:
+                    header.setSectionResizeMode(i, QHeaderView.ResizeToContents)
+    
+    def show_header_context_menu(self, position):
+        """Show context menu for table header."""
+        menu = QMenu(self)
+        
+        configure_action = QAction("Configure Columns...", self)
+        configure_action.triggered.connect(self.configure_columns)
+        menu.addAction(configure_action)
+        
+        menu.addSeparator()
+        
+        # Add quick toggle actions for each column
+        visible_columns = ColumnConfig.get_visible_columns()
+        for column_id in visible_columns:
+            column_key, column_config = ColumnConfig.get_column_by_id(column_id)
+            if column_config:
+                action = QAction(f"Hide {column_config['display']}", self)
+                action.setData(column_key)
+                action.triggered.connect(lambda checked, key=column_key: self.toggle_column_visibility(key, False))
+                menu.addAction(action)
+        
+        # Add show actions for hidden columns
+        hidden_columns = [key for key, config in ColumnConfig.COLUMNS.items() if not config['visible']]
+        if hidden_columns:
+            menu.addSeparator()
+            for column_key in hidden_columns:
+                column_config = ColumnConfig.COLUMNS[column_key]
+                action = QAction(f"Show {column_config['display']}", self)
+                action.setData(column_key)
+                action.triggered.connect(lambda checked, key=column_key: self.toggle_column_visibility(key, True))
+                menu.addAction(action)
+        
+        menu.exec_(self.package_table.mapToGlobal(position))
+    
+    def configure_columns(self):
+        """Open column configuration dialog."""
+        dialog = ColumnConfigurationDialog(self)
+        dialog.exec_()
+    
+    def toggle_column_visibility(self, column_key: str, visible: bool):
+        """Toggle visibility of a column."""
+        if column_key in ColumnConfig.COLUMNS:
+            ColumnConfig.COLUMNS[column_key]['visible'] = visible
+            ColumnConfig.save_config()
+            self.refresh_table_columns()
+            self.package_model.layoutChanged.emit()
     
     def create_details_panel(self):
         """Create details panel with Tokyo Night styling - with safe widget creation."""
@@ -2648,6 +3276,21 @@ class EcoPacManager(QMainWindow):
         exit_action.setShortcut("Ctrl+Q")
         file_menu.addAction(exit_action)
         
+        # View menu
+        view_menu = menubar.addMenu("View")
+        
+        configure_columns_action = QAction("Configure Columns...", self)
+        configure_columns_action.triggered.connect(self.configure_columns)
+        configure_columns_action.setShortcut("Ctrl+Shift+C")
+        view_menu.addAction(configure_columns_action)
+        
+        view_menu.addSeparator()
+        
+        show_terminal_action = QAction("Show Terminal Tab", self)
+        show_terminal_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(1))
+        show_terminal_action.setShortcut("Ctrl+T")
+        view_menu.addAction(show_terminal_action)
+        
         # Tools menu
         tools_menu = menubar.addMenu("Tools")
         
@@ -2662,14 +3305,6 @@ class EcoPacManager(QMainWindow):
         add_flatpak_remote_action.triggered.connect(self.add_flatpak_remote)
         add_flatpak_remote_action.setEnabled(self.flatpak_available)
         tools_menu.addAction(add_flatpak_remote_action)
-        
-        # View menu
-        view_menu = menubar.addMenu("View")
-        
-        show_terminal_action = QAction("Show Terminal Tab", self)
-        show_terminal_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(1))
-        show_terminal_action.setShortcut("Ctrl+T")
-        view_menu.addAction(show_terminal_action)
         
         # Help menu
         help_menu = menubar.addMenu("Help")
@@ -2932,28 +3567,44 @@ class EcoPacManager(QMainWindow):
         QMessageBox.critical(self, "Error", f"Failed to load packages: {error_message}")
     
     def on_search(self):
-        """Handle search - with lazy loading of available packages."""
+        """Handle search - with lazy loading."""
         search_text = self.search_input.text().lower()
         self.searching_aur = self.aur_toggle.isChecked()
         
         if not search_text:
-            # Show all installed packages
-            self.filtered_packages = self.packages
-            self.package_model.set_packages(self.filtered_packages)
-            self.count_label.setText(f"{len(self.filtered_packages)} packages")
-            self.status_label.setText(f"Showing all installed packages")
+            # Show all installed packages IF we have them loaded
+            if self.packages:
+                self.filtered_packages = self.packages
+                self.package_model.set_packages(self.filtered_packages)
+                self.count_label.setText(f"{len(self.filtered_packages)} packages")
+                self.status_label.setText(f"Showing all installed packages")
+            else:
+                # No packages loaded yet
+                self.filtered_packages = []
+                self.package_model.set_packages(self.filtered_packages)
+                self.count_label.setText("0 packages")
+                self.status_label.setText("Enter search terms to find packages")
             return
         
-        self.status_label.setText(f"Searching for '{search_text}'...")
+        # Check if user is using aur/ prefix
+        force_aur_only = search_text.startswith('aur/')
+        if force_aur_only:
+            # Remove the prefix for actual search
+            search_text = search_text[4:].strip()
+            # Force AUR toggle on
+            self.searching_aur = True
+            self.aur_toggle.setChecked(True)
         
-        # Show installed packages matching search immediately
-        matching_installed = [
-            pkg for pkg in self.packages
-            if search_text in pkg.name.lower() or search_text in pkg.description.lower()
-        ]
+        # Show installed packages matching search immediately (if we have them loaded)
+        matching_installed = []
+        if self.packages:
+            matching_installed = [
+                pkg for pkg in self.packages
+                if search_text in pkg.name.lower() or search_text in pkg.description.lower()
+            ]
         
-        # Filter out AUR packages if toggle is off
-        if not self.aur_toggle.isChecked():
+        # Filter out AUR packages if toggle is off and not forcing AUR
+        if not self.searching_aur and not force_aur_only:
             matching_installed = [pkg for pkg in matching_installed if not pkg.is_aur]
         
         # Filter out Flatpak packages if toggle is off
@@ -2965,80 +3616,195 @@ class EcoPacManager(QMainWindow):
         self.count_label.setText(f"{len(self.filtered_packages)} packages")
         
         # Load available packages in background for search
-        self.load_available_packages_for_search(search_text)
+        self.load_available_packages_for_search(search_text, force_aur_only)
     
-    def load_available_packages_for_search(self, search_text: str):
+
+    def perform_search(self, search_text: str):
+        """Perform search on already loaded packages."""
+        # Show installed packages matching search immediately
+        matching_installed = []
+        if self.packages:
+            matching_installed = [
+                pkg for pkg in self.packages
+                if search_text in pkg.name.lower() or search_text in pkg.description.lower()
+            ]
+        
+        # Filter out AUR packages if toggle is off
+        if not self.searching_aur:
+            matching_installed = [pkg for pkg in matching_installed if not pkg.is_aur]
+        
+        # Filter out Flatpak packages if toggle is off
+        if not self.flatpak_toggle.isChecked():
+            matching_installed = [pkg for pkg in matching_installed if not pkg.is_flatpak]
+        
+        self.filtered_packages = matching_installed
+        self.package_model.set_packages(self.filtered_packages)
+        self.count_label.setText(f"{len(self.filtered_packages)} packages")
+        
+        # Load available packages in background for search
+        self.load_available_packages_for_search(search_text, False)
+
+
+    def load_installed_packages_for_search(self, search_text: str):
+        """Load only installed packages needed for search."""
+        self.status_label.setText(f"Loading installed packages for search...")
+        
+        def load_thread():
+            try:
+                # Get minimal package info - ONLY names and versions
+                result = safe_subprocess_run(['pacman', '-Q'], timeout=5)
+                if result.returncode == 0:
+                    packages = []
+                    lines = result.stdout.strip().split('\n')
+                    for line in lines:
+                        if line:
+                            try:
+                                name, version = line.split()
+                                package = Package(
+                                    name=name,
+                                    version=version,
+                                    status=PackageStatus.INSTALLED,
+                                    package_type=PackageType.PACMAN,
+                                    repo='Unknown'  # Default value
+                                )
+                                packages.append(package)
+                            except:
+                                continue
+                    
+                    # Update in main thread
+                    QMetaObject.invokeMethod(self, 'set_installed_packages_and_search',
+                                            Qt.QueuedConnection,
+                                            Q_ARG(list, packages),
+                                            Q_ARG(str, search_text))
+            except Exception as e:
+                logger.error(f"Error loading packages for search: {e}")
+        
+        # Start thread
+        import threading
+        thread = threading.Thread(target=load_thread, daemon=True)
+        thread.start()
+
+    @pyqtSlot(list, str)
+    def set_installed_packages_and_search(self, packages: list, search_text: str):
+        """Set loaded packages and perform search."""
+        self.packages = packages
+        self.perform_search(search_text)
+
+
+
+
+
+
+
+
+    
+    def load_available_packages_for_search(self, search_text: str, force_aur_only: bool = False):
         """Load available packages matching search in background."""
         current_search_text = search_text  # Capture the current search text
         
         def search_thread():
             try:
                 # Check if user is still searching for the same text
-                if self.search_input.text().lower() != current_search_text:
+                if self.search_input.text().lower() != current_search_text and not force_aur_only:
                     return  # User has changed the search, abort
                 
                 # Check cache first
-                cache_key = f"search_{current_search_text}_{self.aur_toggle.isChecked()}_{self.flatpak_toggle.isChecked()}"
+                cache_key = f"search_{current_search_text}_{self.aur_toggle.isChecked()}_{self.flatpak_toggle.isChecked()}_{force_aur_only}"
                 cached = self.available_packages_cache.get(cache_key)
                 
                 if cached is not None:
                     # Check again if search hasn't changed
-                    if self.search_input.text().lower() == current_search_text:
+                    if self.search_input.text().lower() == current_search_text or force_aur_only:
                         QMetaObject.invokeMethod(self, 'add_available_packages_to_search',
                                                 Qt.QueuedConnection,
                                                 Q_ARG(list, cached))
                     return
                 
                 # Get the current filter state
-                search_aur = self.aur_toggle.isChecked()
+                search_aur = self.aur_toggle.isChecked() or force_aur_only
                 search_flatpak = self.flatpak_toggle.isChecked()
                 
                 available_packages = []
                 
-                # Search in official repositories
-                try:
-                    result = safe_subprocess_run(['pacman', '-Ss', current_search_text], timeout=5)
-                    if result.returncode == 0:
-                        current_pkg = None
-                        for line in result.stdout.strip().split('\n'):
-                            if line and not line.startswith(' '):
-                                # New package entry
-                                if current_pkg and current_pkg.name:
-                                    available_packages.append(current_pkg)
-                                
-                                parts = line.split('/')
-                                if len(parts) >= 2:
-                                    repo_name = parts[0]
-                                    name_version = parts[1].split()
-                                    if len(name_version) >= 1:
-                                        name = name_version[0]
-                                        version = name_version[1] if len(name_version) > 1 else 'unknown'
-                                        
-                                        current_pkg = Package(
-                                            name=name,
-                                            version=version,
-                                            repo=repo_name,
-                                            status=PackageStatus.AVAILABLE,
-                                            package_type=PackageType.PACMAN,
-                                            description=''
-                                        )
-                            elif line.startswith('    '):
-                                # Description line
-                                if current_pkg:
-                                    current_pkg.description = line.strip()
-                        
-                        # Don't forget the last package
-                        if current_pkg and current_pkg.name:
-                            available_packages.append(current_pkg)
-                except Exception as e:
-                    logger.error(f"Error searching pacman: {e}")
+                # Search in official repositories (only if not forcing AUR only)
+                if not force_aur_only:
+                    try:
+                        result = safe_subprocess_run(['pacman', '-Ss', current_search_text], timeout=5)
+                        if result.returncode == 0:
+                            current_pkg = None
+                            for line in result.stdout.strip().split('\n'):
+                                if line and not line.startswith(' '):
+                                    # New package entry
+                                    if current_pkg and current_pkg.name:
+                                        available_packages.append(current_pkg)
+                                    
+                                    parts = line.split('/')
+                                    if len(parts) >= 2:
+                                        repo_name = parts[0]
+                                        name_version = parts[1].split()
+                                        if len(name_version) >= 1:
+                                            name = name_version[0]
+                                            version = name_version[1] if len(name_version) > 1 else 'unknown'
+                                            
+                                            # Skip AUR packages if we're forcing local repo only
+                                            if repo_name.lower() == 'aur' and not search_aur:
+                                                continue
+                                            
+                                            current_pkg = Package(
+                                                name=name,
+                                                version=version,
+                                                repo=repo_name,  # Repository from pacman -Ss output
+                                                status=PackageStatus.AVAILABLE,
+                                                package_type=PackageType.PACMAN,
+                                                description=''
+                                            )
+                                            
+                                            # If repo is 'aur', set package type accordingly
+                                            if repo_name.lower() == 'aur':
+                                                current_pkg.package_type = PackageType.AUR
+                                                current_pkg.status = PackageStatus.AUR
+                                            
+                                    elif line.startswith('aur/'):
+                                        # This is an AUR package from pacman -Ss (if AUR is in repos)
+                                        parts = line.split('/')
+                                        if len(parts) >= 2:
+                                            repo_name = 'aur'
+                                            name_version = parts[1].split()
+                                            if len(name_version) >= 1:
+                                                name = name_version[0]
+                                                version = name_version[1] if len(name_version) > 1 else 'unknown'
+                                                
+                                                if search_aur:  # Only add if AUR search is enabled
+                                                    current_pkg = Package(
+                                                        name=name,
+                                                        version=version,
+                                                        repo='aur',
+                                                        status=PackageStatus.AUR,
+                                                        package_type=PackageType.AUR,
+                                                        description=''
+                                                    )
+                                elif line.startswith('    '):
+                                    # Description line
+                                    if current_pkg:
+                                        current_pkg.description = line.strip()
+                            
+                            # Don't forget the last package
+                            if current_pkg and current_pkg.name:
+                                available_packages.append(current_pkg)
+                    except Exception as e:
+                        logger.error(f"Error searching pacman: {e}")
                 
-                # Search AUR if enabled
+                # Search AUR if enabled or forced
                 if search_aur:
                     try:
                         aur_results = search_aur_packages(current_search_text, limit=50)
                         for aur_data in aur_results:
-                            available_packages.append(aur_package_to_package(aur_data))
+                            pkg = aur_package_to_package(aur_data)
+                            # Ensure repository is properly set
+                            pkg.repo = 'aur'
+                            pkg.package_type = PackageType.AUR
+                            pkg.status = PackageStatus.AUR
+                            available_packages.append(pkg)
                     except Exception as e:
                         logger.error(f"Error searching AUR: {e}")
                 
@@ -3046,7 +3812,12 @@ class EcoPacManager(QMainWindow):
                 if search_flatpak and self.flatpak_available:
                     try:
                         flatpak_results = search_flatpak_apps(current_search_text, limit=50)
-                        available_packages.extend(flatpak_results)
+                        for flatpak_pkg in flatpak_results:
+                            # Ensure Flatpak packages have proper repo info
+                            flatpak_pkg.repo = 'flatpak'
+                            flatpak_pkg.package_type = PackageType.FLATPAK
+                            flatpak_pkg.status = PackageStatus.AVAILABLE
+                            available_packages.append(flatpak_pkg)
                     except Exception as e:
                         logger.error(f"Error searching Flatpak: {e}")
                 
@@ -3054,18 +3825,13 @@ class EcoPacManager(QMainWindow):
                 self.available_packages_cache[cache_key] = available_packages
                 
                 # Check once more if the search hasn't changed
-                if self.search_input.text().lower() == current_search_text:
+                if self.search_input.text().lower() == current_search_text or force_aur_only:
                     QMetaObject.invokeMethod(self, 'add_available_packages_to_search',
                                             Qt.QueuedConnection,
                                             Q_ARG(list, available_packages))
                 
             except Exception as e:
                 logger.error(f"Error searching available packages: {e}")
-        
-        # Cancel any previous search thread
-        if hasattr(self, '_search_thread'):
-            # We can't actually stop the thread, but we can track if it's for the same search
-            pass
         
         # Start search in background thread
         import threading
@@ -4630,7 +5396,7 @@ class EcoPacManager(QMainWindow):
         """Show about dialog."""
         about_text = """
         <h1>EcoOS Package Manager</h1>
-        <p><b>Version:</b> Ultra-Fast 1.0</p>
+        <p><b>Version:</b> Ultra-Fast 2.0 with Column Organization</p>
         <p><b>Description:</b> Intelligent & Robust Package Manager for Arch Linux</p>
         <p><b>Features:</b></p>
         <ul>
@@ -4642,6 +5408,9 @@ class EcoPacManager(QMainWindow):
             <li>Terminal output with real-time display</li>
             <li>Removal options (Quick, Thorough, Cascade)</li>
             <li>Widget safety fixes</li>
+            <li>Customizable columns with drag-and-drop</li>
+            <li>Column visibility toggles</li>
+            <li>Column width adjustment</li>
             <li>Auto-refresh every 5 minutes</li>
         </ul>
         <p><b>Package Types Supported:</b></p>
@@ -4650,11 +5419,20 @@ class EcoPacManager(QMainWindow):
             <li>⭐ AUR packages</li>
             <li>📦 Flatpak applications</li>
         </ul>
+        <p><b>Column Features:</b></p>
+        <ul>
+            <li>Right-click table header to configure columns</li>
+            <li>View → Configure Columns menu option</li>
+            <li>Drag and drop to reorder columns</li>
+            <li>Toggle column visibility</li>
+            <li>Adjust column widths</li>
+            <li>Save and restore column preferences</li>
+        </ul>
         <p><b>Architecture:</b> x86_64</p>
         <p><b>License:</b> MIT</p>
         
         <hr>
-        <p><i>Designed for Arch Linux enthusiasts who value speed and aesthetics.</i></p>
+        <p><i>Designed for Arch Linux enthusiasts who value speed, aesthetics, and customization.</i></p>
         """
         
         QMessageBox.about(self, "About EcoPac", about_text)
