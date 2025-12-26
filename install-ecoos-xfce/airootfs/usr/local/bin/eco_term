@@ -383,15 +383,17 @@ class Terminal(Gtk.Box):
         self.child_pid = None
         self.is_alive = True
 
-        # Determine working directory - FIXED: Use provided directory
+        # Store the working directory for this terminal
+        self.working_dir = None
+        
+        # CRITICAL FIX: Use the provided working_dir, don't fall back to sys.argv
         if working_dir and os.path.isdir(working_dir):
-            self.working_dir = working_dir
+            self.working_dir = os.path.abspath(working_dir)
+            print(f"Terminal using provided working directory: {self.working_dir}")
         else:
+            # If no directory provided, use current directory
             self.working_dir = os.getcwd()
-            if not os.path.exists(self.working_dir):
-                self.working_dir = os.environ.get('HOME', '/')
-
-        print(f"Terminal starting in: {self.working_dir}")  # Debug
+            print(f"Terminal using current directory: {self.working_dir}")
 
         # Create VTE terminal widget
         self.terminal = Vte.Terminal()
@@ -428,26 +430,34 @@ class Terminal(Gtk.Box):
     def spawn_shell(self):
         """Spawns the shell process inside the terminal."""
         shell = self.settings.get('shell')
-        try:
-            # Prepare environment variables
-            env = os.environ.copy()
-            env['PWD'] = self.working_dir
-            env['TERM'] = 'xterm-256color'
-            env['COLORTERM'] = 'truecolor'
-            env_list = [f"{k}={v}" for k, v in env.items()]
+        
+        # Prepare environment variables
+        env = os.environ.copy()
+        # Force set PWD to our specific working directory
+        env['PWD'] = self.working_dir
+        env['OLDPWD'] = self.working_dir
+        env['TERM'] = 'xterm-256color'
+        env['COLORTERM'] = 'truecolor'
+        
+        print(f"DEBUG: Starting shell in directory: {self.working_dir}")
+        
+        # Create env list for VTE
+        env_list = [f"{k}={v}" for k, v in env.items()]
 
-            # Use proper shell invocation for better signal handling
+        try:
+            # Use proper shell invocation
             if shell.endswith('bash'):
                 shell_args = [shell, '--login', '-i']
             elif shell.endswith('zsh'):
                 shell_args = [shell, '-i']
+            elif shell.endswith('fish'):
+                shell_args = [shell, '-i']
             else:
-                shell_args = [shell]
+                shell_args = [shell, '-i']
 
-            print(f"Spawning shell in: {self.working_dir}")  # Debug
             pid = self.terminal.spawn_sync(
                 Vte.PtyFlags.DEFAULT,
-                self.working_dir,  # This is the key - use the working directory
+                self.working_dir,  # Working directory for the shell
                 shell_args,
                 env_list,
                 GLib.SpawnFlags.SEARCH_PATH | GLib.SpawnFlags.DO_NOT_REAP_CHILD,
@@ -456,15 +466,16 @@ class Terminal(Gtk.Box):
             )
             self.child_pid = pid
             self.is_alive = True
+            
         except Exception as e:
-            print(f"Failed to spawn shell {shell}: {e}")
-            # Fallback to basic shell
+            print(f"ERROR: Failed to spawn shell {shell}: {e}")
+            # Fallback with explicit cd command
             try:
                 pid = self.terminal.spawn_sync(
                     Vte.PtyFlags.DEFAULT,
                     self.working_dir,
-                    ['/bin/bash', '-i'],
-                    None,
+                    ['/bin/bash', '-i', '-c', f'cd "{self.working_dir}" && exec /bin/bash -i'],
+                    env_list,
                     GLib.SpawnFlags.SEARCH_PATH | GLib.SpawnFlags.DO_NOT_REAP_CHILD,
                     None,
                     None
@@ -472,7 +483,7 @@ class Terminal(Gtk.Box):
                 self.child_pid = pid
                 self.is_alive = True
             except Exception as e2:
-                print(f"Failed to spawn fallback shell: {e2}")
+                print(f"ERROR: Fallback also failed: {e2}")
                 self.is_alive = False
 
     def send_signal(self, sig):
@@ -697,7 +708,7 @@ class Terminal(Gtk.Box):
 
         # New Window
         new_window_item = Gtk.MenuItem(label="New Window")
-        new_window_item.connect("activate", lambda _: self.window.new_window())
+        new_window_item.connect("activate", lambda _: self.window.new_window(self.working_dir))
         menu.append(new_window_item)
 
         menu.append(Gtk.SeparatorMenuItem())
@@ -808,21 +819,24 @@ class Terminal(Gtk.Box):
 class TerminalWindow(Gtk.ApplicationWindow):
     def __init__(self, application, working_dir=None):
         super().__init__(application=application, title="Eco Terminal")
+        
+        # Each window gets its own SettingsManager instance
         self.settings = SettingsManager()
+        
+        # Store the working directory for this window
+        if working_dir and os.path.isdir(working_dir):
+            self.working_dir = os.path.abspath(working_dir)
+            print(f"Window created with working directory: {self.working_dir}")
+        else:
+            self.working_dir = os.getcwd()
+            print(f"Window created with current directory: {self.working_dir}")
+        
         self.set_default_size(
             self.settings.get('window_width'),
             self.settings.get('window_height')
         )
         self.set_border_width(0)
         self.set_icon_name("utilities-terminal")
-
-        # FIXED: Change to the specified directory BEFORE creating UI
-        if working_dir and os.path.isdir(working_dir):
-            try:
-                os.chdir(working_dir)
-                print(f"Changed working directory to: {working_dir}")
-            except Exception as e:
-                print(f"Warning: Could not change to {working_dir}: {e}")
 
         # Connect window events
         self.connect("realize", self._on_window_realize)
@@ -850,7 +864,7 @@ class TerminalWindow(Gtk.ApplicationWindow):
             new_btn = Gtk.Button()
             new_icon = Gtk.Image.new_from_icon_name("window-new", Gtk.IconSize.BUTTON)
             new_btn.set_image(new_icon)
-            new_btn.connect("clicked", lambda _: self.new_window())
+            new_btn.connect("clicked", lambda _: self.new_window(self.working_dir))
             new_btn.set_tooltip_text("New Window")
             self.header_bar.pack_start(new_btn)
 
@@ -908,13 +922,19 @@ class TerminalWindow(Gtk.ApplicationWindow):
 
         # List to keep track of terminal instances
         self.terminals = []
-        self.add_terminal(self.root_container, working_dir)
+        
+        # Add the first terminal with the specified working directory
+        self.add_terminal(self.root_container, self.working_dir)
 
         # Show all widgets
         self.show_all()
 
     def add_terminal(self, container, working_dir=None):
         """Adds a new terminal instance to the specified container."""
+        # If no working_dir provided, use this window's working directory
+        if working_dir is None:
+            working_dir = self.working_dir
+            
         terminal = Terminal(self.settings, self, working_dir)
         container.pack_start(terminal, True, True, 0)
         self.terminals.append(terminal)
@@ -960,20 +980,12 @@ class TerminalWindow(Gtk.ApplicationWindow):
             parent.pack_start(paned, True, True, 0)
             paned.show_all()
 
-
-
-
     def _on_window_state(self, widget, event):
         """Handles window state changes (minimize, maximize, fullscreen)."""
-        # You can add window state handling logic here if needed
-        # For now, just return False to let the event propagate
         return False
-
-
 
     def split_intelligently(self, terminal=None):
         """Splits the specified terminal intelligently."""
-        print("Split intelligently called")  # Debug
         if not terminal:
             terminal = self.terminals[0] if self.terminals else None
         if not terminal:
@@ -981,6 +993,7 @@ class TerminalWindow(Gtk.ApplicationWindow):
         alloc = terminal.get_allocation()
         ratio = alloc.width / alloc.height if alloc.height > 0 else 1.0
         orientation = Gtk.Orientation.HORIZONTAL if ratio > 1.0 else Gtk.Orientation.VERTICAL
+        # Use the current terminal's working directory for the new split
         new_terminal = Terminal(self.settings, self, terminal.working_dir)
         self.split_terminal(terminal, new_terminal, orientation)
         self.terminals.append(new_terminal)
@@ -988,11 +1001,11 @@ class TerminalWindow(Gtk.ApplicationWindow):
 
     def split_horizontal(self, terminal=None):
         """Splits the specified terminal horizontally."""
-        print("Split horizontal called")  # Debug
         if not terminal:
             terminal = self.terminals[0] if self.terminals else None
         if not terminal:
             return
+        # Use the current terminal's working directory for the new split
         new_terminal = Terminal(self.settings, self, terminal.working_dir)
         self.split_terminal(terminal, new_terminal, Gtk.Orientation.VERTICAL)
         self.terminals.append(new_terminal)
@@ -1000,11 +1013,11 @@ class TerminalWindow(Gtk.ApplicationWindow):
 
     def split_vertical(self, terminal=None):
         """Splits the specified terminal vertically."""
-        print("Split vertical called")  # Debug
         if not terminal:
             terminal = self.terminals[0] if self.terminals else None
         if not terminal:
             return
+        # Use the current terminal's working directory for the new split
         new_terminal = Terminal(self.settings, self, terminal.working_dir)
         self.split_terminal(terminal, new_terminal, Gtk.Orientation.HORIZONTAL)
         self.terminals.append(new_terminal)
@@ -1012,7 +1025,6 @@ class TerminalWindow(Gtk.ApplicationWindow):
 
     def close_active_split(self):
         """Closes the currently focused terminal split."""
-        print("Close split called")  # Debug
         if len(self.terminals) > 1:
             # Find the focused terminal
             focused_terminal = None
@@ -1027,7 +1039,7 @@ class TerminalWindow(Gtk.ApplicationWindow):
             
             self.close_terminal(focused_terminal)
         else:
-            print("Cannot close the last terminal")  # Debug
+            print("Cannot close the last terminal")
 
     def close_terminal(self, terminal):
         """Closes a specific terminal instance and manages the UI layout."""
@@ -1055,9 +1067,19 @@ class TerminalWindow(Gtk.ApplicationWindow):
 
     def new_window(self, working_dir=None):
         """Creates and shows a new terminal window."""
-        print("New window called")  # Debug
         app = self.get_application()
         if app:
+            # If no working_dir provided, use the directory from the focused terminal
+            if working_dir is None:
+                for terminal in self.terminals:
+                    if terminal.terminal.has_focus():
+                        working_dir = terminal.working_dir
+                        break
+                # If still None, use this window's working directory
+                if working_dir is None:
+                    working_dir = self.working_dir
+            
+            print(f"Creating new window with directory: {working_dir}")
             new_win = TerminalWindow(app, working_dir)
             new_win.show_all()
 
@@ -1427,39 +1449,105 @@ class SettingsDialog(Gtk.Dialog):
 # --- Application Class ---
 class TerminalApplication(Gtk.Application):
     def __init__(self):
-        super().__init__(application_id='com.eco.terminal',
-                        flags=Gio.ApplicationFlags.FLAGS_NONE)
+        super().__init__(
+            application_id='com.eco.terminal',
+            flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE | Gio.ApplicationFlags.HANDLES_OPEN
+        )
         self.signal_handler = SignalHandler()
+        self._css_loaded = False
 
     def do_startup(self):
-        """Initialize the application."""
         Gtk.Application.do_startup(self)
         self.signal_handler.setup_signals()
 
-    def do_activate(self):
-        """Activates the application, creating the main window."""
-        CSSProvider.setup_css()
-        
-        # Get working directory from command line arguments
-        working_dir = None
-        if len(sys.argv) > 1:
-            arg_dir = sys.argv[1]
-            if os.path.isdir(arg_dir):
-                working_dir = os.path.abspath(arg_dir)
-                print(f"Starting term5 in directory: {working_dir}")
-            else:
-                print(f"Warning: Provided path '{arg_dir}' is not a directory, using current directory")
-                working_dir = os.getcwd()
+    def _ensure_css(self):
+        if not self._css_loaded:
+            CSSProvider.setup_css()
+            self._css_loaded = True
+
+    def _normalize_to_dir(self, s: str) -> str | None:
+        """Accepts path or file:// URI and returns a real directory path."""
+        if not s:
+            return None
+
+        # URI case: file:///home/user/Folder
+        if s.startswith("file://"):
+            try:
+                p = Gio.File.new_for_uri(s).get_path()
+            except Exception:
+                return None
         else:
+            p = s
+
+        if not p:
+            return None
+
+        # If a file is passed, use its parent directory
+        p = os.path.abspath(p)
+        if os.path.isdir(p):
+            return p
+        if os.path.isfile(p):
+            return os.path.dirname(p)
+
+        return None
+
+    def _open_window_for_dir(self, working_dir: str):
+        self._ensure_css()
+        win = TerminalWindow(self, working_dir)
+        win.show_all()
+        win.present()
+
+    # ---- IMPORTANT: handles file managers that call "open" with URIs/GFiles ----
+    def do_open(self, files, n_files, hint):
+        # Pick the first file/uri and resolve a directory
+        working_dir = None
+        if files and n_files > 0:
+            try:
+                uri = files[0].get_uri()
+                working_dir = self._normalize_to_dir(uri)
+            except Exception:
+                working_dir = None
+
+        if not working_dir:
             working_dir = os.getcwd()
 
-        window = TerminalWindow(self, working_dir)
-        window.show_all()
+        print(f"OPEN: working_dir={working_dir}")
+        self._open_window_for_dir(working_dir)
+
+    # ---- IMPORTANT: handles argv delivery to already-running instance ----
+    def do_command_line(self, command_line):
+        argv = command_line.get_arguments()
+
+        # 1) If a directory/URI was passed, use it
+        working_dir = None
+        if len(argv) > 1:
+            working_dir = self._normalize_to_dir(argv[1])
+
+        # 2) If no arg was passed (common!), use the invocation CWD from the file manager
+        if not working_dir:
+            try:
+                cwd = command_line.get_cwd()  # <-- IMPORTANT
+                if cwd and os.path.isdir(cwd):
+                    working_dir = os.path.abspath(cwd)
+            except Exception:
+                working_dir = None
+
+        # 3) Final fallback
+        if not working_dir:
+            working_dir = os.path.expanduser("~")
+
+        print(f"CMDLINE: working_dir={working_dir}")
+        self._open_window_for_dir(working_dir)
+        return 0
+
+
+
 
 def main():
-    """Main entry point."""
     app = TerminalApplication()
     return app.run(sys.argv)
+
+
 
 if __name__ == "__main__":
     sys.exit(main())

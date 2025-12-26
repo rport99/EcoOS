@@ -1084,16 +1084,14 @@ class FloatingMenu(QMainWindow):
         self.load_config()
         self.update_autostart_indicator()
 
-
-    
     def setup_window(self):
+        # REMOVED WindowStaysOnTopHint - window will NOT stay on top
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool
+            Qt.WindowType.Tool  # Only these two flags
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(280, 450)
+        self.setFixedSize(225, 450)
         
         # Get screen geometry
         screen_geometry = QApplication.primaryScreen().geometry()
@@ -1130,9 +1128,11 @@ class FloatingMenu(QMainWindow):
         self.settings_btn.clicked.connect(self.show_settings)
         title_layout.addWidget(self.settings_btn)
         
-        self.pin_btn = self.create_control_button("📌", "Pin", self.color_scheme.WARNING, 24)
+        # Pin button is DISABLED - Always on Top feature is turned off
+        self.pin_btn = self.create_control_button("📌", "Pin (Disabled)", self.color_scheme.TEXT_MUTED, 24)
         self.pin_btn.setCheckable(True)
-        self.pin_btn.setChecked(True)
+        self.pin_btn.setChecked(False)
+        self.pin_btn.setEnabled(False)  # Completely disabled
         self.pin_btn.clicked.connect(self.toggle_pin)
         title_layout.addWidget(self.pin_btn)
         
@@ -1221,8 +1221,6 @@ class FloatingMenu(QMainWindow):
         main_layout.addLayout(bottom_layout)
         
         self.setup_tray_icon()
-    
-
 
     def enable_xfce4_autostart(self):
         """Enable auto-start specifically for XFCE4"""
@@ -1257,9 +1255,6 @@ class FloatingMenu(QMainWindow):
             self.autostart_indicator.setStyleSheet(f"color: {self.color_scheme.SUCCESS}; font-size: 14px;")
         except Exception as e:
             print(f"Failed to enable XFCE4 auto-start: {e}")
-
-
-
 
     def create_control_button(self, icon, tooltip, color, size=22):
         btn = QPushButton(icon)
@@ -1420,10 +1415,11 @@ class FloatingMenu(QMainWindow):
     def show_settings(self):
         menu = QMenu(self)
         
-        pin_action = menu.addAction("Always on Top")
+        # Always on Top option is DISABLED
+        pin_action = menu.addAction("Always on Top (Disabled)")
+        pin_action.setEnabled(False)  # Grayed out and disabled
         pin_action.setCheckable(True)
-        pin_action.setChecked(True)
-        pin_action.triggered.connect(lambda checked: self.toggle_pin(checked))
+        pin_action.setChecked(False)  # Always unchecked
         
         menu.addSeparator()
         
@@ -1454,15 +1450,24 @@ class FloatingMenu(QMainWindow):
             "System applications cache has been refreshed.")
     
     def toggle_pin(self, checked=None):
+        # Always on Top feature is DISABLED - do nothing
         if checked is None:
             checked = not self.pin_btn.isChecked()
             self.pin_btn.setChecked(checked)
         
-        if checked:
-            self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
-        else:
-            self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint)
-        self.show()
+        # Ensure it's always unchecked since feature is disabled
+        self.pin_btn.setChecked(False)
+        
+        # Remove any existing WindowStaysOnTopHint if somehow it got set
+        current_flags = self.windowFlags()
+        if current_flags & Qt.WindowType.WindowStaysOnTopHint:
+            self.setWindowFlags(current_flags & ~Qt.WindowType.WindowStaysOnTopHint)
+            self.show()
+        
+        # Show message that feature is disabled
+        self.tray_icon.showMessage("Always on Top", 
+            "This feature is disabled - other windows will take precedence",
+            QSystemTrayIcon.MessageIcon.Information, 1500)
     
     def close_window(self):
         reply = QMessageBox.question(
