@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=ecoos-calamares
+Name=ecoos-installer
 GenericName=Live Installer (Calamares)
 Comment=Install the operating system to disk
-Exec=sudo calamares
+Exec=sudo installer10
 Icon=storm os
 Terminal=false
 StartupNotify=true

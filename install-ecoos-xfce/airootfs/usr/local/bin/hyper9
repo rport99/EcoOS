@@ -9820,7 +9820,7 @@ class TokyoNightPanelBar(QMainWindow):
 
         # Pamac Manager (will fail gracefully if not installed)
         pamac_action = QAction("📦 Eco Recorder", self)
-        pamac_action.triggered.connect(lambda: self.launch_application("eco_rec"))
+        pamac_action.triggered.connect(lambda: self.launch_application("eco_rec2"))
         pkg_menu.addAction(pamac_action)
 
 

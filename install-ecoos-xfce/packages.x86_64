@@ -42,6 +42,8 @@ gpm
 gptfdisk
 grml-zsh-config
 grub
+grub-bios
+grub-efi-x86_64
 hdparm
 hyperv
 intel-ucode
@@ -54,8 +56,7 @@ less
 lftp
 libfido2
 libusb-compat
-linux
-linux-headers
+
 linux-atm
 linux-firmware
 linux-firmware-marvell
@@ -106,6 +107,7 @@ sdparm
 sequoia-sq
 sg3_utils
 smartmontools
+stormos-grub-theme
 sof-firmware
 squashfs-tools
 sudo
@@ -147,8 +149,7 @@ xfce4
 xfce4-goodies
 firefox
 wmctrl
-neovim
-calamares-app
+#calamares-app
 calamares-config-xfce
 pyqt5
 qt5ct
@@ -176,10 +177,13 @@ lightdm
 htop
 gvfs
 StormOS-conf
-#stormos-grub-theme
+stormos-grub-theme
 fzf
 gnome-disk-utility
-python-pyqt6
+flatpak
+adw-gtk-theme
+
+
 
 xdg-user-dirs
 plymouth
@@ -198,7 +202,7 @@ mintstick-git
 ffmpegthumbnailer
 system-config-printer
 pavucontrol
-pacman-contrib
+
 ttf-jetbrains-mono-nerd
 localsend
 brightnessctl
@@ -237,20 +241,7 @@ vulkan-radeon
 lib32-mesa
 vulkan-intel
 ffmpeg
-rustdesk-bin
-onlyoffice-bin
-ecoos/yay
-ecoos/browseros-bin
-flatpak
-
-
-#steam
-#lutris
-wine-staging
-#proton-ge-custom-bin
-#groverlay
-#vulkan-intel
-#vulkan-radeon 
-#nvidia-utils 
-#vulkan-icd-loader
-#lib32-vulkan-icd-loader
+yay
+vivaldi
+#pamac-all
+xfce4-docklike-plugin

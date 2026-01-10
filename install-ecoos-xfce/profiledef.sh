@@ -5,7 +5,7 @@ iso_name="EcoOS"
 iso_label="Eco_Release"
 iso_publisher="EcoOS"
 iso_application="EcoOS Install Media"
-iso_version="v2"
+iso_version="v3"
 install_dir="arch"
 buildmodes=('iso')
 bootmodes=('bios.syslinux'
@@ -13,8 +13,8 @@ bootmodes=('bios.syslinux'
 arch="x86_64"
 pacman_conf="pacman.conf"
 airootfs_image_type="squashfs"
-airootfs_image_tool_options=('-comp' 'xz' '-Xbcj' 'x86' '-b' '1M' '-Xdict-size' '1M')
-bootstrap_tarball_compression=('zstd' '-c' '-T0' '--auto-threads=logical' '--long' '-19')
+#airootfs_image_tool_options=('-comp' 'xz' '-Xbcj' 'x86' '-b' '1M' '-Xdict-size' '1M')
+#bootstrap_tarball_compression=('zstd' '-c' '-T0' '--auto-threads=logical' '--long' '-19')
 file_permissions=(
   ["/etc/shadow"]="0:0:400"
   ["/root"]="0:0:750"
@@ -42,12 +42,12 @@ file_permissions=(
   ["/usr/local/bin/autoi"]="0:0:755"
   #["/usr/local/bin/rustdesk"]="0:0:755"
   #["/usr/local/bin/onlyoffice"]="0:0:755"
-  ["/usr/local/bin/eco_rec"]="0:0:755"
+  ["/usr/local/bin/eco_rec2"]="0:0:755"
   ["/usr/local/bin/eco_sys"]="0:0:755"
   ["/usr/local/bin/eco_doc"]="0:0:755"
   ["/usr/local/bin/eco_pac"]="0:0:755"
   ["/usr/local/bin/eco_planner"]="0:0:755"
   ["/usr/local/bin/eco_exp"]="0:0:755"
   ["/usr/local/bin/eco_menu"]="0:0:755"
-  ["/usr/local/bin/browseros"]="0:0:755"
+  ["/usr/local/bin/installer10"]="0:0:755"
 )
