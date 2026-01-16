@@ -151,8 +151,8 @@ firefox
 wmctrl
 #calamares-app
 #calamares-config-xfce
-pyqt5
-pyqt6
+python-pyqt5
+python-pyqt6
 qt5ct
 spice-vdagent
 spice-protocol
@@ -171,7 +171,7 @@ gnome-disk-utility
 gnome-calculator
 gnome-system-monitor
 mpv
-rclone
+#rclone
 expac
 lightdm-slick-greeter
 lightdm
@@ -244,5 +244,6 @@ vulkan-intel
 ffmpeg
 yay
 vivaldi
+discord
 #pamac-all
 xfce4-docklike-plugin

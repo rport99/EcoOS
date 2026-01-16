@@ -49,5 +49,6 @@ file_permissions=(
   ["/usr/local/bin/eco_planner"]="0:0:755"
   ["/usr/local/bin/eco_exp"]="0:0:755"
   ["/usr/local/bin/eco_menu"]="0:0:755"
-  ["/usr/local/bin/installer10"]="0:0:755"
+  ["/usr/local/bin/eco_nvidia"]="0:0:755"
+  ["/usr/local/bin/installer13"]="0:0:755"
 )

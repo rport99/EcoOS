@@ -72,6 +72,13 @@ NEW: Reboot button after successful install
 NEW: Virtual Machine Detector (guest-side)
 ✅ Preflight shows virtualization type (VirtualBox / VMware / Hyper-V / KVM/QEMU / etc.)
 ✅ KVM/QEMU is shown as: "kvm/qemu (GNOME Boxes / virt-manager / libvirt possible)"
+
+NEW: POPULAR WINDOW MANAGERS
+✅ Added support for i3, Openbox, Bspwm, Awesome, Qtile, Sway, Hyprland.
+✅ Intelligent Display Manager selection:
+   - GNOME -> GDM
+   - KDE/LXQt -> SDDM
+   - XFCE/MATE/Cinnamon/i3/Openbox/others -> LightDM
 """
 
 import os
@@ -1325,7 +1332,7 @@ def effective_fs(selection: str) -> str:
 
 
 # ============================================================
-# Desktop environments + Display Managers (multi-select)
+# Desktop environments + Window Managers + Display Managers
 # ============================================================
 DE_XFCE = "XFCE"
 DE_GNOME = "GNOME"
@@ -1334,7 +1341,16 @@ DE_CINNAMON = "Cinnamon"
 DE_MATE = "MATE"
 DE_LXQT = "LXQt"
 
-DM_AUTO = "Auto (based on selected DEs)"
+# Window Managers
+WM_I3 = "i3"
+WM_OPENBOX = "Openbox"
+WM_BSPWM = "Bspwm"
+WM_AWESOME = "Awesome"
+WM_QTILE = "Qtile"
+WM_SWAY = "Sway"
+WM_HYPRLAND = "Hyprland"
+
+DM_AUTO = "Auto (based on selected DEs/WMs)"
 DM_LIGHTDM = "LightDM"
 DM_GDM = "GDM"
 DM_SDDM = "SDDM"
@@ -1354,6 +1370,14 @@ DESKTOP_PACKAGES: Dict[str, List[str]] = {
     DE_CINNAMON: ["xorg-server", "cinnamon", "nemo", "gnome-terminal"],
     DE_MATE: ["xorg-server", "mate", "mate-terminal", "caja"],
     DE_LXQT: ["xorg-server", "lxqt", "qterminal", "pcmanfm-qt"],
+    # Window Managers Packages
+    WM_I3: ["xorg-server", "i3-wm", "i3status", "dmenu", "i3lock", "alacritty"],
+    WM_OPENBOX: ["xorg-server", "openbox", "obconf-qt", "tint2", "alacritty", "lxappearance", "xorg-drivers", "feh", "papirus-icon-theme", "menumaker", "xterm", "xorg-xclock", "xorg-twm", "xorg-xinit", "dbus-broker", "pcmanfm"],
+    WM_BSPWM: ["xorg-server", "bspwm", "sxhkd", "dmenu", "alacritty"],
+    WM_AWESOME: ["xorg-server", "awesome", "vicious", "alacritty"],
+    WM_QTILE: ["xorg-server", "qtile", "alacritty"],
+    WM_SWAY: ["sway", "waybar", "wofi", "foot", "swaylock", "xdg-desktop-portal-wlr"],
+    WM_HYPRLAND: ["hyprland", "waybar", "wofi", "kitty", "xdg-desktop-portal-hyprland"],
 }
 
 DM_PACKAGES: Dict[str, List[str]] = {
@@ -1369,20 +1393,32 @@ DE_SESSION_HINT: Dict[str, str] = {
     DE_CINNAMON: "cinnamon",
     DE_MATE: "mate",
     DE_LXQT: "lxqt",
+    # Window Managers Session Hints
+    WM_I3: "i3",
+    WM_OPENBOX: "openbox",
+    WM_BSPWM: "bspwm",
+    WM_AWESOME: "awesome",
+    WM_QTILE: "qtile",
+    WM_SWAY: "sway",
+    WM_HYPRLAND: "hyprland",
 }
 
 
 def choose_default_dm_for_desktops(desktops: List[str]) -> str:
     s = set(desktops or [])
+    # GNOME prefers GDM
     if DE_GNOME in s:
         return DM_GDM
+    # KDE and LXQt prefer SDDM
     if DE_KDE in s or DE_LXQT in s:
         return DM_SDDM
+    # Default for XFCE, MATE, Cinnamon, and all Window Managers (i3, Hyprland, etc.)
     return DM_LIGHTDM
 
 
 def choose_default_session(desktops: List[str]) -> str:
-    order = [DE_GNOME, DE_KDE, DE_XFCE, DE_CINNAMON, DE_MATE, DE_LXQT]
+    # Priority list
+    order = [DE_GNOME, DE_KDE, DE_XFCE, DE_CINNAMON, DE_MATE, DE_LXQT, WM_HYPRLAND, WM_I3, WM_SWAY, WM_OPENBOX]
     s = set(desktops or [])
     for d in order:
         if d in s:
@@ -3161,7 +3197,8 @@ class DesktopPage(StepPage):
         title.setStyleSheet("font-size: 18pt; font-weight: 900; color: #dbe3ff;")
         lay.addWidget(title)
 
-        box = QGroupBox("Desktop environments (multi-select)")
+        # Desktop Environments
+        box = QGroupBox("Desktop environments")
         v = QVBoxLayout(box)
         self.cb_xfce = QCheckBox("XFCE (recommended)")
         self.cb_gnome = QCheckBox("GNOME")
@@ -3178,13 +3215,33 @@ class DesktopPage(StepPage):
 
         lay.addWidget(box)
 
+        # Window Managers
+        box_wm = QGroupBox("Window Managers")
+        v_wm = QVBoxLayout(box_wm)
+        
+        self.cb_i3 = QCheckBox("i3")
+        self.cb_openbox = QCheckBox("Openbox")
+        self.cb_bspwm = QCheckBox("Bspwm")
+        self.cb_awesome = QCheckBox("Awesome")
+        self.cb_qtile = QCheckBox("Qtile")
+        self.cb_sway = QCheckBox("Sway")
+        self.cb_hyprland = QCheckBox("Hyprland")
+
+        for cb in [self.cb_i3, self.cb_openbox, self.cb_bspwm, self.cb_awesome, self.cb_qtile, self.cb_sway, self.cb_hyprland]:
+            v_wm.addWidget(cb)
+            cb.stateChanged.connect(self._changed)
+
+        lay.addWidget(box_wm)
+
         box2 = QGroupBox("Display Manager + Autologin")
         fl = QFormLayout(box2)
-
         self.dm = QComboBox()
         self.dm.addItems([DM_AUTO, DM_LIGHTDM, DM_GDM, DM_SDDM])
         self.dm.currentIndexChanged.connect(self._changed)
         fl.addRow("Display Manager:", self.dm)
+        self.dm_preview = QLabel("")
+        self.dm_preview.setStyleSheet("color: #b8c2ff; font-style: italic;")
+        fl.addRow("", self.dm_preview)
 
         self.autologin = QCheckBox("Enable autologin (bypass login screen)")
         self.autologin.setChecked(True)
@@ -3217,12 +3274,22 @@ class DesktopPage(StepPage):
 
     def desktops_selected(self) -> List[str]:
         out = []
+        # Desktops
         if self.cb_xfce.isChecked(): out.append(DE_XFCE)
         if self.cb_gnome.isChecked(): out.append(DE_GNOME)
         if self.cb_kde.isChecked(): out.append(DE_KDE)
         if self.cb_cinnamon.isChecked(): out.append(DE_CINNAMON)
         if self.cb_mate.isChecked(): out.append(DE_MATE)
         if self.cb_lxqt.isChecked(): out.append(DE_LXQT)
+        # Window Managers
+        if self.cb_i3.isChecked(): out.append(WM_I3)
+        if self.cb_openbox.isChecked(): out.append(WM_OPENBOX)
+        if self.cb_bspwm.isChecked(): out.append(WM_BSPWM)
+        if self.cb_awesome.isChecked(): out.append(WM_AWESOME)
+        if self.cb_qtile.isChecked(): out.append(WM_QTILE)
+        if self.cb_sway.isChecked(): out.append(WM_SWAY)
+        if self.cb_hyprland.isChecked(): out.append(WM_HYPRLAND)
+        
         return out
 
     def _changed(self):
@@ -3230,6 +3297,15 @@ class DesktopPage(StepPage):
         if not desktops:
             self.cb_xfce.setChecked(True)
             desktops = [DE_XFCE]
+
+        # Compute effective DM
+        dm_selection = self.dm.currentText()
+        if dm_selection == DM_AUTO:
+            effective_dm = choose_default_dm_for_desktops(desktops)
+            self.dm_preview.setText(f"→ Will install: <b>{effective_dm}</b>")
+        else:
+            self.dm_preview.setText(f"→ Will install: <b>{dm_selection}</b>")
+
         self.main.set_step_done(4, bool(desktops))
         self.main.refresh_confirm_page()
 
@@ -3367,7 +3443,7 @@ class ConfirmPage(StepPage):
         lines.append(f"Locale: {loc}")
 
         lines.append("")
-        lines.append("Desktop environments: " + ", ".join(desktops))
+        lines.append("Desktops & WMs: " + ", ".join(desktops))
         lines.append(f"Display manager: {dm_eff}  (selected: {dm_sel})")
         lines.append(f"Autologin: {'YES' if self.main.desktop_page.autologin.isChecked() else 'NO'}")
         lines.append(f"AUR yay: {'YES' if self.main.desktop_page.want_yay.isChecked() else 'NO'}")
@@ -3593,7 +3669,6 @@ class MainWindow(QMainWindow):
         cfg.fs = effective_fs(self.disk_page.fs_combo.currentText())
         cfg.install_mode = self.disk_page.mode_combo.currentText()
         cfg.disk = self.disk_page.disk_combo.currentData() or ""
-
         if cfg.install_mode == MODE_EXISTING:
             cfg.root_part = self.partitions_page.root_combo.currentData() or ""
             cfg.efi_part = self.partitions_page.efi_combo.currentData() or ""
@@ -3604,27 +3679,28 @@ class MainWindow(QMainWindow):
             cfg.efi_part = ""
             cfg.format_root = True
             cfg.format_efi = (cfg.boot_mode == "UEFI")
-
         cfg.hostname = sanitize_hostname(self.system_page.hostname.text())
         cfg.username = sanitize_username(self.system_page.username.text())
         cfg.user_password = self.system_page.user_password.text()
-
         if self.system_page.separate_root.isChecked():
             cfg.root_password = self.system_page.root_password.text()
         else:
             cfg.root_password = ""  # use user password
-
         cfg.timezone = self.system_page.tz.currentText()
         cfg.keymap = self.system_page.keymap.currentText()
         cfg.locale = self.system_page.locale.currentText()
-
         cfg.desktops = self.desktop_page.desktops_selected()
-        cfg.dm = self.desktop_page.dm.currentText()
+
+        # Resolve Display Manager: keep "Auto" in UI, but use correct DM internally
+        dm_selection = self.desktop_page.dm.currentText()
+        if dm_selection == DM_AUTO:
+            cfg.dm = choose_default_dm_for_desktops(cfg.desktops)
+        else:
+            cfg.dm = dm_selection
+
         cfg.autologin = self.desktop_page.autologin.isChecked()
         cfg.want_yay = self.desktop_page.want_yay.isChecked()
-
         cfg.restore_point_enabled = self.confirm_page.restore_btrfs.isChecked()
-
         cfg.use_dracut = self.system_page.use_dracut.isChecked()
         cfg.copy_oh_my_bash = self.system_page.copy_omb.isChecked()
         cfg.live_user = sanitize_username(self.system_page.live_user.text()) or live_user_best_effort()
