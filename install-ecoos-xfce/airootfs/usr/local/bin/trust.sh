@@ -7,3 +7,4 @@ done
 
 
 #rm -f "$HOME/Desktop/calamares.desktop" || true
+sudo sh -lc 'install -d /usr/local/bin && printf "%s\n" "#!/bin/sh" "exec eco-term2 \"\$@\"" > /usr/local/bin/xfce4-terminal && chmod +x /usr/local/bin/xfce4-terminal'

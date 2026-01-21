@@ -50,7 +50,7 @@ intel-ucode
 iw
 iwd
 jfsutils
-#kitty-terminfo
+kitty-terminfo
 ldns
 less
 lftp
@@ -151,8 +151,8 @@ firefox
 wmctrl
 #calamares-app
 #calamares-config-xfce
-pyqt5
-pyqt6
+python-pyqt5
+python-pyqt6
 qt5ct
 spice-vdagent
 spice-protocol
@@ -171,7 +171,7 @@ gnome-disk-utility
 gnome-calculator
 gnome-system-monitor
 mpv
-rclone
+#rclone
 expac
 lightdm-slick-greeter
 lightdm
@@ -205,7 +205,7 @@ system-config-printer
 pavucontrol
 
 ttf-jetbrains-mono-nerd
-#localsend
+localsend
 brightnessctl
 kirigami
 mkinitcpio
@@ -244,7 +244,17 @@ vulkan-intel
 ffmpeg
 yay
 vivaldi
+discord
 #pamac-all
 xfce4-docklike-plugin
-broadcom-wl-dkms
+
+eco-drop
 eco-term2
+eco-boxes4
+qemu-full 
+libvirt 
+virt-install 
+virt-viewer 
+edk2-ovmf 
+freerdp 
+sshpass

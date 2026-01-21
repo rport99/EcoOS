@@ -1,229 +1,682 @@
 #!/usr/bin/env python3
-import sys
+# -*- coding: utf-8 -*-
+"""
+Simple Arch Update Checker - Tray icon that just checks and notifies
+User opens terminal to update manually
+"""
+
 import os
+import sys
+import json
+import fcntl
+import shutil
 import subprocess
-import time
-import re
+from pathlib import Path
 from datetime import datetime
-from PyQt5.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QAction, QMessageBox
-from PyQt5.QtGui import QIcon
-from PyQt5.QtCore import QThread, pyqtSignal, QTimer
+from typing import Tuple, List, Optional
+
+from PyQt5.QtWidgets import (
+    QApplication, QSystemTrayIcon, QMenu, QAction, QMessageBox,
+    QDialog, QVBoxLayout, QLabel, QCheckBox, QDialogButtonBox,
+    QPushButton, QComboBox, QTextEdit
+)
+from PyQt5.QtGui import QIcon, QFont
+from PyQt5.QtCore import QTimer, Qt
 
 # ================== CONFIGURATION ==================
-CHECK_INTERVAL_MIN = 30
-USE_AUR = True
-LOG_FILE = os.path.expanduser("~/.local/log/arch-updater-xfce-notifications.log")
-ERROR_NOTIFICATION_TIMEOUT_MS = 10000  # 10 seconds
-# ==================================================
+CHECK_INTERVAL_MIN = 60  # Check every hour
+# ===================================================
 
-os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+# Paths
+CONFIG_DIR = Path.home() / ".config" / "arch-updater"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+LOCK_FILE = CONFIG_DIR / "lock"
 
-def log(msg):
-    with open(LOG_FILE, "a") as f:
-        f.write(f"[{datetime.now().isoformat()}] {msg}\n")
+# Create directories
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-def notify(title, message, urgency="normal", timeout=0):
-    """Send a desktop notification with optional timeout."""
-    try:
-        cmd = [
-            "notify-send", "-u", urgency, "-i", "system-software-update",
-            title, message
-        ]
-        if timeout > 0:
-            cmd.extend(["-t", str(timeout)])
-        
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as e:
-        log(f"Notification failed: {e}")
 
-class UpgradeWorker(QThread):
-    finished = pyqtSignal(bool)
-    progress = pyqtSignal(str)
-
-    def run(self):
+class UpdateChecker:
+    """Simple update checker"""
+    
+    @staticmethod
+    def run_cmd(cmd: list, timeout: int = 30) -> Tuple[int, str]:
+        """Run command and return output"""
         try:
-            # Get list of packages to estimate count
-            repo_pkgs = []
-            aur_pkgs = []
-            repo_code, repo_out = subprocess.getstatusoutput("pacman -Qu")
-            if repo_code == 0 and repo_out.strip():
-                repo_pkgs = [line.split()[0] for line in repo_out.strip().splitlines()]
-
-            if USE_AUR:
-                aur_code, aur_out = subprocess.getstatusoutput("pacman -Qm")
-                if aur_code == 0 and aur_out.strip():
-                    aur_pkgs = [line.split()[0] for line in aur_out.strip().splitlines()]
-
-            total = len(repo_pkgs) + len(aur_pkgs)
-            if total == 0:
-                self.finished.emit(True)
-                return
-
-            # Start upgrade
-            process = subprocess.Popen(
-                ["sudo", "pamac", "upgrade", "--no-confirm"],
+            result = subprocess.run(
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                bufsize=1,
-                universal_newlines=True
+                timeout=timeout,
+                check=False
             )
-
-            completed = 0
-            start_time = time.time()
-
-            while True:
-                line = process.stdout.readline()
-                if not line and process.poll() is not None:
-                    break
-                if line:
-                    log(f"pamac: {line.strip()}")
-                    match = re.search(r'(?:Upgrading|Installing):\s+([^\s\(]+)', line)
-                    if match:
-                        completed += 1
-                        pkg = match.group(1)
-                        progress_msg = f"Updating ({completed}/{total}): {pkg}"
-                        self.progress.emit(progress_msg)
-
-            success = process.returncode == 0
-            self.finished.emit(success)
-
+            return result.returncode, result.stdout.strip()
+        except subprocess.TimeoutExpired:
+            return 124, "Command timed out"
         except Exception as e:
-            log(f"Upgrade error: {e}")
-            self.finished.emit(False)
-
-class XfceNotificationUpdater:
-    def __init__(self):
-        self.app = QApplication(sys.argv)
-        self.app.setQuitOnLastWindowClosed(False)
-
-        self.tray_icon = QSystemTrayIcon(self._get_icon(), self.app)
-        menu = QMenu()
-        menu.addAction("Update Now", self.manual_update)
-        menu.addAction("View Log", self.view_log)
-        menu.addSeparator()
-        menu.addAction("Quit", self.app.quit)
-        self.tray_icon.setContextMenu(menu)
-        self.tray_icon.setToolTip("Arch Updater (XFCE Notifications)")
-        self.tray_icon.show()
-
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.auto_update)
-        self.timer.start(CHECK_INTERVAL_MIN * 60 * 1000)
-
-        # Timer for error notification cleanup
-        self.error_notification_timer = QTimer()
-        self.error_notification_timer.setSingleShot(True)
-        self.error_notification_timer.timeout.connect(self.clear_error_state)
+            return 1, f"Command failed: {str(e)}"
+    
+    @staticmethod
+    def which(cmd: str) -> bool:
+        """Check if command exists"""
+        return shutil.which(cmd) is not None
+    
+    @classmethod
+    def check_updates(cls) -> Tuple[int, int, str]:
+        """Check for repo and AUR updates"""
+        repo_count = 0
+        aur_count = 0
+        details = ""
         
-        self.update_in_progress = False
+        # Check repository updates
+        rc, output = cls.run_cmd(["pacman", "-Qu"], timeout=60)
+        if rc == 0 and output:
+            repo_updates = [l for l in output.splitlines() if l.strip()]
+            repo_count = len(repo_updates)
+            if repo_updates:
+                details += "Repository updates:\n"
+                for update in repo_updates[:50]:  # Limit to 50 lines
+                    details += f"  {update}\n"
+                if len(repo_updates) > 50:
+                    details += f"  ... and {len(repo_updates) - 50} more\n"
+        
+        # Check AUR updates
+        for helper in ["yay", "paru"]:
+            if cls.which(helper):
+                rc, output = cls.run_cmd([helper, "-Qua"], timeout=90)
+                if rc == 0 and output:
+                    aur_updates = [l for l in output.splitlines() if l.strip()]
+                    aur_count = len(aur_updates)
+                    if aur_updates:
+                        details += "\nAUR updates:\n"
+                        for update in aur_updates[:50]:  # Limit to 50 lines
+                            details += f"  {update}\n"
+                        if len(aur_updates) > 50:
+                            details += f"  ... and {len(aur_updates) - 50} more\n"
+                break
+        
+        return repo_count, aur_count, details
 
-        log("XFCE Notification Updater started.")
 
-    def _get_icon(self):
-        icon = QIcon.fromTheme("system-software-update")
-        if icon.isNull():
-            pixmap = QMessageBox.standardIcon(QMessageBox.Information)
-            icon = QIcon(pixmap) if not pixmap.isNull() else QIcon()
-        return icon
-
-    def view_log(self):
-        subprocess.Popen(["xdg-open", LOG_FILE])
-
-    def manual_update(self):
-        if not self.update_in_progress:
-            self.perform_update()
-
-    def auto_update(self):
-        if not self.update_in_progress and self.has_updates():
-            log("Updates detected. Installing...")
-            self.perform_update()
-        else:
-            log("No updates or update in progress.")
-
-    def has_updates(self):
-        repo_code, repo_out = subprocess.getstatusoutput("pacman -Qu")
-        if repo_code == 0 and repo_out.strip():
-            return True
-        if USE_AUR:
-            aur_code, aur_out = subprocess.getstatusoutput("pacman -Qm")
-            if aur_code == 0 and aur_out.strip():
-                # Check if any AUR packages have updates
-                try:
-                    # Using yay for AUR update check (you might need to adjust this)
-                    aur_updates_code, aur_updates_out = subprocess.getstatusoutput("yay -Qua")
-                    if aur_updates_code == 0 and aur_updates_out.strip():
-                        return True
-                except:
-                    pass
-        return False
-
-    def is_reboot_absolutely_needed(self):
+class TerminalOpener:
+    """Handle opening terminals properly"""
+    
+    @staticmethod
+    def get_available_terminals() -> List[tuple]:
+        """Get list of available terminals and their execute flags"""
+        terminals = [
+            # (executable, execute_flag, single_arg_flag)
+            ("gnome-terminal", "--", False),  # gnome-terminal -- bash -c
+            ("konsole", "-e", False),         # konsole -e bash -c
+            ("xfce4-terminal", "-x", False),  # xfce4-terminal -x bash -c
+            ("lxterminal", "-e", False),      # lxterminal -e bash -c
+            ("terminator", "-x", False),      # terminator -x bash -c
+            ("tilix", "-e", False),           # tilix -e bash -c
+            ("kitty", "", True),              # kitty bash -c (uses single arg)
+            ("alacritty", "-e", False),       # alacritty -e bash -c
+            ("xterm", "-e", False),           # xterm -e bash -c
+            ("urxvt", "-e", False),           # urxvt -e bash -c
+            ("rxvt", "-e", False),            # rxvt -e bash -c
+            ("st", "-e", False),              # st -e bash -c
+            ("mate-terminal", "-x", False),   # mate-terminal -x bash -c
+            ("qterminal", "-e", False),       # qterminal -e bash -c
+            ("sakura", "-x", False),          # sakura -x bash -c
+            ("terminology", "-e", False),     # terminology -e bash -c
+        ]
+        
+        available = []
+        for term, flag, single_arg in terminals:
+            if shutil.which(term):
+                available.append((term, flag, single_arg))
+        
+        return available
+    
+    @staticmethod
+    def get_default_terminal() -> Optional[tuple]:
+        """Get the system's default terminal"""
+        # Check XDG default terminal
         try:
-            with open("/proc/uptime", "r") as f:
-                if float(f.read().split()[0]) < 300:
-                    return False
+            # Check for x-terminal-emulator (common on Debian-based)
+            if shutil.which("x-terminal-emulator"):
+                # Get the actual symlink target
+                target = os.path.realpath(shutil.which("x-terminal-emulator"))
+                term_name = os.path.basename(target)
+                
+                # Map to our known terminals
+                terminal_map = {
+                    "gnome-terminal": ("gnome-terminal", "--", False),
+                    "konsole": ("konsole", "-e", False),
+                    "xfce4-terminal": ("xfce4-terminal", "-x", False),
+                    "lxterminal": ("lxterminal", "-e", False),
+                    "terminator": ("terminator", "-x", False),
+                    "tilix": ("tilix", "-e", False),
+                    "xterm": ("xterm", "-e", False),
+                }
+                
+                if term_name in terminal_map:
+                    return terminal_map[term_name]
         except:
             pass
+        
+        # Check $TERMINAL environment variable
+        env_term = os.environ.get("TERMINAL")
+        if env_term:
+            term_name = os.path.basename(env_term)
+            # Try to match with known terminals
+            for term, flag, single_arg in TerminalOpener.get_available_terminals():
+                if term == term_name:
+                    return (term, flag, single_arg)
+        
+        # Return first available terminal
+        available = TerminalOpener.get_available_terminals()
+        return available[0] if available else None
+    
+    @classmethod
+    def open_terminal_with_commands(cls, commands: str) -> bool:
+        """Open terminal with given commands"""
+        terminal_info = cls.get_default_terminal()
+        
+        if not terminal_info:
+            return False
+        
+        term, flag, single_arg = terminal_info
+        
+        # Build the command to run in terminal
+        shell_cmd = f"bash -c '{commands}'"
+        
+        try:
+            if single_arg:
+                # Terminals that take the command as a single argument after the execute flag
+                cmd = [term, shell_cmd]
+            elif flag == "--":
+                # Terminals that use -- to separate options from command
+                cmd = [term, flag, "bash", "-c", commands]
+            else:
+                # Terminals that use -e or -x flag
+                cmd = [term, flag, "bash", "-c", commands]
+            
+            # Add some common options
+            if term in ["gnome-terminal", "tilix", "mate-terminal"]:
+                cmd.insert(1, "--")
+            
+            print(f"Opening terminal: {' '.join(cmd)}")  # Debug
+            
+            subprocess.Popen(cmd, start_new_session=True)
+            return True
+            
+        except Exception as e:
+            print(f"Failed to open terminal {term}: {e}")
+            return False
+    
+    @classmethod
+    def get_update_commands(cls) -> str:
+        """Get commands for updating system"""
+        checker = UpdateChecker()
+        
+        # Check for AUR helper
+        aur_helper = None
+        if checker.which("yay"):
+            aur_helper = "yay"
+        elif checker.which("paru"):
+            aur_helper = "paru"
+        
+        commands = []
+        commands.append("clear")
+        commands.append("echo '========================================='")
+        commands.append("echo '          ARCH SYSTEM UPDATE'")
+        commands.append("echo '========================================='")
+        commands.append("echo ''")
+        commands.append("echo '1. Checking for updates...'")
+        commands.append("echo ''")
+        commands.append("sudo pacman -Sy")
+        commands.append("echo ''")
+        commands.append("echo '2. Available repository updates:'")
+        commands.append("pacman -Qu || echo 'No repository updates'")
+        commands.append("echo ''")
+        
+        if aur_helper:
+            commands.append(f"echo '3. Available AUR updates ({aur_helper}):'")
+            commands.append(f"{aur_helper} -Qua || echo 'No AUR updates'")
+            commands.append("echo ''")
+        
+        commands.append("echo '4. Update commands:'")
+        commands.append("echo '   sudo pacman -Syu'")
+        if aur_helper:
+            commands.append(f"echo '   {aur_helper} -Syu'")
+        commands.append("echo ''")
+        commands.append("echo '========================================='")
+        commands.append("echo 'Note: This terminal will stay open.'")
+        commands.append("echo 'Run update commands above when ready.'")
+        commands.append("echo '========================================='")
+        
+        # Use read to pause if needed, but keep terminal open
+        commands.append("exec bash")  # Start new bash shell to keep terminal open
+        
+        return " && ".join(commands)
 
-        for variant in ["linux", "linux-lts", "linux-zen", "linux-hardened"]:
-            try:
-                out = subprocess.check_output(["pacman", "-Q", variant], text=True, stderr=subprocess.DEVNULL)
-                installed_ver = out.split()[1]
-                running = os.uname().release
-                normalized = installed_ver.replace('.arch', '-arch').replace('.lts', '-lts')
-                if running == normalized:
-                    return False
-                base_run = '.'.join(running.replace('-', '.').split('.')[:3])
-                base_inst = '.'.join(installed_ver.replace('-', '.').split('.')[:3])
-                if base_run == base_inst:
-                    return False
-                return True
-            except:
-                continue
-        return False
 
-    def perform_update(self):
-        self.update_in_progress = True
-        notify("System Update", "Starting update...", "normal", 5000)
-        self.worker = UpgradeWorker()
-        self.worker.finished.connect(self.on_update_finished)
-        self.worker.progress.connect(self.on_update_progress)
-        self.worker.start()
+class NotificationManager:
+    """Simple notification manager"""
+    
+    @staticmethod
+    def send(title: str, message: str, timeout: int = 5000) -> bool:
+        """Send desktop notification"""
+        if not UpdateChecker.which("notify-send"):
+            return False
+        
+        try:
+            cmd = ["notify-send", title, message]
+            if timeout > 0:
+                cmd.extend(["-t", str(timeout)])
+            
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except:
+            return False
 
-    def on_update_progress(self, message):
-        notify("System Update", message, "normal", 5000)
 
-    def on_update_finished(self, success):
-        self.update_in_progress = False
+class ArchUpdateTray:
+    """Main application - Simple update checker only"""
+    
+    def __init__(self):
+        # Check if already running
+        self.lock_file = None
+        if not self.acquire_lock():
+            print("Arch Update Checker is already running!")
+            sys.exit(0)
+        
+        # Initialize Qt application
+        self.app = QApplication(sys.argv)
+        self.app.setQuitOnLastWindowClosed(False)
+        
+        # Load configuration
+        self.config = self.load_config()
+        
+        # State
+        self.repo_updates = 0
+        self.aur_updates = 0
+        self.update_details = ""
+        
+        # Setup tray icon
+        self.setup_tray()
+        
+        # Start checking
+        self.start_checking()
+        
+        # Print available terminals for debugging
+        self.print_terminal_info()
+    
+    def print_terminal_info(self):
+        """Print terminal information for debugging"""
+        print("\nAvailable terminals:")
+        for term, flag, single_arg in TerminalOpener.get_available_terminals():
+            print(f"  - {term} (flag: {flag}, single_arg: {single_arg})")
+        
+        default = TerminalOpener.get_default_terminal()
+        if default:
+            print(f"\nDefault terminal: {default[0]} (using flag: {default[1]})")
+        else:
+            print("\nNo terminal found!")
+        print()
+    
+    def acquire_lock(self) -> bool:
+        """Acquire single instance lock"""
+        try:
+            self.lock_file = open(LOCK_FILE, 'w')
+            fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.lock_file.write(str(os.getpid()))
+            self.lock_file.flush()
+            return True
+        except (IOError, OSError):
+            return False
+    
+    def load_config(self) -> dict:
+        """Load configuration from file"""
+        try:
+            if CONFIG_FILE.exists():
+                with open(CONFIG_FILE, 'r') as f:
+                    return json.load(f)
+        except:
+            pass
+        
+        # Default configuration
+        return {
+            "check_interval": CHECK_INTERVAL_MIN,
+            "show_notifications": True,
+            "start_minimized": True
+        }
+    
+    def save_config(self):
+        """Save configuration to file"""
+        try:
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(self.config, f, indent=2)
+        except:
+            pass
+    
+    def setup_tray(self):
+        """Setup system tray icon and menu"""
+        # Create menu
+        menu = QMenu()
+        
+        # Status item
+        self.status_action = QAction("Checking for updates...", menu)
+        self.status_action.setEnabled(False)
+        menu.addAction(self.status_action)
+        menu.addSeparator()
+        
+        # Check action
+        check_action = QAction("Check Now", menu)
+        check_action.triggered.connect(self.check_for_updates)
+        menu.addAction(check_action)
+        
+        # Open terminal action
+        terminal_action = QAction("Open Terminal to Update", menu)
+        terminal_action.triggered.connect(self.open_terminal)
+        menu.addAction(terminal_action)
+        
+        # Show update details action
+        self.details_action = QAction("Show Update Details", menu)
+        self.details_action.triggered.connect(self.show_update_details)
+        self.details_action.setEnabled(False)
+        menu.addAction(self.details_action)
+        
+        menu.addSeparator()
+        
+        # Settings
+        settings_action = QAction("Settings", menu)
+        settings_action.triggered.connect(self.show_settings)
+        menu.addAction(settings_action)
+        
+        menu.addSeparator()
+        
+        # Quit
+        quit_action = QAction("Quit", menu)
+        quit_action.triggered.connect(self.quit)
+        menu.addAction(quit_action)
+        
+        # Create tray icon
+        self.tray_icon = QSystemTrayIcon(self.get_icon(), self.app)
+        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.activated.connect(self.on_tray_clicked)
+        self.tray_icon.setToolTip("Arch Update Checker")
+        self.tray_icon.show()
+    
+    def get_icon(self):
+        """Get tray icon"""
+        # Try theme icons first
+        icon = QIcon.fromTheme("system-software-update")
+        if icon.isNull():
+            # Fallback to built-in icon
+            from PyQt5.QtWidgets import QStyle
+            icon = self.app.style().standardIcon(QMessageBox.Information)
+        return icon
+    
+    def update_icon(self):
+        """Update tray icon based on update status"""
+        total = self.repo_updates + self.aur_updates
+        
+        if total > 0:
+            icon_name = "software-update-available"
+            tooltip = f"{total} update(s) available\nClick to show details"
+        else:
+            icon_name = "system-software-update"
+            tooltip = "System up to date"
+        
+        icon = QIcon.fromTheme(icon_name)
+        if icon.isNull():
+            # Fallback
+            from PyQt5.QtWidgets import QStyle
+            if total > 0:
+                icon = self.app.style().standardIcon(QMessageBox.Warning)
+            else:
+                icon = self.app.style().standardIcon(QMessageBox.Information)
+        
+        self.tray_icon.setIcon(icon)
+        self.tray_icon.setToolTip(tooltip)
+    
+    def on_tray_clicked(self, reason):
+        """Handle tray icon click"""
+        if reason == QSystemTrayIcon.Trigger:  # Single click
+            if self.repo_updates + self.aur_updates > 0:
+                self.show_update_details()
+            else:
+                self.check_for_updates()
+    
+    def start_checking(self):
+        """Start periodic checking"""
+        interval = self.config.get("check_interval", CHECK_INTERVAL_MIN)
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.check_for_updates)
+        self.timer.start(interval * 60 * 1000)  # Convert minutes to milliseconds
+        
+        # Initial check
+        QTimer.singleShot(1000, self.check_for_updates)
+    
+    def check_for_updates(self):
+        """Check for updates"""
+        # Update status
+        self.status_action.setText("Checking for updates...")
+        self.details_action.setEnabled(False)
+        
+        # Perform check
+        checker = UpdateChecker()
+        self.repo_updates, self.aur_updates, self.update_details = checker.check_updates()
+        total = self.repo_updates + self.aur_updates
+        
+        # Update display
+        if total > 0:
+            status_text = f"{total} update(s) available"
+            if self.aur_updates > 0:
+                status_text += f" ({self.aur_updates} AUR)"
+            self.status_action.setText(status_text)
+            self.details_action.setEnabled(True)
+            
+            # Show notification
+            if self.config.get("show_notifications", True):
+                NotificationManager.send(
+                    "Updates Available",
+                    f"{total} update(s) available\nClick tray icon for details"
+                )
+        else:
+            self.status_action.setText("System up to date")
+            self.details_action.setEnabled(False)
+        
+        # Update icon
+        self.update_icon()
+        
+        # Also print to console for debugging
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Checked: {total} updates available")
+    
+    def show_update_details(self):
+        """Show dialog with update details"""
+        if not self.update_details:
+            return
+        
+        dialog = QDialog()
+        dialog.setWindowTitle("Available Updates")
+        dialog.setMinimumSize(600, 500)
+        
+        layout = QVBoxLayout()
+        
+        # Header
+        total = self.repo_updates + self.aur_updates
+        header = QLabel(f"Found {total} update(s):")
+        header.setStyleSheet("font-weight: bold; font-size: 12pt;")
+        layout.addWidget(header)
+        
+        # Update details in scrollable text area
+        details_text = QTextEdit()
+        details_text.setPlainText(self.update_details)
+        details_text.setReadOnly(True)
+        details_text.setFont(QFont("Monospace", 9))
+        layout.addWidget(details_text)
+        
+        # Instructions
+        instructions = QLabel(
+            "\nTo update, open a terminal and run:\n"
+            "• For repo updates: sudo pacman -Syu\n"
+            "• For AUR updates: yay -Syu  (or paru -Syu)\n"
+            "\nOr click 'Open Terminal to Update' below."
+        )
+        instructions.setStyleSheet("color: #666; font-style: italic;")
+        layout.addWidget(instructions)
+        
+        # Buttons
+        button_box = QDialogButtonBox()
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.accept)
+        terminal_button = QPushButton("Open Terminal")
+        terminal_button.clicked.connect(lambda: [self.open_terminal(), dialog.accept()])
+        
+        button_box.addButton(close_button, QDialogButtonBox.RejectRole)
+        button_box.addButton(terminal_button, QDialogButtonBox.AcceptRole)
+        
+        layout.addWidget(button_box)
+        dialog.setLayout(layout)
+        dialog.exec_()
+    
+    def open_terminal(self):
+        """Open terminal for user to update manually"""
+        # Get update commands
+        commands = TerminalOpener.get_update_commands()
+        
+        # Try to open terminal
+        success = TerminalOpener.open_terminal_with_commands(commands)
         
         if not success:
-            # Error notification with timeout
-            notify("Update Failed", "Check log for details.", "critical", ERROR_NOTIFICATION_TIMEOUT_MS)
-            log("Update failed.")
-            # Set timer to ensure error state is cleared
-            self.error_notification_timer.start(ERROR_NOTIFICATION_TIMEOUT_MS + 1000)
+            # Show fallback instructions
+            QMessageBox.warning(
+                None,
+                "No Terminal Found",
+                "Could not open a terminal.\n\n"
+                "Please open a terminal manually and run:\n"
+                "  sudo pacman -Syu\n\n"
+                "For AUR updates:\n"
+                "  yay -Syu  (or paru -Syu)\n\n"
+                "Available updates:\n" + self.update_details[:500] + "..."
+            )
             return
-
-        # Only notify if reboot is absolutely needed
-        if self.is_reboot_absolutely_needed():
-            notify("Reboot Required", "Kernel updated. Reboot to use new version.", "critical", 0)  # 0 = no timeout
-            log("Reboot required.")
-        else:
-            # Silent success - no notification
-            log("Update succeeded. No reboot needed.")
-
-    def clear_error_state(self):
-        """Clear any error state to allow future updates"""
-        # This method ensures the system is ready for the next update attempt
-        log("Error notification timeout completed, ready for next update.")
-
+        
+        # Show notification
+        if self.config.get("show_notifications", True):
+            NotificationManager.send(
+                "Terminal Opened",
+                "Terminal opened for manual update",
+                3000
+            )
+    
+    def show_settings(self):
+        """Show settings dialog"""
+        dialog = QDialog()
+        dialog.setWindowTitle("Settings")
+        dialog.setMinimumWidth(350)
+        
+        layout = QVBoxLayout()
+        
+        # Check interval
+        layout.addSpacing(10)
+        interval_label = QLabel("Check for updates every:")
+        layout.addWidget(interval_label)
+        
+        interval_combo = QComboBox()
+        interval_combo.addItems(["30 minutes", "1 hour", "2 hours", "4 hours", "12 hours", "24 hours"])
+        
+        current_interval = self.config.get("check_interval", 60)
+        interval_map = {30: 0, 60: 1, 120: 2, 240: 3, 720: 4, 1440: 5}
+        interval_combo.setCurrentIndex(interval_map.get(current_interval, 1))
+        
+        layout.addWidget(interval_combo)
+        
+        # Notifications
+        notify_checkbox = QCheckBox("Show notifications when updates are available")
+        notify_checkbox.setChecked(self.config.get("show_notifications", True))
+        layout.addWidget(notify_checkbox)
+        
+        # Buttons
+        layout.addSpacing(20)
+        button_box = QDialogButtonBox()
+        save_button = QPushButton("Save")
+        save_button.clicked.connect(lambda: self.save_settings(
+            notify_checkbox.isChecked(),
+            interval_combo.currentIndex(),
+            dialog
+        ))
+        
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(dialog.reject)
+        
+        button_box.addButton(save_button, QDialogButtonBox.AcceptRole)
+        button_box.addButton(cancel_button, QDialogButtonBox.RejectRole)
+        
+        layout.addWidget(button_box)
+        dialog.setLayout(layout)
+        dialog.exec_()
+    
+    def save_settings(self, show_notifications: bool, interval_index: int, dialog):
+        """Save settings"""
+        interval_map = [30, 60, 120, 240, 720, 1440]
+        
+        self.config.update({
+            "show_notifications": show_notifications,
+            "check_interval": interval_map[interval_index]
+        })
+        
+        self.save_config()
+        
+        # Restart timer with new interval
+        if hasattr(self, 'timer'):
+            self.timer.stop()
+            self.timer.start(self.config["check_interval"] * 60 * 1000)
+        
+        dialog.accept()
+    
+    def quit(self):
+        """Quit application"""
+        try:
+            if hasattr(self, 'timer'):
+                self.timer.stop()
+            
+            if self.lock_file:
+                fcntl.flock(self.lock_file, fcntl.LOCK_UN)
+                self.lock_file.close()
+        except:
+            pass
+        
+        self.app.quit()
+    
     def run(self):
-        sys.exit(self.app.exec_())
+        """Run the application"""
+        try:
+            sys.exit(self.app.exec_())
+        except Exception:
+            sys.exit(1)
+
+
+def main():
+    """Main entry point"""
+    # Check if running as root
+    if os.geteuid() == 0:
+        print("Do not run as root. Run as a regular user.")
+        sys.exit(1)
+    
+    # Check for dependencies
+    if not shutil.which("pacman"):
+        print("Error: pacman not found. This is for Arch Linux only.")
+        sys.exit(1)
+    
+    print("=" * 50)
+    print("Arch Update Checker")
+    print("=" * 50)
+    print("Starting... Check tray icon for status.")
+    print("Program only checks for updates - update manually in terminal.")
+    print("=" * 50)
+    
+    # Create and run application
+    app = ArchUpdateTray()
+    app.run()
+
 
 if __name__ == "__main__":
-    if os.geteuid() == 0:
-        print("Do not run as root.")
-        sys.exit(1)
-    app = XfceNotificationUpdater()
-    app.run()
+    main()

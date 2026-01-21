@@ -5,7 +5,7 @@ iso_name="EcoOS"
 iso_label="Eco_Release"
 iso_publisher="EcoOS"
 iso_application="EcoOS Install Media"
-iso_version="v3"
+iso_version="v4"
 install_dir="arch"
 buildmodes=('iso')
 bootmodes=('bios.syslinux'
@@ -49,5 +49,6 @@ file_permissions=(
   ["/usr/local/bin/eco_planner"]="0:0:755"
   ["/usr/local/bin/eco_exp"]="0:0:755"
   ["/usr/local/bin/eco_menu"]="0:0:755"
-  ["/usr/local/bin/installer10"]="0:0:755"
+  ["/usr/local/bin/eco_nvidia"]="0:0:755"
+  ["/usr/local/bin/installer13"]="0:0:755"
 )

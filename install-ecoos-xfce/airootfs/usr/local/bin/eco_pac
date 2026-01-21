@@ -2818,25 +2818,27 @@ class EcoPacManager(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.packages = []  # Installed and AUR packages only
-        self.available_packages_cache = {}  # Cache for available packages
+        self.packages = []
+        self.available_packages_cache = {}
         self.package_cache = PackageCache()
         self.selected_packages = []
         self.current_search = ""
         self.searching_aur = False
         self.flatpak_available = check_flatpak_installed()
-        self.flatpak_manager_dialog = None  # Reference to Flatpak manager dialog
-        
+        self.flatpak_manager_dialog = None
         self.init_ui()
         self.apply_tokyo_night_theme()
         
-        #self.refresh_packages()
+        # ✅ UNCOMMENT THIS LINE
+        self.refresh_packages()  # Load installed packages at startup
         
-
-        # Show empty state or just show a welcome message
         self.status_label.setText("Ready - Search for packages to begin")
         self.filtered_packages = []
         self.package_model.set_packages([])
+        
+        self.refresh_timer = QTimer()
+        self.refresh_timer.timeout.connect(self.auto_refresh)
+        self.refresh_timer.start(300000)  # 5 minutes
 
 
 
@@ -2893,7 +2895,27 @@ class EcoPacManager(QMainWindow):
 
 
 
-
+    def can_use_pkexec(self) -> bool:
+        """Check if pkexec can show a GUI authentication dialog."""
+        try:
+            # Check if polkit agent is running
+            for proc in psutil.process_iter(['name', 'cmdline']):
+                try:
+                    name = proc.info['name'] or ''
+                    cmdline = ' '.join(proc.info['cmdline'] or [])
+                    if 'polkit' in name.lower() and 'agent' in cmdline.lower():
+                        return True
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            # Also check common agent processes
+            agent_names = ['polkit-gnome-authentication-agent', 'lxqt-policykit-agent', 'mate-polkit']
+            for name in agent_names:
+                if any(name in p.info['name'] for p in psutil.process_iter(['name']) if p.info['name']):
+                    return True
+            return False
+        except Exception as e:
+            logger.warning(f"Could not detect Polkit agent: {e}")
+            return False
 
 
 
@@ -3567,55 +3589,42 @@ class EcoPacManager(QMainWindow):
         QMessageBox.critical(self, "Error", f"Failed to load packages: {error_message}")
     
     def on_search(self):
-        """Handle search - with lazy loading."""
-        search_text = self.search_input.text().lower()
+        search_text = self.search_input.text().strip().lower()
         self.searching_aur = self.aur_toggle.isChecked()
-        
+
+        # ✅ Immediate feedback
         if not search_text:
-            # Show all installed packages IF we have them loaded
-            if self.packages:
-                self.filtered_packages = self.packages
-                self.package_model.set_packages(self.filtered_packages)
-                self.count_label.setText(f"{len(self.filtered_packages)} packages")
-                self.status_label.setText(f"Showing all installed packages")
-            else:
-                # No packages loaded yet
-                self.filtered_packages = []
-                self.package_model.set_packages(self.filtered_packages)
-                self.count_label.setText("0 packages")
-                self.status_label.setText("Enter search terms to find packages")
+            self.clear_search()
             return
-        
-        # Check if user is using aur/ prefix
+
+        self.status_label.setText(f"Searching for '{search_text}'...")
+        self.count_label.setText("Searching...")
+
+        # Rest of logic unchanged
         force_aur_only = search_text.startswith('aur/')
         if force_aur_only:
-            # Remove the prefix for actual search
             search_text = search_text[4:].strip()
-            # Force AUR toggle on
             self.searching_aur = True
             self.aur_toggle.setChecked(True)
-        
-        # Show installed packages matching search immediately (if we have them loaded)
+
         matching_installed = []
         if self.packages:
             matching_installed = [
                 pkg for pkg in self.packages
                 if search_text in pkg.name.lower() or search_text in pkg.description.lower()
             ]
-        
-        # Filter out AUR packages if toggle is off and not forcing AUR
-        if not self.searching_aur and not force_aur_only:
-            matching_installed = [pkg for pkg in matching_installed if not pkg.is_aur]
-        
-        # Filter out Flatpak packages if toggle is off
-        if not self.flatpak_toggle.isChecked():
-            matching_installed = [pkg for pkg in matching_installed if not pkg.is_flatpak]
-        
+            if not self.searching_aur and not force_aur_only:
+                matching_installed = [pkg for pkg in matching_installed if not pkg.is_aur]
+            if not self.flatpak_toggle.isChecked():
+                matching_installed = [pkg for pkg in matching_installed if not pkg.is_flatpak]
+
         self.filtered_packages = matching_installed
         self.package_model.set_packages(self.filtered_packages)
-        self.count_label.setText(f"{len(self.filtered_packages)} packages")
-        
-        # Load available packages in background for search
+        current_count = len(self.filtered_packages)
+        self.count_label.setText(f"{current_count} packages")
+        self.status_label.setText(f"Found {current_count} installed matches")
+
+        # Load available packages in background
         self.load_available_packages_for_search(search_text, force_aur_only)
     
 
@@ -5227,57 +5236,62 @@ class EcoPacManager(QMainWindow):
         dialog.exec_()
     
     def execute_package_operation_with_removal(
-        self, 
-        operation: OperationType, 
-        packages: List[str], 
+        self,
+        operation: OperationType,
+        packages: List[str],
         description: str,
         removal_option: RemovalType = RemovalType.THOROUGH,
         extra_args: List[str] = None
     ):
-        """Execute a package operation with removal options and proper error handling."""
         if not packages and operation != OperationType.UPDATE:
             QMessageBox.warning(self, "No Packages", "No packages selected for operation.")
             return
-        
+
         try:
-            # Build command
+            # Build base command without privilege escalation
             if operation == OperationType.INSTALL:
-                cmd = ['sudo', 'pacman', '-S', '--noconfirm'] + (extra_args or []) + packages
-            
+                base_cmd = ['pacman', '-S', '--noconfirm'] + (extra_args or []) + packages
             elif operation == OperationType.REMOVE:
-                cmd = ['sudo', 'pacman', '-R', '--noconfirm']
-                
-                # Add removal option flags
+                base_cmd = ['pacman', '-R', '--noconfirm']
                 if removal_option == RemovalType.THOROUGH:
-                    cmd.extend(['-ns'])  # Remove with dependencies (-Rns)
-                elif removal_option == RemovalType.QUICK:
-                    # Just -R flag (already part of cmd)
-                    pass
+                    base_cmd.extend(['-ns'])
                 elif removal_option == RemovalType.CASCADE:
-                    cmd.extend(['-sc'])  # Remove with cascade (-Rsc)
-                
-                cmd.extend(packages)
-            
+                    base_cmd.extend(['-sc'])
+                base_cmd.extend(packages)
             elif operation == OperationType.UPDATE:
-                cmd = ['sudo', 'pacman', '-Syu', '--noconfirm']
-            
+                base_cmd = ['pacman', '-Syu', '--noconfirm']
             elif operation == OperationType.REINSTALL:
-                cmd = ['sudo', 'pacman', '-S', '--noconfirm', '--needed'] + packages
-            
+                base_cmd = ['pacman', '-S', '--noconfirm', '--needed'] + packages
             else:
                 logger.error(f"Unknown operation: {operation}")
                 return
-            
-            # Execute command
+
+            # ✅ Detect if pkexec can show GUI auth
+            use_pkexec = self.can_use_pkexec()
+
+            if use_pkexec:
+                cmd = ['pkexec'] + base_cmd
+            else:
+                # Fallback to sudo with terminal warning
+                reply = QMessageBox.warning(
+                    self, "Authentication Required",
+                    "Graphical authentication is not available.\n"
+                    "The operation will run in a terminal using 'sudo'.\n\n"
+                    "Make sure you have sudo access.",
+                    QMessageBox.Ok | QMessageBox.Cancel
+                )
+                if reply != QMessageBox.Ok:
+                    return
+                cmd = ['sudo'] + base_cmd
+
             dialog = CommandExecutionDialog(self, cmd, description)
             dialog.exec_()
-            
             if dialog.success:
                 self.refresh_packages()
                 self.status_label.setText(f"{description} completed successfully")
             else:
                 self.status_label.setText(f"{description} failed")
-        
+
         except Exception as e:
             logger.error(f"Error executing package operation: {e}")
             QMessageBox.critical(self, "Error", f"Failed to execute operation: {str(e)}")
