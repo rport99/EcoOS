@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-session" version="1.0">
+  <property name="general" type="empty">
+    <property name="SessionName" type="string" value="Default"/>
+    <property name="SaveOnExit" type="bool" value="false"/>
+  </property>
+
+  <property name="sessions" type="empty">
+    <property name="Default" type="empty">
+      <property name="Count" type="empty"/>
+      <property name="Client0_Command" type="array">
+        <value type="string" value="xfsettingsd"/>
+      </property>
+      <property name="Client1_Command" type="array">
+        <value type="string" value="xfwm4"/>
+      </property>
+      <property name="Client2_Command" type="array">
+        <value type="string" value="xfce4-panel"/>
+      </property>
+      <property name="Client3_Command" type="array">
+        <value type="string" value="xfdesktop"/>
+      </property>
+      <property name="Client4_Command" type="array">
+        <value type="string" value="xfconfd"/>
+      </property>
+    </property>
+  </property>
+</channel>

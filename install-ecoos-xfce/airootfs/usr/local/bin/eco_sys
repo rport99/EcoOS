@@ -1,0 +1,1525 @@
+#!/usr/bin/env python3
+"""
+EcoOS System Monitor - Enhanced Lightweight Version
+Features:
+ - CPU temperature monitoring
+ - Per-core CPU usage
+ - Disk space usage
+ - Network interfaces
+ - Battery status
+ - Process tree view
+ - Larger, readable fonts
+ - ALL processes loaded
+ - PROPER DARK THEME
+"""
+
+import sys
+import os
+import platform
+import shutil
+from collections import deque
+from datetime import datetime
+from typing import List, Dict, Any
+
+import psutil
+from PyQt5.QtCore import (
+    Qt, QTimer, QThread, QObject, pyqtSignal, QSortFilterProxyModel, 
+    QModelIndex, QSize
+)
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QProgressBar, QTableView, QLineEdit, QPushButton, QMessageBox,
+    QSplitter, QTabWidget, QGroupBox, QFormLayout, QStatusBar, QHeaderView,
+    QSizePolicy, QAction, QGridLayout, QComboBox, QTreeWidget, QTreeWidgetItem,
+    QTextEdit, QScrollArea, QFrame, QAbstractItemView
+)
+from PyQt5.QtGui import (
+    QIcon, QColor, QFont, QStandardItemModel, QStandardItem, QPalette,
+    QTextCursor, QFontMetrics
+)
+
+# ---------- Configuration ----------
+SAMPLE_INTERVAL_MS = 2000   # Sampling interval
+UPDATE_INTERVAL_MS = 1000   # UI update interval
+
+# ---------- Utility ----------
+def human_bytes(n):
+    """Convert bytes to human readable format"""
+    if n == 0:
+        return "0 B"
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if n < 1024.0:
+            return f"{n:3.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} PB"
+
+def format_uptime(ts_secs):
+    """Format seconds to human readable uptime"""
+    days = int(ts_secs // 86400)
+    hours = int((ts_secs % 86400) // 3600)
+    mins = int((ts_secs % 3600) // 60)
+    
+    if days:
+        return f"{days}d {hours}h {mins}m"
+    if hours:
+        return f"{hours}h {mins}m"
+    return f"{mins}m"
+
+def format_time(seconds):
+    """Format seconds to HH:MM:SS"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+def get_temperatures():
+    """Get CPU/GPU temperatures if available"""
+    temps = {}
+    if hasattr(psutil, 'sensors_temperatures'):
+        try:
+            sensors = psutil.sensors_temperatures()
+            for name, entries in sensors.items():
+                for entry in entries:
+                    label = entry.label or name
+                    temps[label] = entry.current
+        except:
+            pass
+    return temps
+
+def get_battery_info():
+    """Get battery information if available"""
+    battery = {}
+    if hasattr(psutil, 'sensors_battery'):
+        try:
+            batt = psutil.sensors_battery()
+            if batt:
+                battery['percent'] = batt.percent
+                battery['plugged'] = batt.power_plugged
+                battery['time_left'] = batt.secsleft if batt.secsleft != psutil.POWER_TIME_UNLIMITED else None
+        except:
+            pass
+    return battery
+
+def get_network_interfaces():
+    """Get network interface information"""
+    interfaces = {}
+    try:
+        addrs = psutil.net_if_addrs()
+        stats = psutil.net_if_stats()
+        
+        for iface in addrs:
+            interfaces[iface] = {
+                'addresses': [],
+                'is_up': stats[iface].isup if iface in stats else False,
+                'speed': stats[iface].speed if iface in stats else 0,
+                'mtu': stats[iface].mtu if iface in stats else 0
+            }
+            
+            for addr in addrs[iface]:
+                if addr.family == 2:  # AF_INET - IPv4
+                    interfaces[iface]['addresses'].append(f"IPv4: {addr.address}")
+                elif addr.family == 10:  # AF_INET6 - IPv6
+                    interfaces[iface]['addresses'].append(f"IPv6: {addr.address}")
+                elif addr.family == 17:  # AF_PACKET - MAC
+                    interfaces[iface]['addresses'].append(f"MAC: {addr.address}")
+    except:
+        pass
+    
+    return interfaces
+
+# ---------- Background sampler ----------
+class SamplerWorker(QObject):
+    """Runs in background thread and emits sampled stats."""
+    stats_ready = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, interval_ms=SAMPLE_INTERVAL_MS):
+        super().__init__()
+        self.interval_ms = interval_ms
+        self.running = False
+        self._prev_net = None
+        self._prev_disk = None
+        self._prev_net_per_nic = {}
+        self._process_cache = {}
+        self._process_cache_time = 0
+        self._cache_ttl = 5  # Cache processes for 5 seconds
+
+    def start(self):
+        self.running = True
+        self._sample_and_schedule()
+
+    def stop(self):
+        self.running = False
+
+    def _sample_and_schedule(self):
+        if not self.running:
+            return
+        
+        try:
+            stats = self.sample()
+            self.stats_ready.emit(stats)
+        except Exception as e:
+            self.error.emit(str(e))
+        
+        QTimer.singleShot(self.interval_ms, self._sample_and_schedule)
+
+    def _get_all_processes(self):
+        """Get ALL processes without limiting"""
+        current_time = datetime.now().timestamp()
+        
+        # Use cache if not expired
+        if current_time - self._process_cache_time < self._cache_ttl:
+            return list(self._process_cache.values())
+        
+        processes = []
+        process_count = 0
+        
+        # Get ALL processes - no limit
+        for p in psutil.process_iter(['pid', 'name', 'username', 'cpu_percent', 
+                                      'memory_percent', 'status', 'memory_info',
+                                      'create_time', 'nice', 'num_threads',
+                                      'ppid', 'exe', 'cmdline']):
+            try:
+                info = p.info
+                pid = info.get('pid')
+                
+                # Get memory info safely
+                mem_info_obj = info.get('memory_info')
+                rss = 0
+                if mem_info_obj:
+                    if hasattr(mem_info_obj, 'rss'):
+                        rss = mem_info_obj.rss
+                    elif isinstance(mem_info_obj, tuple):
+                        rss = mem_info_obj[0]  # rss is first element in tuple
+                
+                proc_data = {
+                    'pid': pid,
+                    'ppid': info.get('ppid', ''),
+                    'name': info.get('name', '') or 'unknown',
+                    'username': info.get('username', '') or 'unknown',
+                    'cpu_percent': info.get('cpu_percent') or 0.0,
+                    'memory_percent': info.get('memory_percent') or 0.0,
+                    'status': info.get('status', '') or 'unknown',
+                    'create_time': info.get('create_time'),
+                    'nice': info.get('nice'),
+                    'num_threads': info.get('num_threads') or 1,
+                    'exe': info.get('exe', ''),
+                    'cmdline': ' '.join(info.get('cmdline', []))[:100] if info.get('cmdline') else '',
+                    'memory_rss': rss
+                }
+                processes.append(proc_data)
+                
+                # Cache the process
+                self._process_cache[pid] = proc_data
+                
+                process_count += 1
+                
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+            except Exception as e:
+                # Skip any other errors but continue
+                continue
+        
+        self._process_cache_time = current_time
+        print(f"Collected {process_count} processes")  # Debug
+        return processes
+
+    def sample(self) -> dict:
+        stats = {}
+        
+        # CPU
+        stats['cpu_percent'] = psutil.cpu_percent(interval=0.1)
+        stats['cpu_per_core'] = psutil.cpu_percent(interval=0.1, percpu=True)
+        stats['cpu_count'] = psutil.cpu_count(logical=True)
+        
+        try:
+            cpu_freq = psutil.cpu_freq()
+            stats['cpu_freq'] = cpu_freq
+        except:
+            stats['cpu_freq'] = None
+        
+        # Memory
+        v = psutil.virtual_memory()
+        stats['mem'] = {
+            'total': v.total, 
+            'used': v.used, 
+            'available': v.available,
+            'percent': v.percent,
+            'buffers': getattr(v, 'buffers', 0),
+            'cached': getattr(v, 'cached', 0),
+            'shared': getattr(v, 'shared', 0)
+        }
+
+        # Swap
+        s = psutil.swap_memory()
+        stats['swap'] = {
+            'total': s.total, 
+            'used': s.used, 
+            'percent': s.percent if s.total > 0 else 0,
+            'sin': getattr(s, 'sin', 0),
+            'sout': getattr(s, 'sout', 0)
+        }
+
+        # Network - per interface
+        net_stats = {}
+        try:
+            current_net = psutil.net_io_counters(pernic=True)
+            for iface, stats_current in current_net.items():
+                prev = self._prev_net_per_nic.get(iface)
+                if prev:
+                    delta_up = max(0, stats_current.bytes_sent - prev.bytes_sent)
+                    delta_down = max(0, stats_current.bytes_recv - prev.bytes_recv)
+                else:
+                    delta_up = delta_down = 0
+                
+                net_stats[iface] = {
+                    'up_bps': delta_up,
+                    'down_bps': delta_down,
+                    'total_up': stats_current.bytes_sent,
+                    'total_down': stats_current.bytes_recv,
+                    'packets_sent': stats_current.packets_sent,
+                    'packets_recv': stats_current.packets_recv,
+                    'errin': stats_current.errin,
+                    'errout': stats_current.errout,
+                    'dropin': stats_current.dropin,
+                    'dropout': stats_current.dropout
+                }
+                self._prev_net_per_nic[iface] = stats_current
+        except:
+            pass
+        
+        stats['net'] = net_stats
+
+        # Disk I/O
+        try:
+            disk = psutil.disk_io_counters()
+            if self._prev_disk:
+                delta_read = max(0, disk.read_bytes - self._prev_disk.read_bytes)
+                delta_write = max(0, disk.write_bytes - self._prev_disk.write_bytes)
+            else:
+                delta_read = delta_write = 0
+            self._prev_disk = disk
+            
+            stats['disk_io'] = {
+                'read': delta_read,
+                'write': delta_write,
+                'read_count': disk.read_count,
+                'write_count': disk.write_count,
+                'read_time': disk.read_time,
+                'write_time': disk.write_time
+            }
+        except:
+            stats['disk_io'] = {'read': 0, 'write': 0, 'read_count': 0, 'write_count': 0, 'read_time': 0, 'write_time': 0}
+
+        # Disk usage
+        disk_usage = []
+        try:
+            for part in psutil.disk_partitions(all=False):
+                try:
+                    u = psutil.disk_usage(part.mountpoint)
+                    disk_usage.append({
+                        'device': part.device,
+                        'mountpoint': part.mountpoint,
+                        'fstype': part.fstype,
+                        'opts': part.opts,
+                        'total': u.total, 
+                        'used': u.used, 
+                        'free': u.free,
+                        'percent': u.percent
+                    })
+                except:
+                    continue
+        except:
+            pass
+        stats['disk_usage'] = disk_usage
+
+        # Processes - GET ALL PROCESSES
+        stats['processes'] = self._get_all_processes()
+
+        # Additional system info
+        stats['temperatures'] = get_temperatures()
+        stats['battery'] = get_battery_info()
+        stats['network_interfaces'] = get_network_interfaces()
+        
+        # Boot / uptime
+        boot_ts = psutil.boot_time()
+        stats['boot_time'] = boot_ts
+        stats['uptime_seconds'] = datetime.now().timestamp() - boot_ts
+        
+        # Load average
+        try:
+            stats['load_avg'] = psutil.getloadavg() if hasattr(psutil, 'getloadavg') else (0, 0, 0)
+        except:
+            stats['load_avg'] = (0, 0, 0)
+        
+        # Users
+        stats['users'] = []
+        try:
+            for user in psutil.users():
+                stats['users'].append({
+                    'name': user.name,
+                    'terminal': user.terminal,
+                    'host': user.host,
+                    'started': user.started
+                })
+        except:
+            pass
+
+        return stats
+
+# ---------- Models ----------
+class ProcessTableModel(QStandardItemModel):
+    HEADERS = ["PID", "PPID", "Name", "User", "CPU %", "Mem %", "Status", "Threads", "RSS"]
+
+    def __init__(self):
+        super().__init__(0, len(self.HEADERS))
+        self.setHorizontalHeaderLabels(self.HEADERS)
+
+    def update_processes(self, processes: List[Dict[str, Any]]):
+        """Update the process list with ALL processes"""
+        # Sort by CPU usage (highest first)
+        sorted_procs = sorted(processes, key=lambda x: x.get('cpu_percent', 0.0), reverse=True)
+        
+        self.removeRows(0, self.rowCount())
+        
+        # Add ALL processes - no limit
+        for proc in sorted_procs:
+            try:
+                name = proc.get('name', '')
+                if len(name) > 30:
+                    name = name[:27] + "..."
+                
+                username = proc.get('username', '')
+                if len(username) > 20:
+                    username = username[:17] + "..."
+                
+                row = [
+                    QStandardItem(str(proc.get('pid', ''))),
+                    QStandardItem(str(proc.get('ppid', ''))),
+                    QStandardItem(name),
+                    QStandardItem(username),
+                    QStandardItem(f"{proc.get('cpu_percent', 0.0):.1f}"),
+                    QStandardItem(f"{proc.get('memory_percent', 0.0):.2f}"),
+                    QStandardItem(proc.get('status', '')),
+                    QStandardItem(str(proc.get('num_threads', ''))),
+                    QStandardItem(human_bytes(proc.get('memory_rss', 0)))
+                ]
+                
+                # Color coding based on usage
+                cpu_percent = proc.get('cpu_percent', 0.0)
+                if cpu_percent > 70:
+                    row[4].setBackground(QColor(80, 20, 20, 150))
+                elif cpu_percent > 30:
+                    row[4].setBackground(QColor(80, 60, 20, 100))
+                
+                mem_percent = proc.get('memory_percent', 0.0)
+                if mem_percent > 20:
+                    row[5].setBackground(QColor(20, 60, 80, 100))
+                
+                # Status color coding
+                status = proc.get('status', '').lower()
+                if 'running' in status:
+                    row[6].setBackground(QColor(20, 80, 20, 100))
+                elif 'sleep' in status:
+                    row[6].setBackground(QColor(60, 60, 80, 100))
+                elif 'zombie' in status:
+                    row[6].setBackground(QColor(80, 20, 80, 100))
+                
+                # Center align numeric columns
+                for i in [0, 1, 4, 5, 6, 7]:
+                    row[i].setTextAlignment(Qt.AlignCenter)
+                
+                # Set larger font for all items
+                font = QFont()
+                font.setPointSize(10)
+                for item in row:
+                    item.setFont(font)
+                    
+                self.appendRow(row)
+                
+            except Exception as e:
+                # Skip any process that causes an error
+                continue
+        
+        print(f"Displaying {len(sorted_procs)} processes in table")  # Debug
+
+# ---------- Main Window ----------
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("EcoOS System Monitor")
+        self.resize(1200, 800)
+        
+        # Store references
+        self._sampler_thread = None
+        self._sampler_worker = None
+        self._ui_timer = None
+        
+        # History buffers
+        self.cpu_history = deque(maxlen=60)
+        self.mem_history = deque(maxlen=60)
+        
+        # Setup
+        self._setup_ui()
+        self._setup_sampler()
+        
+    def _setup_ui(self):
+        """Setup the main UI"""
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QVBoxLayout(central)
+        main_layout.setSpacing(6)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        
+        # Top info bar
+        self._setup_top_bar(main_layout)
+        
+        # Tab widget for different views
+        self.tabs = QTabWidget()
+        self._setup_overview_tab()
+        self._setup_processes_tab()
+        self._setup_disk_tab()
+        self._setup_network_tab()
+        self._setup_system_tab()
+        
+        main_layout.addWidget(self.tabs, 1)
+        
+        # Status bar
+        self._setup_status_bar()
+        
+    def _setup_top_bar(self, parent_layout):
+        """Create top info bar"""
+        top_frame = QFrame()
+        top_frame.setFrameStyle(QFrame.Panel | QFrame.Raised)
+        top_frame.setMaximumHeight(60)
+        top_layout = QHBoxLayout(top_frame)
+        top_layout.setContentsMargins(12, 8, 12, 8)
+        
+        # Quick stats
+        self.top_stats = {
+            'cpu': QLabel("CPU: --%"),
+            'mem': QLabel("Mem: --%"),
+            'temp': QLabel("Temp: --°C"),
+            'uptime': QLabel("Uptime: --"),
+            'load': QLabel("Load: --")
+        }
+        
+        for key, label in self.top_stats.items():
+            label.setStyleSheet("""
+                QLabel {
+                    color: #e0e0e0;
+                    font-size: 13px;
+                    font-weight: bold;
+                    padding: 4px 12px;
+                    background-color: #2a2a2a;
+                    border-radius: 4px;
+                    min-width: 120px;
+                }
+            """)
+            top_layout.addWidget(label)
+        
+        top_layout.addStretch()
+        
+        # Control buttons
+        refresh_btn = QPushButton("🔄 Refresh")
+        refresh_btn.clicked.connect(self._manual_refresh)
+        refresh_btn.setFixedSize(120, 35)
+        
+        settings_btn = QPushButton("⚙ Settings")
+        settings_btn.clicked.connect(self._show_settings)
+        settings_btn.setFixedSize(120, 35)
+        
+        top_layout.addWidget(refresh_btn)
+        top_layout.addWidget(settings_btn)
+        
+        parent_layout.addWidget(top_frame)
+        
+    def _setup_overview_tab(self):
+        """Setup overview tab"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(12)
+        
+        # CPU section
+        cpu_group = QGroupBox("CPU Usage")
+        cpu_layout = QGridLayout()
+        cpu_layout.setSpacing(10)
+        
+        self.cpu_progress = QProgressBar()
+        self.cpu_progress.setRange(0, 100)
+        self.cpu_progress.setTextVisible(True)
+        self.cpu_progress.setFormat("Total: %p%")
+        
+        self.cpu_freq_label = QLabel("Frequency: -- GHz")
+        self.cpu_cores_label = QLabel("Cores: --")
+        
+        cpu_layout.addWidget(QLabel("Total Usage:"), 0, 0)
+        cpu_layout.addWidget(self.cpu_progress, 0, 1, 1, 2)
+        cpu_layout.addWidget(self.cpu_freq_label, 1, 0, 1, 3)
+        cpu_layout.addWidget(self.cpu_cores_label, 2, 0, 1, 3)
+        
+        # Per-core CPU
+        self.core_widgets = []
+        core_container = QWidget()
+        core_layout = QGridLayout(core_container)
+        core_layout.setSpacing(6)
+        for i in range(16):  # Max 16 cores
+            label = QLabel(f"Core {i}:")
+            label.setStyleSheet("min-width: 60px;")
+            progress = QProgressBar()
+            progress.setRange(0, 100)
+            progress.setTextVisible(False)
+            progress.setMaximumHeight(18)
+            progress.setStyleSheet("QProgressBar { min-width: 80px; }")
+            self.core_widgets.append((label, progress))
+            
+            row = i // 4
+            col = (i % 4) * 2
+            core_layout.addWidget(label, row, col)
+            core_layout.addWidget(progress, row, col + 1)
+        
+        cpu_layout.addWidget(QLabel("Per Core:"), 3, 0)
+        cpu_layout.addWidget(core_container, 3, 1, 1, 2)
+        
+        cpu_group.setLayout(cpu_layout)
+        layout.addWidget(cpu_group)
+        
+        # Memory section
+        mem_group = QGroupBox("Memory")
+        mem_layout = QGridLayout()
+        mem_layout.setSpacing(10)
+        
+        self.mem_progress = QProgressBar()
+        self.mem_progress.setRange(0, 100)
+        self.mem_progress.setTextVisible(True)
+        
+        self.mem_details = QLabel("-- / -- GB")
+        self.swap_progress = QProgressBar()
+        self.swap_progress.setRange(0, 100)
+        self.swap_progress.setTextVisible(True)
+        
+        self.swap_details = QLabel("-- / -- GB")
+        
+        mem_layout.addWidget(QLabel("RAM:"), 0, 0)
+        mem_layout.addWidget(self.mem_progress, 0, 1)
+        mem_layout.addWidget(self.mem_details, 0, 2)
+        mem_layout.addWidget(QLabel("Swap:"), 1, 0)
+        mem_layout.addWidget(self.swap_progress, 1, 1)
+        mem_layout.addWidget(self.swap_details, 1, 2)
+        
+        mem_group.setLayout(mem_layout)
+        layout.addWidget(mem_group)
+        
+        # Disk & Network section
+        io_group = QGroupBox("I/O & System")
+        io_layout = QGridLayout()
+        io_layout.setSpacing(10)
+        
+        self.disk_io_label = QLabel("Disk I/O: -- / -- KB/s")
+        self.net_io_label = QLabel("Network: ↑-- ↓-- KB/s")
+        self.load_label = QLabel("Load Avg: --, --, --")
+        self.temp_label = QLabel("Temperature: --°C")
+        
+        io_layout.addWidget(self.disk_io_label, 0, 0)
+        io_layout.addWidget(self.net_io_label, 0, 1)
+        io_layout.addWidget(self.load_label, 1, 0)
+        io_layout.addWidget(self.temp_label, 1, 1)
+        
+        io_group.setLayout(io_layout)
+        layout.addWidget(io_group)
+        
+        layout.addStretch()
+        self.tabs.addTab(tab, "Overview")
+        
+    def _setup_processes_tab(self):
+        """Setup processes tab with larger fonts"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(10)
+        
+        # Controls
+        controls = QWidget()
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        
+        filter_label = QLabel("Filter:")
+        filter_label.setStyleSheet("font-weight: bold;")
+        
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("Filter processes by name, PID, or user...")
+        self.filter_edit.setMinimumHeight(30)
+        
+        sort_label = QLabel("Sort by:")
+        sort_label.setStyleSheet("font-weight: bold;")
+        
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems(["CPU %", "Memory %", "PID", "Name", "User", "Status"])
+        self.sort_combo.setMinimumHeight(30)
+        self.sort_combo.setStyleSheet("min-width: 120px;")
+        self.sort_combo.currentTextChanged.connect(self._sort_processes)
+        
+        self.terminate_btn = QPushButton("Terminate Process")
+        self.terminate_btn.clicked.connect(self._terminate_selected)
+        self.terminate_btn.setMinimumHeight(35)
+        
+        self.kill_btn = QPushButton("Kill Process")
+        self.kill_btn.clicked.connect(lambda: self._terminate_selected(force=True))
+        self.kill_btn.setMinimumHeight(35)
+        
+        controls_layout.addWidget(filter_label)
+        controls_layout.addWidget(self.filter_edit, 1)
+        controls_layout.addWidget(sort_label)
+        controls_layout.addWidget(self.sort_combo)
+        controls_layout.addWidget(self.terminate_btn)
+        controls_layout.addWidget(self.kill_btn)
+        
+        layout.addWidget(controls)
+        
+        # Process count and status
+        process_info_widget = QWidget()
+        process_info_layout = QHBoxLayout(process_info_widget)
+        
+        self.process_count_label = QLabel("Processes: 0")
+        self.process_count_label.setStyleSheet("font-weight: bold; color: #4cc9f0;")
+        
+        self.process_status_label = QLabel("Status: Loading...")
+        self.process_status_label.setStyleSheet("color: #a0a0a0;")
+        
+        process_info_layout.addWidget(self.process_count_label)
+        process_info_layout.addStretch()
+        process_info_layout.addWidget(self.process_status_label)
+        
+        layout.addWidget(process_info_widget)
+        
+        # Process table
+        self.proc_model = ProcessTableModel()
+        self.proc_proxy = QSortFilterProxyModel()
+        self.proc_proxy.setSourceModel(self.proc_model)
+        self.proc_proxy.setFilterKeyColumn(-1)  # Filter all columns
+        self.proc_proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        self.filter_edit.textChanged.connect(self._filter_processes)
+        
+        self.proc_view = QTableView()
+        self.proc_view.setModel(self.proc_proxy)
+        self.proc_view.setSelectionBehavior(QTableView.SelectRows)
+        self.proc_view.setSelectionMode(QTableView.SingleSelection)
+        self.proc_view.setSortingEnabled(True)
+        self.proc_view.horizontalHeader().setStretchLastSection(True)
+        self.proc_view.setAlternatingRowColors(True)
+        self.proc_view.verticalHeader().setDefaultSectionSize(30)  # Increased row height
+        self.proc_view.verticalHeader().setVisible(False)
+        
+        # Set larger font for table
+        table_font = QFont()
+        table_font.setPointSize(11)
+        self.proc_view.setFont(table_font)
+        
+        # Set larger font for headers
+        header_font = QFont()
+        header_font.setPointSize(12)
+        header_font.setBold(True)
+        self.proc_view.horizontalHeader().setFont(header_font)
+        self.proc_view.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
+        self.proc_view.horizontalHeader().setMinimumHeight(35)
+        
+        # Column widths - increased for better readability
+        self.proc_view.setColumnWidth(0, 70)   # PID
+        self.proc_view.setColumnWidth(1, 70)   # PPID
+        self.proc_view.setColumnWidth(2, 200)  # Name
+        self.proc_view.setColumnWidth(3, 120)  # User
+        self.proc_view.setColumnWidth(4, 80)   # CPU %
+        self.proc_view.setColumnWidth(5, 80)   # Mem %
+        self.proc_view.setColumnWidth(6, 100)  # Status
+        self.proc_view.setColumnWidth(7, 80)   # Threads
+        self.proc_view.setColumnWidth(8, 120)  # RSS
+        
+        # Make columns resizable
+        for i in range(self.proc_model.columnCount()):
+            self.proc_view.horizontalHeader().setSectionResizeMode(i, QHeaderView.Interactive)
+        
+        layout.addWidget(self.proc_view, 1)
+        self.tabs.addTab(tab, "Processes")
+        
+    def _setup_disk_tab(self):
+        """Setup disk information tab"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        self.disk_tree = QTreeWidget()
+        self.disk_tree.setHeaderLabels(["Mount Point", "Device", "Type", "Total", "Used", "Free", "Use %"])
+        self.disk_tree.setAlternatingRowColors(True)
+        
+        # Set larger fonts
+        font = QFont()
+        font.setPointSize(11)
+        self.disk_tree.setFont(font)
+        
+        header_font = QFont()
+        header_font.setPointSize(12)
+        header_font.setBold(True)
+        self.disk_tree.header().setFont(header_font)
+        
+        layout.addWidget(self.disk_tree, 1)
+        self.tabs.addTab(tab, "Disks")
+        
+    def _setup_network_tab(self):
+        """Setup network information tab"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        self.network_tree = QTreeWidget()
+        self.network_tree.setHeaderLabels(["Interface", "Status", "Speed", "IPv4", "IPv6", "MAC", "RX", "TX"])
+        self.network_tree.setAlternatingRowColors(True)
+        
+        # Set larger fonts
+        font = QFont()
+        font.setPointSize(11)
+        self.network_tree.setFont(font)
+        
+        header_font = QFont()
+        header_font.setPointSize(12)
+        header_font.setBold(True)
+        self.network_tree.header().setFont(header_font)
+        
+        layout.addWidget(self.network_tree, 1)
+        self.tabs.addTab(tab, "Network")
+        
+    def _setup_system_tab(self):
+        """Setup system information tab"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setSpacing(15)
+        
+        # System info sections
+        sections = [
+            ("OS Information", self._create_os_info),
+            ("Hardware", self._create_hardware_info),
+            ("Temperatures", self._create_temp_info),
+            ("Battery", self._create_battery_info),
+            ("Users", self._create_users_info)
+        ]
+        
+        for title, creator in sections:
+            group = QGroupBox(title)
+            group.setStyleSheet("font-weight: bold;")
+            group_layout = creator()
+            group.setLayout(group_layout)
+            content_layout.addWidget(group)
+        
+        content_layout.addStretch()
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+        self.tabs.addTab(tab, "System")
+        
+    def _create_os_info(self):
+        """Create OS information section"""
+        layout = QFormLayout()
+        layout.setSpacing(10)
+        self.os_info_labels = {}
+        fields = ["os", "hostname", "kernel", "architecture", "platform"]
+        
+        for field in fields:
+            label = QLabel("--")
+            label.setStyleSheet("color: #b0b0b0;")
+            label.setWordWrap(True)
+            self.os_info_labels[field] = label
+            field_label = QLabel(field.capitalize() + ":")
+            field_label.setStyleSheet("font-weight: bold;")
+            layout.addRow(field_label, label)
+        
+        return layout
+        
+    def _create_hardware_info(self):
+        """Create hardware information section"""
+        layout = QFormLayout()
+        layout.setSpacing(10)
+        self.hw_info_labels = {}
+        fields = ["cpu_model", "cpu_cores", "cpu_threads", "memory", "swap"]
+        
+        for field in fields:
+            label = QLabel("--")
+            label.setStyleSheet("color: #b0b0b0;")
+            label.setWordWrap(True)
+            self.hw_info_labels[field] = label
+            field_label = QLabel(field.replace('_', ' ').title() + ":")
+            field_label.setStyleSheet("font-weight: bold;")
+            layout.addRow(field_label, label)
+        
+        return layout
+        
+    def _create_temp_info(self):
+        """Create temperature information section"""
+        layout = QVBoxLayout()
+        self.temp_labels = QLabel("No temperature sensors found")
+        self.temp_labels.setStyleSheet("color: #b0b0b0;")
+        self.temp_labels.setWordWrap(True)
+        layout.addWidget(self.temp_labels)
+        return layout
+        
+    def _create_battery_info(self):
+        """Create battery information section"""
+        layout = QFormLayout()
+        layout.setSpacing(10)
+        self.battery_labels = {
+            'percent': QLabel("--"),
+            'status': QLabel("--"),
+            'time_left': QLabel("--")
+        }
+        
+        for key, label in self.battery_labels.items():
+            label.setStyleSheet("color: #b0b0b0;")
+            field_label = QLabel(key.replace('_', ' ').title() + ":")
+            field_label.setStyleSheet("font-weight: bold;")
+            layout.addRow(field_label, label)
+        
+        return layout
+        
+    def _create_users_info(self):
+        """Create users information section"""
+        layout = QVBoxLayout()
+        self.users_text = QTextEdit()
+        self.users_text.setReadOnly(True)
+        self.users_text.setMaximumHeight(120)
+        layout.addWidget(self.users_text)
+        return layout
+        
+    def _setup_status_bar(self):
+        """Setup the status bar"""
+        status = QStatusBar()
+        self.setStatusBar(status)
+        
+        self.status_msg = QLabel("Ready")
+        self.status_time = QLabel("--:--:--")
+        self.status_time.setStyleSheet("font-weight: bold;")
+        
+        status.addWidget(self.status_msg, 1)
+        status.addPermanentWidget(self.status_time)
+        
+    def _setup_sampler(self):
+        """Setup the background sampler"""
+        self._sampler_worker = SamplerWorker(interval_ms=SAMPLE_INTERVAL_MS)
+        self._sampler_thread = QThread()
+        
+        self._sampler_worker.moveToThread(self._sampler_thread)
+        self._sampler_thread.started.connect(self._sampler_worker.start)
+        self._sampler_worker.stats_ready.connect(self._on_stats)
+        self._sampler_worker.error.connect(self._on_sampler_error)
+        
+        self._sampler_thread.start()
+        
+        # UI update timer
+        self._ui_timer = QTimer()
+        self._ui_timer.timeout.connect(self._update_ui)
+        self._ui_timer.start(UPDATE_INTERVAL_MS)
+
+
+    def _update_ui(self):
+        """Update UI elements that need frequent updates"""
+        current_time = datetime.now().strftime("%H:%M:%S")
+        self.status_time.setText(current_time)
+
+    def _on_stats(self, stats: dict):
+        """Handle new stats from sampler"""
+        try:
+            # Update top bar
+            self._update_top_bar(stats)
+            
+            # Update overview tab
+            self._update_overview_tab(stats)
+            
+            # Update processes tab
+            self._update_processes_tab(stats)
+            
+            # Update disk tab
+            self._update_disk_tab(stats)
+            
+            # Update network tab
+            self._update_network_tab(stats)
+            
+            # Update system tab
+            self._update_system_tab(stats)
+            
+            self.status_msg.setText("Updated: " + datetime.now().strftime("%H:%M:%S"))
+            
+        except Exception as e:
+            self.status_msg.setText(f"Error updating UI: {str(e)}")
+            print(f"UI update error: {e}")
+
+    def _update_top_bar(self, stats: dict):
+        """Update top bar widgets"""
+        # CPU
+        cpu_percent = stats.get('cpu_percent', 0)
+        self.top_stats['cpu'].setText(f"CPU: {cpu_percent:.1f}%")
+        
+        # Memory
+        mem_percent = stats.get('mem', {}).get('percent', 0)
+        self.top_stats['mem'].setText(f"Mem: {mem_percent:.1f}%")
+        
+        # Temperature
+        temps = stats.get('temperatures', {})
+        if temps:
+            temp_val = list(temps.values())[0] if temps else 0
+            self.top_stats['temp'].setText(f"Temp: {temp_val:.1f}°C")
+        else:
+            self.top_stats['temp'].setText("Temp: --°C")
+        
+        # Uptime
+        uptime = stats.get('uptime_seconds', 0)
+        self.top_stats['uptime'].setText(f"Uptime: {format_uptime(uptime)}")
+        
+        # Load average
+        load = stats.get('load_avg', (0, 0, 0))
+        self.top_stats['load'].setText(f"Load: {load[0]:.2f}, {load[1]:.2f}, {load[2]:.2f}")
+
+    def _update_overview_tab(self, stats: dict):
+        """Update overview tab widgets"""
+        # CPU
+        cpu_percent = stats.get('cpu_percent', 0)
+        self.cpu_progress.setValue(int(cpu_percent))
+        
+        # CPU frequency
+        cpu_freq = stats.get('cpu_freq')
+        if cpu_freq and cpu_freq.current:
+            freq_ghz = cpu_freq.current / 1000
+            self.cpu_freq_label.setText(f"Frequency: {freq_ghz:.2f} GHz")
+        else:
+            self.cpu_freq_label.setText("Frequency: -- GHz")
+        
+        # CPU cores
+        cpu_count = stats.get('cpu_count', 0)
+        self.cpu_cores_label.setText(f"Cores: {cpu_count}")
+        
+        # Per-core CPU usage
+        per_core = stats.get('cpu_per_core', [])
+        for i, (label_widget, progress_widget) in enumerate(self.core_widgets):
+            if i < len(per_core):
+                core_percent = per_core[i]
+                label_widget.setText(f"Core {i}: {core_percent:.1f}%")
+                progress_widget.setValue(int(core_percent))
+                label_widget.setVisible(True)
+                progress_widget.setVisible(True)
+            else:
+                label_widget.setVisible(False)
+                progress_widget.setVisible(False)
+        
+        # Memory
+        mem = stats.get('mem', {})
+        mem_percent = mem.get('percent', 0)
+        mem_total = mem.get('total', 0)
+        mem_used = mem.get('used', 0)
+        
+        self.mem_progress.setValue(int(mem_percent))
+        self.mem_progress.setFormat(f"RAM: {mem_percent:.1f}%")
+        self.mem_details.setText(f"{human_bytes(mem_used)} / {human_bytes(mem_total)}")
+        
+        # Swap
+        swap = stats.get('swap', {})
+        swap_percent = swap.get('percent', 0)
+        swap_total = swap.get('total', 0)
+        swap_used = swap.get('used', 0)
+        
+        if swap_total > 0:
+            self.swap_progress.setValue(int(swap_percent))
+            self.swap_progress.setFormat(f"Swap: {swap_percent:.1f}%")
+            self.swap_details.setText(f"{human_bytes(swap_used)} / {human_bytes(swap_total)}")
+        else:
+            self.swap_progress.setValue(0)
+            self.swap_progress.setFormat("Swap: N/A")
+            self.swap_details.setText("-- / -- GB")
+        
+        # Disk I/O
+        disk_io = stats.get('disk_io', {})
+        read_kbps = disk_io.get('read', 0) / 1024
+        write_kbps = disk_io.get('write', 0) / 1024
+        self.disk_io_label.setText(f"Disk I/O: Read: {read_kbps:.1f} KB/s, Write: {write_kbps:.1f} KB/s")
+        
+        # Network I/O (aggregate)
+        net_stats = stats.get('net', {})
+        total_up = sum(iface.get('up_bps', 0) for iface in net_stats.values()) / 1024
+        total_down = sum(iface.get('down_bps', 0) for iface in net_stats.values()) / 1024
+        self.net_io_label.setText(f"Network: ↑{total_up:.1f} ↓{total_down:.1f} KB/s")
+        
+        # Load average
+        load = stats.get('load_avg', (0, 0, 0))
+        self.load_label.setText(f"Load Avg: {load[0]:.2f}, {load[1]:.2f}, {load[2]:.2f}")
+        
+        # Temperature (first available)
+        temps = stats.get('temperatures', {})
+        if temps:
+            temp_val = list(temps.values())[0] if temps else 0
+            self.temp_label.setText(f"Temperature: {temp_val:.1f}°C")
+        else:
+            self.temp_label.setText("Temperature: --°C")
+
+    def _update_processes_tab(self, stats: dict):
+        """Update processes tab"""
+        processes = stats.get('processes', [])
+        
+        # Update model
+        self.proc_model.update_processes(processes)
+        
+        # Update process count
+        process_count = len(processes)
+        filtered_count = self.proc_proxy.rowCount()
+        
+        if process_count > 0:
+            self.process_count_label.setText(f"Processes: {filtered_count}/{process_count}")
+            self.process_status_label.setText("✅ All processes loaded")
+        else:
+            self.process_count_label.setText("Processes: 0")
+            self.process_status_label.setText("⚠️ No processes found")
+
+    def _update_disk_tab(self, stats: dict):
+        """Update disk information tab"""
+        self.disk_tree.clear()
+        disk_usage = stats.get('disk_usage', [])
+        
+        for disk in disk_usage:
+            total_gb = disk.get('total', 0) / (1024**3)
+            used_gb = disk.get('used', 0) / (1024**3)
+            free_gb = disk.get('free', 0) / (1024**3)
+            percent = disk.get('percent', 0)
+            
+            item = QTreeWidgetItem(self.disk_tree)
+            item.setText(0, disk.get('mountpoint', 'Unknown'))
+            item.setText(1, disk.get('device', 'Unknown'))
+            item.setText(2, disk.get('fstype', 'Unknown'))
+            item.setText(3, f"{total_gb:.1f} GB")
+            item.setText(4, f"{used_gb:.1f} GB")
+            item.setText(5, f"{free_gb:.1f} GB")
+            item.setText(6, f"{percent:.1f}%")
+            
+            # Color coding based on usage
+            if percent > 90:
+                for i in range(7):
+                    item.setForeground(i, QColor(255, 100, 100))
+            elif percent > 80:
+                for i in range(7):
+                    item.setForeground(i, QColor(255, 200, 100))
+        
+        # Resize columns to content
+        for i in range(7):
+            self.disk_tree.resizeColumnToContents(i)
+
+    def _update_network_tab(self, stats: dict):
+        """Update network information tab"""
+        self.network_tree.clear()
+        network_interfaces = stats.get('network_interfaces', {})
+        net_stats = stats.get('net', {})
+        
+        for iface, info in network_interfaces.items():
+            item = QTreeWidgetItem(self.network_tree)
+            
+            # Basic info
+            item.setText(0, iface)
+            item.setText(1, "Up" if info.get('is_up', False) else "Down")
+            speed = info.get('speed', 0)
+            item.setText(2, f"{speed} Mbps" if speed > 0 else "N/A")
+            
+            # Addresses
+            addresses = info.get('addresses', [])
+            ipv4 = ""
+            ipv6 = ""
+            mac = ""
+            
+            for addr in addresses:
+                if addr.startswith('IPv4:'):
+                    ipv4 = addr.replace('IPv4:', '').strip()
+                elif addr.startswith('IPv6:'):
+                    ipv6 = addr.replace('IPv6:', '').strip()
+                elif addr.startswith('MAC:'):
+                    mac = addr.replace('MAC:', '').strip()
+            
+            item.setText(3, ipv4 or "N/A")
+            item.setText(4, ipv6 or "N/A")
+            item.setText(5, mac or "N/A")
+            
+            # Network stats
+            stats_info = net_stats.get(iface, {})
+            rx_kbps = stats_info.get('down_bps', 0) / 1024
+            tx_kbps = stats_info.get('up_bps', 0) / 1024
+            
+            item.setText(6, f"{rx_kbps:.1f} KB/s")
+            item.setText(7, f"{tx_kbps:.1f} KB/s")
+            
+            # Color coding
+            if not info.get('is_up', False):
+                for i in range(8):
+                    item.setForeground(i, QColor(150, 150, 150))
+            elif rx_kbps > 1000 or tx_kbps > 1000:  # High traffic
+                item.setForeground(6, QColor(100, 255, 100))
+                item.setForeground(7, QColor(100, 255, 100))
+        
+        # Resize columns
+        for i in range(8):
+            self.network_tree.resizeColumnToContents(i)
+
+    def _update_system_tab(self, stats: dict):
+        """Update system information tab"""
+        # OS information
+        if not hasattr(self, '_os_info_initialized'):
+            self._os_info_initialized = False
+        
+        if not self._os_info_initialized:
+            self.os_info_labels['os'].setText(f"{platform.system()} {platform.release()}")
+            self.os_info_labels['hostname'].setText(platform.node())
+            self.os_info_labels['kernel'].setText(platform.version())
+            self.os_info_labels['architecture'].setText(platform.machine())
+            self.os_info_labels['platform'].setText(f"{platform.system()} {platform.version()}")
+            self._os_info_initialized = True
+        
+        # Hardware information
+        cpu_count = stats.get('cpu_count', 0)
+        self.hw_info_labels['cpu_cores'].setText(f"{cpu_count} cores")
+        
+        # Try to get CPU model
+        try:
+            import subprocess
+            if platform.system() == "Linux":
+                result = subprocess.run(['cat', '/proc/cpuinfo'], capture_output=True, text=True)
+                for line in result.stdout.split('\n'):
+                    if 'model name' in line.lower():
+                        model = line.split(':')[1].strip()
+                        self.hw_info_labels['cpu_model'].setText(model)
+                        break
+            elif platform.system() == "Windows":
+                result = subprocess.run(['wmic', 'cpu', 'get', 'name'], capture_output=True, text=True)
+                lines = result.stdout.strip().split('\n')
+                if len(lines) > 1:
+                    self.hw_info_labels['cpu_model'].setText(lines[1].strip())
+        except:
+            self.hw_info_labels['cpu_model'].setText("Unknown")
+        
+        # Memory info
+        mem = stats.get('mem', {})
+        mem_total = mem.get('total', 0)
+        self.hw_info_labels['memory'].setText(human_bytes(mem_total))
+        
+        # Swap info
+        swap = stats.get('swap', {})
+        swap_total = swap.get('total', 0)
+        if swap_total > 0:
+            self.hw_info_labels['swap'].setText(human_bytes(swap_total))
+        else:
+            self.hw_info_labels['swap'].setText("No swap")
+        
+        # Temperatures
+        temps = stats.get('temperatures', {})
+        if temps:
+            temp_text = ""
+            for name, temp in temps.items():
+                temp_text += f"{name}: {temp:.1f}°C\n"
+            self.temp_labels.setText(temp_text.strip())
+        else:
+            self.temp_labels.setText("No temperature sensors found")
+        
+        # Battery
+        battery = stats.get('battery', {})
+        if battery:
+            percent = battery.get('percent', 0)
+            plugged = battery.get('plugged', False)
+            time_left = battery.get('time_left')
+            
+            self.battery_labels['percent'].setText(f"{percent:.1f}%")
+            self.battery_labels['status'].setText("Plugged" if plugged else "On battery")
+            
+            if time_left:
+                time_str = format_time(time_left)
+                self.battery_labels['time_left'].setText(f"{time_str}")
+            else:
+                self.battery_labels['time_left'].setText("Calculating..." if not plugged else "N/A")
+        else:
+            for label in self.battery_labels.values():
+                label.setText("No battery")
+        
+        # Users
+        users = stats.get('users', [])
+        if users:
+            user_text = ""
+            for user in users:
+                name = user.get('name', 'Unknown')
+                terminal = user.get('terminal', '')
+                host = user.get('host', '')
+                started = datetime.fromtimestamp(user.get('started', 0)).strftime("%H:%M")
+                user_text += f"{name}@{host} on {terminal} (since {started})\n"
+            self.users_text.setText(user_text.strip())
+        else:
+            self.users_text.setText("No active users")
+
+    def _filter_processes(self):
+        """Filter processes based on search text"""
+        text = self.filter_edit.text()
+        self.proc_proxy.setFilterFixedString(text)
+
+    def _sort_processes(self):
+        """Sort processes based on selected column"""
+        sort_text = self.sort_combo.currentText()
+        column_map = {
+            "CPU %": 4,
+            "Memory %": 5,
+            "PID": 0,
+            "Name": 2,
+            "User": 3,
+            "Status": 6
+        }
+        
+        if sort_text in column_map:
+            column = column_map[sort_text]
+            self.proc_view.sortByColumn(column, Qt.DescendingOrder)
+
+    def _terminate_selected(self, force=False):
+        """Terminate or kill selected process"""
+        selection = self.proc_view.selectionModel()
+        if not selection.hasSelection():
+            QMessageBox.warning(self, "No Selection", "Please select a process first.")
+            return
+        
+        index = selection.selectedRows()[0]
+        proxy_index = self.proc_proxy.mapToSource(index)
+        pid_item = self.proc_model.item(proxy_index.row(), 0)
+        pid = int(pid_item.text())
+        name_item = self.proc_model.item(proxy_index.row(), 2)
+        name = name_item.text()
+        
+        action = "kill" if force else "terminate"
+        msg = f"Are you sure you want to {action} process '{name}' (PID: {pid})?"
+        
+        reply = QMessageBox.question(
+            self, 
+            f"Confirm {action.capitalize()}", 
+            msg,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                p = psutil.Process(pid)
+                if force:
+                    p.kill()
+                else:
+                    p.terminate()
+                self.status_msg.setText(f"Process {pid} terminated successfully.")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to {action} process: {str(e)}")
+
+    def _manual_refresh(self):
+        """Manually trigger a refresh"""
+        if self._sampler_worker:
+            try:
+                stats = self._sampler_worker.sample()
+                self._on_stats(stats)
+                self.status_msg.setText("Manual refresh completed")
+            except Exception as e:
+                self.status_msg.setText(f"Refresh failed: {str(e)}")
+
+    def _show_settings(self):
+        """Show settings dialog"""
+        QMessageBox.information(
+            self, 
+            "Settings", 
+            "Settings dialog not implemented yet.\n"
+            "Current configuration:\n"
+            f"• Update interval: {UPDATE_INTERVAL_MS}ms\n"
+            f"• Sample interval: {SAMPLE_INTERVAL_MS}ms\n"
+            f"• Dark theme: Enabled\n"
+            f"• Large fonts: Enabled"
+        )
+
+    def _on_sampler_error(self, error_msg):
+        """Handle sampler errors"""
+        self.status_msg.setText(f"Sampler error: {error_msg}")
+        print(f"Sampler error: {error_msg}")
+
+    def closeEvent(self, event):
+        """Cleanup on close"""
+        if self._sampler_worker:
+            self._sampler_worker.stop()
+        
+        if self._sampler_thread:
+            self._sampler_thread.quit()
+            self._sampler_thread.wait(2000)
+        
+        if self._ui_timer:
+            self._ui_timer.stop()
+        
+        event.accept()
+
+def apply_dark_theme(app):
+    """Apply a dark theme to the application"""
+    app.setStyle("Fusion")
+    
+    dark_palette = QPalette()
+    
+    # Base colors
+    dark_palette.setColor(QPalette.Window, QColor(45, 45, 45))
+    dark_palette.setColor(QPalette.WindowText, QColor(220, 220, 220))
+    dark_palette.setColor(QPalette.Base, QColor(35, 35, 35))
+    dark_palette.setColor(QPalette.AlternateBase, QColor(50, 50, 50))
+    dark_palette.setColor(QPalette.ToolTipBase, QColor(60, 60, 60))
+    dark_palette.setColor(QPalette.ToolTipText, QColor(220, 220, 220))
+    dark_palette.setColor(QPalette.Text, QColor(220, 220, 220))
+    dark_palette.setColor(QPalette.Button, QColor(60, 60, 60))
+    dark_palette.setColor(QPalette.ButtonText, QColor(220, 220, 220))
+    dark_palette.setColor(QPalette.BrightText, QColor(255, 255, 255))
+    dark_palette.setColor(QPalette.Link, QColor(42, 130, 218))
+    dark_palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
+    dark_palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
+    
+    # Disabled colors
+    dark_palette.setColor(QPalette.Disabled, QPalette.WindowText, QColor(127, 127, 127))
+    dark_palette.setColor(QPalette.Disabled, QPalette.Text, QColor(127, 127, 127))
+    dark_palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(127, 127, 127))
+    dark_palette.setColor(QPalette.Disabled, QPalette.Highlight, QColor(80, 80, 80))
+    dark_palette.setColor(QPalette.Disabled, QPalette.HighlightedText, QColor(127, 127, 127))
+    
+    app.setPalette(dark_palette)
+    
+    # Style sheet for additional dark theme styling
+    app.setStyleSheet("""
+        QMainWindow, QDialog {
+            background-color: #2d2d2d;
+        }
+        QGroupBox {
+            color: #e0e0e0;
+            border: 2px solid #555;
+            border-radius: 5px;
+            margin-top: 10px;
+            padding-top: 10px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 5px 0 5px;
+        }
+        QPushButton {
+            background-color: #3a3a3a;
+            border: 1px solid #555;
+            border-radius: 4px;
+            padding: 8px;
+            color: #e0e0e0;
+        }
+        QPushButton:hover {
+            background-color: #4a4a4a;
+            border: 1px solid #666;
+        }
+        QPushButton:pressed {
+            background-color: #2a2a2a;
+        }
+        QPushButton:disabled {
+            background-color: #2a2a2a;
+            color: #777;
+        }
+        QLineEdit, QComboBox {
+            background-color: #3a3a3a;
+            border: 1px solid #555;
+            border-radius: 4px;
+            padding: 6px;
+            color: #e0e0e0;
+            selection-background-color: #2a82da;
+        }
+        QProgressBar {
+            border: 1px solid #555;
+            border-radius: 4px;
+            background-color: #2a2a2a;
+            text-align: center;
+        }
+        QProgressBar::chunk {
+            background-color: #2a82da;
+            border-radius: 3px;
+        }
+        QTableView, QTreeWidget {
+            background-color: #2a2a2a;
+            alternate-background-color: #252525;
+            selection-background-color: #2a82da;
+            selection-color: white;
+            gridline-color: #444;
+        }
+        QHeaderView::section {
+            background-color: #3a3a3a;
+            color: #e0e0e0;
+            padding: 6px;
+            border: 1px solid #555;
+        }
+        QTabWidget::pane {
+            border: 1px solid #555;
+            background-color: #2d2d2d;
+        }
+        QTabBar::tab {
+            background-color: #3a3a3a;
+            color: #b0b0b0;
+            padding: 8px 16px;
+            margin-right: 2px;
+        }
+        QTabBar::tab:selected {
+            background-color: #2a82da;
+            color: white;
+        }
+        QTabBar::tab:hover:!selected {
+            background-color: #4a4a4a;
+        }
+        QStatusBar {
+            background-color: #2a2a2a;
+            color: #b0b0b0;
+        }
+        QScrollBar:vertical {
+            border: none;
+            background-color: #2a2a2a;
+            width: 12px;
+            margin: 0px;
+        }
+        QScrollBar::handle:vertical {
+            background-color: #555;
+            min-height: 20px;
+            border-radius: 6px;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            border: none;
+            background: none;
+        }
+        QTextEdit {
+            background-color: #2a2a2a;
+            color: #e0e0e0;
+            border: 1px solid #555;
+            border-radius: 4px;
+        }
+    """)
+
+def main():
+    """Main entry point"""
+    # Check for required dependencies
+    try:
+        import psutil
+        from PyQt5 import QtCore, QtGui, QtWidgets
+    except ImportError as e:
+        print(f"Missing dependency: {e}")
+        print("Please install required packages:")
+        print("  pip install psutil pyqt5")
+        sys.exit(1)
+    
+    # Create application
+    app = QApplication(sys.argv)
+    app.setApplicationName("EcoOS System Monitor")
+    
+    # Set larger default font
+    default_font = QFont()
+    default_font.setPointSize(11)
+    app.setFont(default_font)
+    
+    # Apply dark theme
+    apply_dark_theme(app)
+    
+    # Create and show main window
+    window = MainWindow()
+    window.show()
+    
+    # Start the application
+    sys.exit(app.exec_())
+
+if __name__ == "__main__":
+    main()

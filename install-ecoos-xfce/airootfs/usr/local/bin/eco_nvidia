@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+"""
+Arch NVIDIA Driver Installer (PyQt6) — Intelligent + Fixed
+
+- Fully unattended (--noconfirm)
+- Correctly writes /etc/modprobe.d/nvidia-drm.conf
+- DKMS + linux-zen friendly
+- Scrollable UI (15" laptops safe)
+"""
+
+from __future__ import annotations
+
+import shlex
+import subprocess
+from dataclasses import dataclass
+from typing import List, Optional, Tuple, Dict
+
+from PyQt6.QtCore import Qt, QProcess, QTimer, QSettings
+from PyQt6.QtGui import QFont
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QTextEdit, QGroupBox, QRadioButton,
+    QCheckBox, QComboBox, QGridLayout, QFrame, QScrollArea,
+    QSizePolicy
+)
+
+# -------------------------
+# Helpers
+# -------------------------
+
+def run_cmd(cmd: List[str]) -> Tuple[int, str, str]:
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        return p.returncode, (p.stdout or "").strip(), (p.stderr or "").strip()
+    except Exception as e:
+        return 1, "", str(e)
+
+def has_cmd(name: str) -> bool:
+    return run_cmd(["bash", "-lc", f"command -v {name} >/dev/null 2>&1"])[0] == 0
+
+def pacman_installed(pkg: str) -> bool:
+    return run_cmd(["pacman", "-Q", pkg])[0] == 0
+
+def list_installed_kernels() -> List[str]:
+    return [k for k in ["linux", "linux-lts", "linux-zen", "linux-hardened"] if pacman_installed(k)]
+
+def running_kernel_release() -> str:
+    return run_cmd(["uname", "-r"])[1]
+
+def running_kernel_guess_pkg(krel: str) -> str:
+    k = krel.lower()
+    if "zen" in k: return "linux-zen"
+    if "lts" in k: return "linux-lts"
+    if "hardened" in k: return "linux-hardened"
+    if "arch" in k: return "linux"
+    return "custom"
+
+def kernel_headers_pkg(pkg: str) -> Optional[str]:
+    return {
+        "linux": "linux-headers",
+        "linux-lts": "linux-lts-headers",
+        "linux-zen": "linux-zen-headers",
+        "linux-hardened": "linux-hardened-headers",
+    }.get(pkg)
+
+def detect_nvidia_gpus() -> List[str]:
+    if not has_cmd("lspci"):
+        return []
+    rc, out, _ = run_cmd(["bash", "-lc", "lspci -nnk | grep -i nvidia"])
+    return out.splitlines() if rc == 0 else []
+
+def lsmod_has(module: str) -> bool:
+    rc, out, _ = run_cmd(["bash", "-lc", "lsmod | awk '{print $1}'"])
+    return module in out.splitlines() if rc == 0 else False
+
+def recommended_driver(kernel_guess: str, kernels: List[str]) -> str:
+    if kernel_guess == "custom": return "nvidia-dkms"
+    if len(kernels) >= 2: return "nvidia-dkms"
+    if kernel_guess in ("linux-zen", "linux-hardened"): return "nvidia-dkms"
+    return "nvidia"
+
+# -------------------------
+# Data
+# -------------------------
+
+@dataclass
+class SystemInfo:
+    gpus: List[str]
+    kernel_release: str
+    kernel_guess: str
+    installed_kernels: List[str]
+    recommendation: str
+    nouveau_loaded: bool
+
+# -------------------------
+# Main Window
+# -------------------------
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.settings = QSettings("EcoTools", "NvidiaInstaller")
+        self.proc: Optional[QProcess] = None
+        self.sysinfo: Optional[SystemInfo] = None
+
+        self.setWindowTitle("Arch NVIDIA Driver Installer")
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        container = QWidget()
+        scroll.setWidget(container)
+        self.setCentralWidget(scroll)
+
+        layout = QVBoxLayout(container)
+
+        title = QLabel("NVIDIA Driver Installer for Arch Linux")
+        title.setFont(QFont("", 15, QFont.Weight.Bold))
+        layout.addWidget(title)
+
+        layout.addWidget(QLabel("Intelligent, unattended installer (--noconfirm)"))
+
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(line)
+
+        # ---- Detection ----
+        self.lbl_gpu = QLabel("GPU: not scanned")
+        self.lbl_kernel = QLabel("Kernel: not scanned")
+        self.lbl_reco = QLabel("Recommendation: not scanned")
+        self.lbl_warn = QLabel("")
+        self.lbl_warn.setWordWrap(True)
+        self.lbl_warn.setStyleSheet("color: #9a6b00;")
+
+        self.btn_scan = QPushButton("Scan System")
+        self.btn_scan.clicked.connect(self.scan_system)
+
+        dg = QGridLayout()
+        dg.addWidget(self.lbl_gpu, 0, 0, 1, 3)
+        dg.addWidget(self.lbl_kernel, 1, 0, 1, 3)
+        dg.addWidget(self.lbl_reco, 2, 0, 1, 3)
+        dg.addWidget(self.lbl_warn, 3, 0, 1, 4)
+        dg.addWidget(self.btn_scan, 0, 3, 2, 1)
+
+        box = QGroupBox("System Detection")
+        box.setLayout(dg)
+        layout.addWidget(box)
+
+        # ---- Options ----
+        self.rb_nvidia = QRadioButton("nvidia (prebuilt)")
+        self.rb_dkms = QRadioButton("nvidia-dkms (recommended for zen/custom)")
+        self.rb_nvidia.setChecked(True)
+
+        self.cb_headers = QCheckBox("Install kernel headers")
+        self.cb_headers.setChecked(True)
+
+        self.cb_drm = QCheckBox("Enable DRM modeset (fix tearing)")
+        self.cb_drm.setChecked(True)
+
+        self.cb_mkinit = QCheckBox("Run mkinitcpio -P")
+        self.cb_mkinit.setChecked(True)
+
+        self.cb_dry = QCheckBox("Dry run (no changes)")
+        self.cb_dry.setChecked(False)
+
+        og = QGridLayout()
+        og.addWidget(self.rb_nvidia, 0, 0)
+        og.addWidget(self.rb_dkms, 1, 0)
+        og.addWidget(self.cb_headers, 2, 0)
+        og.addWidget(self.cb_drm, 3, 0)
+        og.addWidget(self.cb_mkinit, 4, 0)
+        og.addWidget(self.cb_dry, 5, 0)
+
+        opt = QGroupBox("Options")
+        opt.setLayout(og)
+        layout.addWidget(opt)
+
+        # ---- Actions ----
+        self.btn_install = QPushButton("Install")
+        self.btn_install.clicked.connect(self.install)
+        self.btn_install.setEnabled(False)
+
+        self.btn_stop = QPushButton("Stop")
+        self.btn_stop.clicked.connect(self.stop)
+        self.btn_stop.setEnabled(False)
+
+        act = QHBoxLayout()
+        act.addWidget(self.btn_install)
+        act.addWidget(self.btn_stop)
+        act.addStretch()
+        layout.addLayout(act)
+
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
+        layout.addWidget(self.log, 1)
+
+        self.restore_or_autosize()
+        QTimer.singleShot(200, self.scan_system)
+
+    # -------------------------
+
+    def restore_or_autosize(self):
+        size = self.settings.value("size")
+        if size:
+            self.resize(size)
+            return
+        screen = QApplication.primaryScreen()
+        g = screen.availableGeometry()
+        self.resize(int(g.width() * 0.92), int(g.height() * 0.88))
+
+    def closeEvent(self, e):
+        self.settings.setValue("size", self.size())
+        super().closeEvent(e)
+
+    def log_write(self, txt: str):
+        self.log.append(txt)
+
+    # -------------------------
+    # Detection
+    # -------------------------
+
+    def scan_system(self):
+        gpus = detect_nvidia_gpus()
+        krel = running_kernel_release()
+        kguess = running_kernel_guess_pkg(krel)
+        kernels = list_installed_kernels()
+        reco = recommended_driver(kguess, kernels)
+        nouveau = lsmod_has("nouveau")
+
+        self.sysinfo = SystemInfo(gpus, krel, kguess, kernels, reco, nouveau)
+
+        self.lbl_gpu.setText("GPU: " + (" | ".join(gpus) if gpus else "NONE DETECTED"))
+        self.lbl_kernel.setText(f"Kernel: {krel} ({kguess})")
+        self.lbl_reco.setText(f"Recommendation: {reco}")
+
+        if reco == "nvidia-dkms":
+            self.rb_dkms.setChecked(True)
+        else:
+            self.rb_nvidia.setChecked(True)
+
+        warns = []
+        if not gpus:
+            warns.append("No NVIDIA GPU detected (installer will still run).")
+        if nouveau:
+            warns.append("nouveau is loaded and may conflict with NVIDIA.")
+
+        self.lbl_warn.setText("Warnings: " + (" • ".join(warns) if warns else "(none)"))
+
+        self.btn_install.setEnabled(True)
+
+    # -------------------------
+    # Install
+    # -------------------------
+
+    def install(self):
+        if not self.sysinfo:
+            return
+
+        pkgs = ["nvidia-utils"]
+        if self.rb_dkms.isChecked():
+            pkgs += ["nvidia-dkms", "dkms"]
+        else:
+            pkgs += ["nvidia"]
+
+        if self.cb_headers.isChecked():
+            hdr = kernel_headers_pkg(self.sysinfo.kernel_guess)
+            if hdr:
+                pkgs.append(hdr)
+
+        script = [
+            "set -e",
+            "pacman -Sy --noconfirm",
+            "pacman -S --needed --noconfirm " + " ".join(shlex.quote(p) for p in pkgs),
+        ]
+
+        if self.cb_drm.isChecked():
+            script.append("install -d /etc/modprobe.d")
+            script.append("echo 'options nvidia_drm modeset=1' | tee /etc/modprobe.d/nvidia-drm.conf >/dev/null")
+
+        if self.cb_mkinit.isChecked():
+            script.append("mkinitcpio -P")
+
+        script.append("echo 'Done. Reboot recommended.'")
+        script_text = "\n".join(script)
+
+        self.log_write("=== INSTALL SCRIPT ===")
+        self.log_write(script_text)
+        self.log_write("======================")
+
+        if self.cb_dry.isChecked():
+            self.log_write("DRY RUN: not executing.")
+            return
+
+        self.proc = QProcess(self)
+        self.proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self.proc.readyReadStandardOutput.connect(
+            lambda: self.log_write(bytes(self.proc.readAllStandardOutput()).decode(errors="replace"))
+        )
+        self.proc.finished.connect(lambda c, _: self.log_write(f"Exit code: {c}"))
+
+        self.btn_install.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+
+        self.proc.start("sudo", ["bash", "-lc", script_text])
+
+    def stop(self):
+        if self.proc:
+            self.proc.kill()
+            self.log_write("Process stopped.")
+        self.btn_install.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+
+# -------------------------
+
+def main():
+    app = QApplication([])
+    w = MainWindow()
+    w.show()
+    app.exec()
+
+if __name__ == "__main__":
+    main()

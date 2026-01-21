@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=File Manager
+Comment=Browse the file system
+Exec=python /usr/local/bin/fm7
+Icon=org.xfce.filemanager
+Path=
+Terminal=false
+StartupNotify=true
